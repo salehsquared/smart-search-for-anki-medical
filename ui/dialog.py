@@ -9,6 +9,7 @@ from __future__ import annotations
 from html import escape
 import json
 from pathlib import Path
+import platform
 import sys
 from typing import Optional, Sequence
 
@@ -24,6 +25,7 @@ from .contracts import (
     SemanticStatus,
 )
 from .results import ResultsView
+from .theme import chrome_colors, semantic_icon_pixmap
 from .widgets import (  # Qt shim + custom widgets
     AboutPanel,
     ChipBar,
@@ -35,6 +37,7 @@ from .widgets import (  # Qt shim + custom widgets
     QDialog,
     QDialogButtonBox,
     QEvent,
+    QFrame,
     QFormLayout,
     QHBoxLayout,
     QKeySequence,
@@ -63,6 +66,15 @@ _PAGE_RESULTS = 1
 _PAGE_MESSAGE = 2
 
 _PRIMARY_KEY = "⌘" if sys.platform == "darwin" else "Ctrl"
+
+
+def _semantic_availability_text() -> str:
+    """Truthful platform availability line for the semantic setup card."""
+
+    if sys.platform == "darwin" and platform.machine() in {"arm64", "aarch64"}:
+        return "Available on macOS 14+ with Apple silicon"
+    return "Semantic Search requires macOS 14+ with Apple silicon"
+
 
 HELP_HTML = f"""\
 <h3>Search your collection</h3>
@@ -139,24 +151,30 @@ class _SettingsDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._text_index_ready = text_index_ready
+        self.setObjectName("searchSettingsDialog")
         self.setWindowTitle("Search settings")
         self.setAccessibleName("Search settings")
-        # Keep the shared dialog large enough for the taller About page. Qt
-        # does not automatically grow a visible dialog when tabs change, and
-        # without this floor the bottom buttons can be clipped after opening
-        # Search first and then switching to About.
-        self.setMinimumSize(440, 460)
+        self.setMinimumSize(620, 540)
+        self.resize(760, 620)
 
         root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 12)
+        root.setSpacing(12)
         self.tabs = QTabWidget(self)
+        self.tabs.setObjectName("settingsTabs")
         self.tabs.setAccessibleName("Settings sections")
         root.addWidget(self.tabs)
 
         search_page = QWidget(self.tabs)
+        search_page.setObjectName("searchSettingsPage")
         form = QFormLayout(search_page)
+        form.setContentsMargins(28, 30, 28, 24)
+        form.setHorizontalSpacing(22)
+        form.setVerticalSpacing(18)
         self.tabs.addTab(search_page, "Search")
 
         self.mode_combo = QComboBox(search_page)
+        self.mode_combo.setMinimumHeight(40)
         for m in (SearchMode.SMART, SearchMode.EXACT, SearchMode.SEMANTIC):
             self.mode_combo.addItem(m.label, m)
         self.mode_combo.setCurrentIndex(
@@ -166,6 +184,7 @@ class _SettingsDialog(QDialog):
         form.addRow("Default mode", self.mode_combo)
 
         self.limit_spin = QSpinBox(search_page)
+        self.limit_spin.setMinimumHeight(40)
         self.limit_spin.setRange(10, 200)
         self.limit_spin.setSingleStep(10)
         self.limit_spin.setValue(result_limit)
@@ -176,6 +195,8 @@ class _SettingsDialog(QDialog):
         self.semantic_status.setWordWrap(True)
         self.semantic_status.setAccessibleName("Semantic search status")
         self.semantic_action = QPushButton(search_page)
+        self.semantic_action.setObjectName("semanticSettingsAction")
+        self.semantic_action.setMinimumHeight(40)
         self.semantic_action.setAccessibleName("Set up semantic search")
         self._set_semantic_status(semantic)
         form.addRow("Semantic search", self.semantic_status)
@@ -191,9 +212,11 @@ class _SettingsDialog(QDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             parent=self,
         )
+        self.button_box.setObjectName("settingsButtons")
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         root.addWidget(self.button_box)
+        self._apply_theme()
 
     def values(self) -> tuple[SearchMode, int]:
         return self.mode_combo.currentData(), self.limit_spin.value()
@@ -261,6 +284,74 @@ class _SettingsDialog(QDialog):
             self.semantic_action.setToolTip(wait_text)
             self.semantic_action.setAccessibleDescription(wait_text)
 
+    def _apply_theme(self) -> None:
+        c = chrome_colors(self)
+        self.setStyleSheet(
+            "QDialog#searchSettingsDialog {"
+            f" background: {c['window']}; color: {c['text']};"
+            "}"
+            "QTabWidget#settingsTabs::pane {"
+            f" background: {c['surface']}; border: 1px solid {c['border']};"
+            " border-radius: 14px; top: -1px;"
+            "}"
+            "QTabWidget#settingsTabs QTabBar::tab {"
+            f" color: {c['muted']}; background: transparent;"
+            " min-width: 112px; min-height: 42px; padding: 0 16px;"
+            " border: none; border-radius: 9px; font-weight: 700;"
+            "}"
+            "QTabWidget#settingsTabs QTabBar::tab:selected {"
+            f" color: {c['accent_text']}; background: {c['accent']};"
+            "}"
+            "QTabWidget#settingsTabs QTabBar::tab:hover:!selected {"
+            f" color: {c['text']}; background: {c['surface_high']};"
+            "}"
+            "QWidget#searchSettingsPage QLabel {"
+            f" color: {c['text']};"
+            "}"
+            "QWidget#searchSettingsPage QComboBox,"
+            " QWidget#searchSettingsPage QSpinBox {"
+            f" background: {c['surface_high']}; color: {c['text']};"
+            f" border: 1px solid {c['border']}; border-radius: 9px;"
+            " padding: 4px 10px;"
+            "}"
+            "QPushButton#semanticSettingsAction {"
+            f" background: {c['accent']}; color: {c['accent_text']};"
+            f" border: 1px solid {c['accent']}; border-radius: 9px;"
+            " padding: 6px 16px; font-weight: 700;"
+            "}"
+            "QPushButton#semanticSettingsAction:disabled {"
+            f" background: {c['surface_high']}; color: {c['muted']};"
+            f" border-color: {c['border']};"
+            "}"
+            "QDialogButtonBox#settingsButtons QPushButton {"
+            f" background: {c['surface_high']}; color: {c['text']};"
+            f" border: 1px solid {c['border']}; border-radius: 9px;"
+            " min-width: 82px; min-height: 36px; padding: 0 12px;"
+            " font-weight: 600;"
+            "}"
+            "QDialogButtonBox#settingsButtons QPushButton:hover {"
+            f" border-color: {c['accent_mid']};"
+            "}"
+        )
+
+    def changeEvent(self, event: QEvent) -> None:
+        if (
+            event.type()
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+            )
+            and not getattr(self, "_refreshing_palette", False)
+        ):
+            self._refreshing_palette = True
+            try:
+                self._apply_theme()
+                if hasattr(self, "about_panel"):
+                    self.about_panel.refresh_palette()
+            finally:
+                self._refreshing_palette = False
+        super().changeEvent(event)
+
 
 class SearchDialog(QDialog):
     """Keyboard-first command-palette search dialog."""
@@ -291,6 +382,7 @@ class SearchDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self._about = about if about is not None else _default_about_info()
+        self.setObjectName("smartSearchDialog")
         self.setWindowTitle("Smart Search")
         self.setMinimumSize(760, 520)
         self.resize(1040, 700)
@@ -316,8 +408,8 @@ class SearchDialog(QDialog):
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
-        root.setContentsMargins(14, 14, 14, 10)
-        root.setSpacing(8)
+        root.setContentsMargins(20, 20, 20, 14)
+        root.setSpacing(10)
 
         top = QHBoxLayout()
         top.setSpacing(10)
@@ -338,14 +430,11 @@ class SearchDialog(QDialog):
         root.addWidget(self.chip_bar)
 
         self.index_notice = QLabel(self)
+        self.index_notice.setObjectName("indexNotice")
         self.index_notice.setWordWrap(True)
         self.index_notice.setTextFormat(Qt.TextFormat.RichText)
         self.index_notice.setAccessibleName("Search index notice")
         self.index_notice.setVisible(False)
-        self.index_notice.setStyleSheet(
-            "QLabel { padding: 7px 10px; border-radius: 7px;"
-            " background: palette(alternate-base); }"
-        )
         root.addWidget(self.index_notice)
 
         self.stack = QStackedWidget(self)
@@ -365,33 +454,88 @@ class SearchDialog(QDialog):
         self.stack.insertWidget(_PAGE_RESULTS, self.results)
 
         message_page = QWidget(self)
+        message_page.setObjectName("messagePage")
         message_layout = QVBoxLayout(message_page)
+        message_layout.setContentsMargins(16, 18, 16, 18)
+        message_layout.setSpacing(0)
         message_layout.addStretch(1)
-        self.message_label = QLabel(message_page)
+
+        self.message_card = QFrame(message_page)
+        self.message_card.setObjectName("messageCard")
+        self.message_card.setMinimumWidth(480)
+        self.message_card.setMaximumWidth(660)
+        card_layout = QVBoxLayout(self.message_card)
+        card_layout.setContentsMargins(42, 32, 42, 32)
+        card_layout.setSpacing(14)
+
+        self.message_icon = QLabel("◔", self.message_card)
+        self.message_icon.setObjectName("messageIcon")
+        self.message_icon.setFixedSize(84, 84)
+        self.message_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.message_icon.setAccessibleName("Semantic search")
+        self.message_icon.setVisible(False)
+        card_layout.addWidget(
+            self.message_icon,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+
+        self.message_label = QLabel(self.message_card)
+        self.message_label.setObjectName("messageLabel")
         self.message_label.setWordWrap(True)
         self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.message_label.setAccessibleName("Search status message")
-        message_layout.addWidget(self.message_label)
-        self.retry_button = QPushButton("Retry", message_page)
+        card_layout.addWidget(self.message_label)
+
+        self.message_platform_label = QLabel(
+            _semantic_availability_text(),
+            self.message_card,
+        )
+        self.message_platform_label.setObjectName("messagePlatform")
+        self.message_platform_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.message_platform_label.setAccessibleName(
+            "Semantic search availability"
+        )
+        self.message_platform_label.setVisible(False)
+        card_layout.addWidget(self.message_platform_label)
+
+        self.retry_button = QPushButton("Retry", self.message_card)
+        self.retry_button.setObjectName("retryAction")
+        self.retry_button.setMinimumHeight(40)
         self.retry_button.setAccessibleName("Retry search")
         self.retry_button.clicked.connect(self._emit_search)
         self.retry_button.setVisible(False)
-        message_layout.addWidget(self.retry_button, 0, Qt.AlignmentFlag.AlignCenter)
-        self.message_action = QPushButton(message_page)
+        card_layout.addWidget(
+            self.retry_button,
+            0,
+            Qt.AlignmentFlag.AlignHCenter,
+        )
+
+        self.message_action = QPushButton(self.message_card)
+        self.message_action.setObjectName("messageAction")
+        self.message_action.setMinimumHeight(42)
+        self.message_action.setMinimumWidth(220)
         self.message_action.setVisible(False)
         self.message_action.clicked.connect(self._run_message_action)
-        message_layout.addWidget(
+        card_layout.addWidget(
             self.message_action, 0, Qt.AlignmentFlag.AlignCenter
+        )
+        message_layout.addWidget(
+            self.message_card,
+            0,
+            Qt.AlignmentFlag.AlignCenter,
         )
         message_layout.addStretch(1)
         self.stack.insertWidget(_PAGE_MESSAGE, message_page)
 
         root.addWidget(self.stack, 1)
 
-        self.batch_bar = QWidget(self)
+        self.batch_bar = QFrame(self)
+        self.batch_bar.setObjectName("batchBar")
+        self.batch_bar.setMinimumHeight(56)
         batch = QHBoxLayout(self.batch_bar)
-        batch.setContentsMargins(0, 2, 0, 2)
-        batch.setSpacing(7)
+        batch.setContentsMargins(12, 7, 12, 7)
+        batch.setSpacing(9)
 
         self.master_check = QCheckBox(self.batch_bar)
         self.master_check.setTristate(True)
@@ -404,10 +548,12 @@ class SearchDialog(QDialog):
             "0 notes · 0 cards selected",
             self.batch_bar,
         )
+        self.selection_summary.setObjectName("selectionSummary")
         self.selection_summary.setAccessibleName("Bulk selection summary")
         batch.addWidget(self.selection_summary)
 
         self.select_button = QToolButton(self.batch_bar)
+        self.select_button.setObjectName("batchSelect")
         self.select_button.setText("Select")
         self.select_button.setPopupMode(
             QToolButton.ToolButtonPopupMode.InstantPopup
@@ -430,6 +576,7 @@ class SearchDialog(QDialog):
         batch.addWidget(self.select_button)
 
         self.open_selected_button = QToolButton(self.batch_bar)
+        self.open_selected_button.setObjectName("batchBrowser")
         self.open_selected_button.setText("Browser")
         self.open_selected_button.setToolTip(
             "Open exactly the checked cards in Anki's Browser"
@@ -443,6 +590,7 @@ class SearchDialog(QDialog):
         batch.addStretch(1)
 
         self.flag_button = QToolButton(self.batch_bar)
+        self.flag_button.setObjectName("batchFlag")
         self.flag_button.setText("Flag")
         self.flag_button.setPopupMode(
             QToolButton.ToolButtonPopupMode.InstantPopup
@@ -467,6 +615,7 @@ class SearchDialog(QDialog):
         batch.addWidget(self.flag_button)
 
         self.suspend_button = QToolButton(self.batch_bar)
+        self.suspend_button.setObjectName("batchSuspend")
         self.suspend_button.setText("Suspend")
         self.suspend_button.setPopupMode(
             QToolButton.ToolButtonPopupMode.InstantPopup
@@ -485,6 +634,7 @@ class SearchDialog(QDialog):
         batch.addWidget(self.suspend_button)
 
         self.tags_button = QToolButton(self.batch_bar)
+        self.tags_button.setObjectName("batchTags")
         self.tags_button.setText("Tags")
         self.tags_button.setPopupMode(
             QToolButton.ToolButtonPopupMode.InstantPopup
@@ -508,7 +658,10 @@ class SearchDialog(QDialog):
             self._update_batch_bar
         )
 
-        bottom = QHBoxLayout()
+        self.footer_bar = QFrame(self)
+        self.footer_bar.setObjectName("footerBar")
+        bottom = QHBoxLayout(self.footer_bar)
+        bottom.setContentsMargins(8, 10, 0, 0)
         bottom.setSpacing(8)
         self.status = IndexStatusWidget(self)
         bottom.addWidget(self.status)
@@ -545,6 +698,7 @@ class SearchDialog(QDialog):
         bottom.addWidget(self.summary)
 
         self.settings_button = QToolButton(self)
+        self.settings_button.setObjectName("footerButton")
         self.settings_button.setText("Settings")
         self.settings_button.setAccessibleName("Search settings")
         self.settings_button.setAccessibleDescription("Open search preferences.")
@@ -552,17 +706,131 @@ class SearchDialog(QDialog):
         bottom.addWidget(self.settings_button)
 
         self.rebuild_button = QToolButton(self)
-        self.rebuild_button.setText("Refresh Smart & Exact")
+        self.rebuild_button.setObjectName("footerButton")
+        self.rebuild_button.setText("Refresh")
+        self.rebuild_button.setToolTip(
+            "Refresh Smart and Exact search data. Semantic refreshes separately."
+        )
         self.rebuild_button.setAccessibleName("Refresh Smart and Exact search data")
         self.rebuild_button.setAccessibleDescription(
             "Refresh Smart and Exact search data. Semantic refreshes separately."
         )
         self.rebuild_button.clicked.connect(self.rebuildRequested)
         bottom.addWidget(self.rebuild_button)
-        root.addLayout(bottom)
+        root.addWidget(self.footer_bar)
 
         self.search.installEventFilter(self)
         self.results.installEventFilter(self)
+        self._apply_theme()
+
+    def _apply_theme(self) -> None:
+        c = chrome_colors(self)
+        self.message_icon.setPixmap(semantic_icon_pixmap(c, 76))
+        self.setStyleSheet(
+            "QDialog#smartSearchDialog {"
+            f" background: {c['window']}; color: {c['text']};"
+            "}"
+            "QLabel#indexNotice {"
+            f" background: {c['accent_soft']}; color: {c['text']};"
+            f" border: 1px solid {c['accent_mid']}; border-radius: 12px;"
+            " padding: 12px 16px;"
+            "}"
+            "QFrame#messageCard {"
+            f" background: {c['surface']}; border: 1px solid {c['border']};"
+            " border-radius: 18px;"
+            "}"
+            "QLabel#messageLabel {"
+            f" color: {c['text']}; background: transparent; border: none;"
+            "}"
+            "QLabel#messageIcon {"
+            " background: transparent; border: none;"
+            "}"
+            "QLabel#messagePlatform {"
+            f" color: {c['accent']}; background: transparent;"
+            " border: none; font-weight: 700;"
+            "}"
+            "QPushButton#messageAction, QPushButton#retryAction {"
+            f" color: {c['accent_text']}; background: {c['accent']};"
+            f" border: 1px solid {c['accent']}; border-radius: 9px;"
+            " padding: 7px 18px; font-weight: 700;"
+            "}"
+            "QPushButton#messageAction:hover, QPushButton#retryAction:hover {"
+            f" background: {c['accent_mid']};"
+            "}"
+            "QFrame#batchBar {"
+            f" background: {c['surface']}; border: 1px solid {c['border']};"
+            " border-radius: 11px;"
+            "}"
+            "QFrame#batchBar QLabel {"
+            " background: transparent; border: none;"
+            "}"
+            "QLabel#selectionSummary { font-weight: 700; }"
+            "QFrame#batchBar QToolButton {"
+            f" background: {c['surface_high']}; color: {c['text']};"
+            f" border: 1px solid {c['border']}; border-radius: 8px;"
+            " min-height: 36px; padding: 0 13px; font-weight: 600;"
+            "}"
+            "QFrame#batchBar QToolButton:hover {"
+            f" border-color: {c['accent_mid']};"
+            "}"
+            "QFrame#batchBar QToolButton:disabled {"
+            f" color: {c['muted']}; background: {c['surface']};"
+            f" border-color: {c['border']};"
+            "}"
+            "QFrame#footerBar {"
+            " background: transparent; border: none;"
+            f" border-top: 1px solid {c['border']};"
+            "}"
+            "QFrame#footerBar QLabel {"
+            f" color: {c['muted']}; background: transparent; border: none;"
+            "}"
+            "QToolButton#footerButton {"
+            f" background: {c['surface_high']}; color: {c['text']};"
+            f" border: 1px solid {c['border']}; border-radius: 8px;"
+            " min-height: 34px; padding: 0 12px; font-weight: 600;"
+            "}"
+            "QToolButton#footerButton:hover {"
+            f" border-color: {c['accent_mid']};"
+            "}"
+            "QProgressBar {"
+            f" background: {c['surface']}; color: {c['text']};"
+            f" border: 1px solid {c['border']}; border-radius: 6px;"
+            " text-align: center;"
+            "}"
+            "QProgressBar::chunk {"
+            f" background: {c['accent']}; border-radius: 5px;"
+            "}"
+        )
+
+    def _set_message_presentation(self, *, semantic: bool) -> None:
+        self.message_icon.setVisible(semantic)
+        self.message_platform_label.setVisible(semantic)
+        self.message_card.setMinimumHeight(350 if semantic else 210)
+
+    def changeEvent(self, event: QEvent) -> None:
+        if (
+            event.type()
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+            )
+            and not getattr(self, "_refreshing_palette", False)
+        ):
+            self._refreshing_palette = True
+            try:
+                self._apply_theme()
+                # Theme palette changes reach the top-level dialog reliably,
+                # but not every styled child on all Qt/Anki builds. Refresh
+                # the palette-aware children here as well.
+                for child_name in ("search", "segmented", "status"):
+                    child = getattr(self, child_name, None)
+                    if child is not None:
+                        child.refresh_palette()
+                if hasattr(self, "results"):
+                    self.results.viewport().update()
+            finally:
+                self._refreshing_palette = False
+        super().changeEvent(event)
 
     def _install_shortcuts(self) -> None:
         def sc(sequence: str, handler) -> None:
@@ -860,6 +1128,19 @@ class SearchDialog(QDialog):
 
     # ------------------------------------------------------------ state API
 
+    def _semantic_is_indexing(self) -> bool:
+        semantic = self._last_status.semantic if self._last_status else None
+        return (
+            semantic is not None
+            and semantic.state is SemanticState.INDEXING
+        )
+
+    def _hide_stale_semantic_notice(self) -> None:
+        """Keep only the cross-mode notice for an active Semantic build."""
+
+        if not self._semantic_is_indexing():
+            self.index_notice.setVisible(False)
+
     def show_help(self) -> None:
         if self._last_status is not None:
             if self._last_status.state is not IndexState.READY:
@@ -874,6 +1155,8 @@ class SearchDialog(QDialog):
                 return
         self._message_kind = ""
         self._batch_results_available = False
+        self._set_message_presentation(semantic=False)
+        self._hide_stale_semantic_notice()
         self.results.setEnabled(True)
         self.stack.setCurrentIndex(_PAGE_HELP)
         self.summary.setText("")
@@ -886,6 +1169,7 @@ class SearchDialog(QDialog):
         self._message_kind = ""
         self._last_response = None
         self._batch_results_available = False
+        self._hide_stale_semantic_notice()
         self.results.setEnabled(False)
         # Keep the prior list in place until replacement work actually starts.
         # Avoiding a model reset and stacked-page resize on every keystroke
@@ -902,6 +1186,7 @@ class SearchDialog(QDialog):
         self._message_kind = ""
         self._last_response = None
         self._batch_results_available = False
+        self._hide_stale_semantic_notice()
         self.results.setEnabled(False)
         # Leave prior results visible but non-actionable while the worker finds
         # their replacement.  Clearing and rebuilding the view twice per
@@ -921,6 +1206,8 @@ class SearchDialog(QDialog):
     ) -> None:
         self._last_response = response
         self._message_kind = ""
+        self._hide_stale_semantic_notice()
+        self._set_message_presentation(semantic=False)
         self.results.setEnabled(True)
         self.message_action.setVisible(False)
         self.chip_bar.set_chips(response.active_filters, corrections)
@@ -952,6 +1239,8 @@ class SearchDialog(QDialog):
                 f"{response.total_results} "
                 f"result{'s' if response.total_results != 1 else ''}"
             )
+        if response.elapsed_ms > 0:
+            text += f" · {response.elapsed_ms:.0f} ms"
         if response.warnings:
             count = len(response.warnings)
             text += f" · {count} notice{'s' if count != 1 else ''}"
@@ -967,6 +1256,7 @@ class SearchDialog(QDialog):
         self.results.results_model().clear()
         self._batch_results_available = False
         self._message_kind = "search_error"
+        self._set_message_presentation(semantic=False)
         self.message_label.setTextFormat(Qt.TextFormat.PlainText)
         self.message_label.setText(f"Search failed:\n{message}")
         self.message_action.setVisible(False)
@@ -1058,6 +1348,7 @@ class SearchDialog(QDialog):
     def show_index_blocked(self, status: IndexStatus) -> None:
         self._message_kind = "text_index"
         self._batch_results_available = False
+        self._set_message_presentation(semantic=False)
         self.index_notice.setVisible(False)
         self.retry_button.setVisible(False)
         detail = status.detail or "Preparing your notes for fast local search."
@@ -1114,8 +1405,19 @@ class SearchDialog(QDialog):
     def show_semantic_needed(self, status: Optional[SemanticStatus]) -> None:
         self._message_kind = "semantic"
         self._batch_results_available = False
+        self._set_message_presentation(semantic=True)
         self.retry_button.setVisible(False)
         self.message_action.setProperty("action", "semantic")
+        self.index_notice.setText(
+            "<b>Semantic has a separate one-time setup and index.</b><br>"
+            "Smart and Exact remain available now—and throughout Semantic "
+            "preparation."
+        )
+        self.index_notice.setAccessibleDescription(
+            "Semantic search has a separate one-time setup. Smart and Exact "
+            "remain available while it is prepared."
+        )
+        self.index_notice.setVisible(True)
         if status is None:
             heading = "Semantic Search Is Not Available Yet"
             detail = "Semantic status is unavailable."
@@ -1153,8 +1455,8 @@ class SearchDialog(QDialog):
         elif status.state is SemanticState.NOT_INSTALLED:
             heading = "Set Up Semantic Search"
             detail = (
-                "Complete a one-time private setup on this computer. Smart and "
-                "Exact search are already available."
+                "Enable a private, local search by clinical meaning. Required "
+                "files are downloaded only after you choose setup."
             )
             action = "Set Up Semantic Search"
         elif status.state is SemanticState.ERROR:
@@ -1177,14 +1479,21 @@ class SearchDialog(QDialog):
             action = ""
 
         self.message_label.setText(
-            f"<b>{escape(heading)}</b><br><br>{escape(detail)}"
+            '<span style="font-size: 24px; font-weight: 700;">'
+            f"{escape(heading)}</span><br><br>"
+            '<span style="font-size: 15px;">'
+            f"{escape(detail)}</span>"
         )
         self.message_label.setTextFormat(Qt.TextFormat.RichText)
         self.message_action.setText(action)
         self.message_action.setAccessibleName(action or "Semantic search action")
         self.message_action.setVisible(bool(action))
+        self.semantic_action.setVisible(False)
         self.stack.setCurrentIndex(_PAGE_MESSAGE)
-        self.summary.setText("Semantic search is not ready")
+        self.summary.setText("")
+        self.summary.setAccessibleDescription(
+            "Semantic search setup is required."
+        )
         self._update_batch_bar()
 
     def _show_semantic_status(self, status: Optional[SemanticStatus]) -> None:
@@ -1325,14 +1634,19 @@ class SearchDialog(QDialog):
         # A mode change dispatches immediately through the controller.  Do
         # not let a pending text-edit debounce submit the same query again.
         self._debounce.stop()
+        if mode is not SearchMode.SEMANTIC:
+            self._hide_stale_semantic_notice()
         if self._last_status is not None:
             semantic = self._last_status.semantic
             if mode is SearchMode.SEMANTIC and (
                 semantic is None or not semantic.ready
             ):
                 self.show_semantic_needed(semantic)
-            elif self._message_kind == "semantic" and not self.query().strip():
-                self.show_help()
+            elif self._message_kind == "semantic":
+                if not self.query().strip():
+                    self.show_help()
+                if semantic is not None:
+                    self._show_semantic_status(semantic)
         self.modeSelected.emit(mode)
 
     def _on_search_return(self) -> None:

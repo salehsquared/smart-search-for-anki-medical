@@ -1,10 +1,13 @@
 """Result list: model, custom delegate, and view.
 
-The delegate renders each note as a dense three-part row: a bold elided
-title with match-reason badges on the right, a muted deck/note-type/tags
-line, and a two-line snippet whose highlight spans are drawn with escaped
-HTML inside a QTextDocument. Raw card HTML is never rendered — snippets are
-plain text and every span is clamped and merged before painting.
+Each note renders as a separated rounded card on the window background:
+a bold elided title with a quiet sibling-card count at the right, a
+two-line span-highlighted snippet, a muted deck/note-type/tags line, and
+a row of compact colored match-reason chips. The current row is marked
+with a violet outline and subtle tint — never a solid bright fill — so
+text contrast survives selection. Raw card HTML is never rendered —
+snippets are plain text and every span is clamped and merged before
+painting.
 """
 
 from __future__ import annotations
@@ -19,15 +22,16 @@ from .widgets import (  # the Qt shim lives here
     QAbstractListModel,
     QApplication,
     QColor,
+    QFont,
     QKeySequence,
     QListView,
     QModelIndex,
     QPalette,
     QPainter,
+    QPen,
     QRect,
     QSize,
     QStyle,
-    QStyleOptionButton,
     QStyledItemDelegate,
     QStyleOptionViewItem,
     QTextDocument,
@@ -404,42 +408,109 @@ class ResultsModel(QAbstractListModel):
 
 
 class ResultDelegate(QStyledItemDelegate):
-    """Paints title + badges, meta line, and highlighted two-line snippet."""
+    """Paint each result as a calm, separated card with explicit hierarchy."""
 
-    H_PAD = 12
-    V_PAD = 8
-    BADGE_H_PAD = 7
-    BADGE_GAP = 6
-    CHECK_GUTTER = 28
-    STATE_GUTTER = 24
+    ROW_GAP = 8
+    CARD_INSET = 2
+    CARD_RADIUS = 10
+    H_PAD = 18
+    V_PAD = 13
+    CHECK_GUTTER = 34
+    # Enough room for the suspension glyph and the multi-color flag when a
+    # result contains both states. Keep this independent from the text column
+    # so state indicators never collide with the title or snippet.
+    STATE_GUTTER = 42
+    CHIP_H = 22
+    CHIP_H_PAD = 9
+    CHIP_GAP = 7
 
-    # -- helpers -----------------------------------------------------------
+    @classmethod
+    def card_rect(cls, row_rect: QRect) -> QRect:
+        return row_rect.adjusted(
+            cls.CARD_INSET,
+            cls.ROW_GAP // 2,
+            -cls.CARD_INSET - 1,
+            -(cls.ROW_GAP // 2) - 1,
+        )
 
-    def _badges(self, result: SearchResult) -> list[str]:
-        badges = list(result.match_reasons[:3])
-        if len(result.match_reasons) > 3:
-            badges.append(f"+{len(result.match_reasons) - 3}")
-        if result.sibling_count > 1:
-            badges.append(f"{result.sibling_count} cards")
-        elif result.sibling_count == 1:
-            badges.append("1 card")
-        return badges
+    @classmethod
+    def checkbox_rect(cls, row_rect: QRect) -> QRect:
+        card = cls.card_rect(row_rect)
+        size = 22
+        return QRect(
+            card.left() + cls.H_PAD,
+            card.top() + max(0, (card.height() - size) // 2),
+            size,
+            size,
+        )
 
     def _colors(self, option: QStyleOptionViewItem) -> dict[str, object]:
         pal = option.palette
-        base = pal.color(QPalette.ColorRole.Base)
-        accent = pal.color(QPalette.ColorRole.Highlight)
+        # The view itself is intentionally transparent; Qt therefore exposes
+        # transparent roles on some Anki themes. Prefer the widget-local
+        # palette whenever it is concrete, and fall back to the application
+        # palette only for those transparent roles.
+        app_pal = QApplication.palette()
+
+        def concrete(role: QPalette.ColorRole) -> QColor:
+            color = pal.color(role)
+            return app_pal.color(role) if color.alpha() == 0 else color
+
+        window = concrete(QPalette.ColorRole.Window)
+        base = concrete(QPalette.ColorRole.Base)
+        text = concrete(QPalette.ColorRole.Text)
+        muted = concrete(QPalette.ColorRole.PlaceholderText)
+        accent = concrete(QPalette.ColorRole.Highlight)
         dark = base.lightness() < 128
+        surface = blend_colors(
+            window,
+            text,
+            0.06 if dark else 0.025,
+        )
+        surface.setAlpha(255)
         return {
-            "text": _hex(pal.color(QPalette.ColorRole.Text)),
-            "muted": _hex(pal.color(QPalette.ColorRole.PlaceholderText)),
-            "hl_text": _hex(pal.color(QPalette.ColorRole.HighlightedText)),
-            "accent": _hex(accent),
-            "accent_soft": _hex(blend_colors(base, accent, 0.22)),
-            "base": _hex(base),
-            "suspended": "#fef9c3" if dark else "#facc15",
+            "text": text,
+            "muted": muted,
+            "accent": accent,
+            "accent_text": concrete(QPalette.ColorRole.HighlightedText),
+            "accent_soft": blend_colors(surface, accent, 0.16),
+            "surface": surface,
+            "hover": blend_colors(surface, accent, 0.065),
+            "checked": blend_colors(surface, accent, 0.075),
+            "border": blend_colors(surface, text, 0.16),
             "dark": dark,
         }
+
+    def _draw_checkbox(
+        self,
+        painter: QPainter,
+        rect: QRect,
+        checked: bool,
+        colors: dict[str, object],
+    ) -> None:
+        accent = QColor(colors["accent"])
+        border = accent if checked else QColor(colors["muted"])
+        painter.setPen(QPen(border, 1.5))
+        painter.setBrush(accent if checked else Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect, 6, 6)
+        if not checked:
+            return
+        pen = QPen(QColor(colors["accent_text"]), 2.2)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.drawLine(
+            rect.left() + 5,
+            rect.center().y(),
+            rect.left() + 9,
+            rect.bottom() - 5,
+        )
+        painter.drawLine(
+            rect.left() + 9,
+            rect.bottom() - 5,
+            rect.right() - 4,
+            rect.top() + 5,
+        )
 
     def _draw_card_state(
         self,
@@ -447,43 +518,60 @@ class ResultDelegate(QStyledItemDelegate):
         result: SearchResult,
         *,
         x: int,
-        y: int,
-        line_h: int,
+        center_y: int,
         colors: dict[str, object],
     ) -> None:
-        """Draw wordless suspension and flag indicators in a fixed gutter."""
+        """Draw compact, wordless suspension and flag indicators."""
 
         states = result.card_states
         if not states:
             return
-
         suspended = sum(1 for state in states if state.suspended)
+        cursor = x
         if suspended:
-            color = QColor(str(colors["suspended"]))
-            painter.setPen(color)
-            bar_y = y + max(1, (line_h - 12) // 2)
-            first = QRect(x + 2, bar_y, 3, 12)
-            second = QRect(x + 9, bar_y, 3, 12)
-            painter.fillRect(first, color)
-            if suspended == len(states):
-                painter.fillRect(second, color)
-            else:
-                painter.drawRect(second)
+            icon = QRect(cursor, center_y - 8, 16, 16)
+            suspension_color = (
+                QColor("#c4ccd8")
+                if bool(colors["dark"])
+                else QColor("#5f6977")
+            )
+            suspension_color.setAlpha(255 if suspended == len(states) else 170)
+            painter.setBrush(
+                blend_colors(
+                    QColor(colors["surface"]),
+                    suspension_color,
+                    0.08,
+                )
+            )
+            painter.setPen(QPen(suspension_color, 1.4))
+            painter.drawEllipse(icon)
+            painter.drawLine(
+                icon.left() + 3,
+                icon.bottom() - 3,
+                icon.right() - 3,
+                icon.top() + 3,
+            )
+            cursor += 20
 
         flags = sorted({state.flag for state in states if state.flag})
         if not flags:
             return
-        palette = _DARK_FLAG_COLORS if bool(colors["dark"]) else _LIGHT_FLAG_COLORS
-        flag_y = y + line_h + 4
-        pole = QRect(x + 1, flag_y, 2, 12)
-        painter.fillRect(pole, QColor(str(colors["muted"])))
-        cloth = QRect(x + 3, flag_y, 14, 8)
+        flag_palette = (
+            _DARK_FLAG_COLORS if bool(colors["dark"]) else _LIGHT_FLAG_COLORS
+        )
+        flag_y = center_y - 7
+        painter.fillRect(
+            QRect(cursor, flag_y, 2, 15),
+            QColor(colors["muted"]),
+        )
+        cloth = QRect(cursor + 2, flag_y, 14, 9)
         stripe_left = cloth.left()
         for offset, flag in enumerate(flags):
             stripe_right = (
                 cloth.right() + 1
                 if offset == len(flags) - 1
-                else cloth.left() + round(cloth.width() * (offset + 1) / len(flags))
+                else cloth.left()
+                + round(cloth.width() * (offset + 1) / len(flags))
             )
             painter.fillRect(
                 QRect(
@@ -492,34 +580,42 @@ class ResultDelegate(QStyledItemDelegate):
                     max(1, stripe_right - stripe_left),
                     cloth.height(),
                 ),
-                QColor(palette[flag]),
+                QColor(flag_palette[flag]),
             )
             stripe_left = stripe_right
-        outline = QColor(str(colors["base"]))
-        painter.setPen(outline)
-        painter.drawRect(cloth)
 
-    @classmethod
-    def checkbox_rect(cls, row_rect: QRect) -> QRect:
-        style = QApplication.style()
-        width = style.pixelMetric(QStyle.PixelMetric.PM_IndicatorWidth)
-        height = style.pixelMetric(QStyle.PixelMetric.PM_IndicatorHeight)
-        return QRect(
-            row_rect.left() + cls.H_PAD,
-            row_rect.top() + max(0, (row_rect.height() - height) // 2),
-            width,
-            height,
+    def _chip_palette(
+        self,
+        text: str,
+        colors: dict[str, object],
+    ) -> tuple[QColor, QColor, QColor]:
+        lowered = text.casefold()
+        dark = bool(colors["dark"])
+        if any(word in lowered for word in ("exact", "filter", "all terms")):
+            hue = QColor("#54d89a" if dark else "#16845b")
+        elif any(word in lowered for word in ("alias", "concept", "related")):
+            hue = QColor("#63aefc" if dark else "#176bb5")
+        elif any(word in lowered for word in ("typo", "spell", "correct")):
+            hue = QColor("#a795ff" if dark else "#6550cf")
+        else:
+            hue = QColor(colors["muted"])
+        surface = QColor(colors["surface"])
+        return (
+            blend_colors(surface, hue, 0.13),
+            blend_colors(surface, hue, 0.52),
+            hue,
         )
 
-    # -- Qt API ------------------------------------------------------------
-
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
-        fm = option.fontMetrics
-        line = fm.height()
-        height = self.V_PAD * 2 + line + 2 + line + 4 + 2 * line + 4
-        return QSize(option.rect.width(), height)
+        line = option.fontMetrics.height()
+        return QSize(option.rect.width(), max(128, line * 6 + 34))
 
-    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+    def paint(
+        self,
+        painter: QPainter,
+        option: QStyleOptionViewItem,
+        index: QModelIndex,
+    ) -> None:
         result: Optional[SearchResult] = index.data(ResultRole)
         if result is None:
             super().paint(painter, option, index)
@@ -527,126 +623,220 @@ class ResultDelegate(QStyledItemDelegate):
 
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        enabled = bool(option.state & QStyle.StateFlag.State_Enabled)
+        if not enabled:
+            # Prior results remain visible while a replacement search runs,
+            # but their reduced opacity makes the temporarily inactive state
+            # unmistakable.
+            painter.setOpacity(0.52)
         colors = self._colors(option)
-        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        focused = bool(option.state & QStyle.StateFlag.State_Selected)
         hovered = bool(option.state & QStyle.StateFlag.State_MouseOver)
-        rect = option.rect
+        checked = (
+            index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
+        )
+        card = self.card_rect(option.rect)
 
-        if selected:
-            painter.fillRect(rect, option.palette.color(QPalette.ColorRole.Highlight))
+        fill = QColor(colors["surface"])
+        if checked:
+            fill = QColor(colors["checked"])
+        elif focused:
+            fill = blend_colors(
+                QColor(colors["surface"]),
+                QColor(colors["accent"]),
+                0.04,
+            )
         elif hovered:
-            painter.fillRect(rect, option.palette.color(QPalette.ColorRole.AlternateBase))
+            fill = QColor(colors["hover"])
+        outline = QColor(colors["accent"]) if checked else QColor(colors["border"])
+        outline_width = 1.4 if checked else 1.0
+        if focused and not checked:
+            outline = blend_colors(
+                QColor(colors["border"]),
+                QColor(colors["accent"]),
+                0.72,
+            )
+            outline_width = 1.2
+        painter.setBrush(fill)
+        painter.setPen(QPen(outline, outline_width))
+        painter.drawRoundedRect(card, self.CARD_RADIUS, self.CARD_RADIUS)
+        if focused and checked:
+            # Checked is the bulk-action state; focused is the keyboard
+            # navigation state. Show both simultaneously so a range of
+            # checked rows still has one unambiguous current row.
+            focus = QColor(colors["accent_text"])
+            focus.setAlpha(145)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QPen(focus, 1.2))
+            inner = card.adjusted(3, 3, -3, -3)
+            painter.drawRoundedRect(
+                inner,
+                self.CARD_RADIUS - 2,
+                self.CARD_RADIUS - 2,
+            )
 
-        fg = colors["hl_text"] if selected else colors["text"]
-        muted = colors["hl_text"] if selected else colors["muted"]
-        fm = option.fontMetrics
-        line_h = fm.height()
+        checkbox = self.checkbox_rect(option.rect)
+        self._draw_checkbox(painter, checkbox, checked, colors)
+        state_x = checkbox.right() + 14
+        self._draw_card_state(
+            painter,
+            result,
+            x=state_x,
+            center_y=card.center().y(),
+            colors=colors,
+        )
+
         left = (
-            rect.left()
+            card.left()
             + self.H_PAD
             + self.CHECK_GUTTER
             + self.STATE_GUTTER
         )
-        width = (
-            rect.width()
-            - 2 * self.H_PAD
-            - self.CHECK_GUTTER
-            - self.STATE_GUTTER
-        )
-        y = rect.top() + self.V_PAD
+        right = card.right() - self.H_PAD
+        width = max(80, right - left)
+        y = card.top() + self.V_PAD
 
-        checkbox = QStyleOptionButton()
-        checkbox.rect = self.checkbox_rect(rect)
-        checkbox.palette = option.palette
-        checkbox.state = QStyle.StateFlag.State_Enabled
-        if index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked:
-            checkbox.state |= QStyle.StateFlag.State_On
-        else:
-            checkbox.state |= QStyle.StateFlag.State_Off
-        QApplication.style().drawControl(
-            QStyle.ControlElement.CE_CheckBox,
-            checkbox,
-            painter,
-        )
-        self._draw_card_state(
-            painter,
-            result,
-            x=rect.left() + self.H_PAD + self.CHECK_GUTTER,
-            y=y,
-            line_h=line_h,
-            colors=colors,
-        )
+        count = ""
+        if result.sibling_count > 1:
+            count = f"{result.sibling_count} cards"
+        elif result.sibling_count == 1:
+            count = "1 card"
+        count_font = QFont(option.font)
+        count_font.setPointSizeF(max(count_font.pointSizeF() - 1.0, 8.0))
+        painter.setFont(count_font)
+        count_fm = painter.fontMetrics()
+        count_width = count_fm.horizontalAdvance(count) if count else 0
+        if count:
+            painter.setPen(QColor(colors["muted"]))
+            painter.drawText(
+                right - count_width,
+                y,
+                count_width,
+                count_fm.height(),
+                int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter),
+                count,
+            )
 
-        # --- title row: badges are right-aligned, title elided around them
-        badge_font = painter.font()
-        badge_font.setPointSizeF(max(badge_font.pointSizeF() - 1.5, 7.0))
-        painter.setFont(badge_font)
-        badge_fm = painter.fontMetrics()
-        badges = self._badges(result)
-        badge_widths = [badge_fm.horizontalAdvance(b) + 2 * self.BADGE_H_PAD for b in badges]
-        badges_total = sum(badge_widths) + self.BADGE_GAP * max(len(badges) - 1, 0)
-
-        title_font = option.font
+        title_font = QFont(option.font)
         title_font.setBold(True)
+        title_font.setPointSizeF(title_font.pointSizeF() + 1.4)
         painter.setFont(title_font)
         title_fm = painter.fontMetrics()
-        title_width = width - (badges_total + 12 if badges_total else 0)
-        elided_title = title_fm.elidedText(
-            result.title or "(untitled note)", Qt.TextElideMode.ElideRight, title_width
+        title_width = width - (count_width + 18 if count_width else 0)
+        title = title_fm.elidedText(
+            result.title or "(untitled note)",
+            Qt.TextElideMode.ElideRight,
+            title_width,
         )
-        painter.setPen(QColor(fg))
+        painter.setPen(QColor(colors["text"]))
         painter.drawText(
-            left, y, title_width, line_h,
+            left,
+            y,
+            title_width,
+            title_fm.height(),
             int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            elided_title,
+            title,
         )
 
-        badge_x = rect.right() - self.H_PAD
-        painter.setFont(badge_font)
-        for badge, bw in zip(reversed(badges), reversed(badge_widths)):
-            badge_x -= bw
-            badge_rect = (badge_x, y + max((line_h - badge_fm.height()) // 2 - 1, 0), bw, badge_fm.height() + 3)
-            painter.setPen(Qt.PenStyle.NoPen)
-            painter.setBrush(QColor(colors["accent_soft"]))
-            painter.drawRoundedRect(*badge_rect, 6, 6)
-            painter.setPen(QColor(fg))
-            painter.drawText(*badge_rect, int(Qt.AlignmentFlag.AlignCenter), badge)
-            badge_x -= self.BADGE_GAP
-
-        # --- meta line: deck · note type · tags
-        y += line_h + 2
-        meta_parts = [p for p in (result.deck, result.note_type) if p]
-        if result.tags:
-            meta_parts.append(" ".join("#" + t for t in result.tags[:4]))
-        meta = fm.elidedText("  ·  ".join(meta_parts), Qt.TextElideMode.ElideRight, width)
-        meta_font = option.font
-        meta_font.setPointSizeF(max(meta_font.pointSizeF() - 1.0, 7.0))
-        meta_font.setBold(False)
-        painter.setFont(meta_font)
-        painter.setPen(QColor(muted))
-        painter.drawText(left, y, width, line_h, int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter), meta)
-
-        # --- snippet: two lines, span-highlighted, always escaped
-        y += line_h + 4
-        clip_h = 2 * line_h + 2
+        line_h = option.fontMetrics.height()
+        snippet_y = y + title_fm.height() + 5
         doc = QTextDocument()
+        doc.setDocumentMargin(0)
         doc.setDefaultFont(option.font)
-        html = snippet_html(
-            result.snippet,
-            result.spans,
-            fg_hex=colors["hl_text"] if selected else colors["text"],
-            hl_hex=colors["accent_soft"],
-            bold_only=selected,
-        )
         doc.setHtml(
-            f'<div style="color:{fg};">{html}</div>'
+            '<div style="color:'
+            + _hex(QColor(colors["text"]))
+            + ';">'
+            + snippet_html(
+                result.snippet,
+                result.spans,
+                fg_hex=_hex(QColor(colors["text"])),
+                hl_hex=_hex(QColor(colors["accent_soft"])),
+            )
+            + "</div>"
         )
         doc.setTextWidth(width)
         painter.save()
-        painter.translate(left, y)
-        painter.setClipRect(0, 0, width, clip_h)
+        painter.translate(left, snippet_y)
+        painter.setClipRect(0, 0, width, line_h + 3)
         doc.drawContents(painter)
-        painter.restore()  # pops translate + clip
+        painter.restore()
+
+        meta_y = snippet_y + line_h + 6
+        meta_parts = [part for part in (result.deck, result.note_type) if part]
+        if result.tags:
+            meta_parts.append(" ".join("#" + tag for tag in result.tags[:4]))
+        meta_font = QFont(option.font)
+        meta_font.setPointSizeF(max(meta_font.pointSizeF() - 0.8, 8.0))
+        meta_font.setBold(True)
+        painter.setFont(meta_font)
+        meta_fm = painter.fontMetrics()
+        meta = meta_fm.elidedText(
+            "  ›  ".join(meta_parts),
+            Qt.TextElideMode.ElideRight,
+            width,
+        )
+        painter.setPen(QColor(colors["muted"]))
+        painter.drawText(
+            left,
+            meta_y,
+            width,
+            meta_fm.height(),
+            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+            meta,
+        )
+
+        chip_y = meta_y + meta_fm.height() + 5
+        chip_font = QFont(option.font)
+        chip_font.setPointSizeF(max(chip_font.pointSizeF() - 0.9, 8.0))
+        chip_font.setBold(True)
+        painter.setFont(chip_font)
+        chip_fm = painter.fontMetrics()
+        chip_x = left
+        named_reasons = list(result.match_reasons[:3])
+        hidden_reasons = max(0, len(result.match_reasons) - len(named_reasons))
+
+        def chip_width(label: str) -> int:
+            return chip_fm.horizontalAdvance(label) + 2 * self.CHIP_H_PAD
+
+        def total_width(labels: Sequence[str]) -> int:
+            if not labels:
+                return 0
+            return (
+                sum(chip_width(label) for label in labels)
+                + self.CHIP_GAP * (len(labels) - 1)
+            )
+
+        available_width = max(0, right - left)
+        while True:
+            overflow = f"+{hidden_reasons}" if hidden_reasons else ""
+            reasons = named_reasons + ([overflow] if overflow else [])
+            if total_width(reasons) <= available_width:
+                break
+            if named_reasons:
+                named_reasons.pop()
+                hidden_reasons += 1
+                continue
+            reasons = (
+                [overflow]
+                if overflow and chip_width(overflow) <= available_width
+                else []
+            )
+            break
+        for reason in reasons:
+            width_for_chip = chip_width(reason)
+            chip_rect = QRect(chip_x, chip_y, width_for_chip, self.CHIP_H)
+            chip_fill, chip_border, chip_text = self._chip_palette(reason, colors)
+            painter.setBrush(chip_fill)
+            painter.setPen(QPen(chip_border, 1.0))
+            painter.drawRoundedRect(chip_rect, self.CHIP_H // 2, self.CHIP_H // 2)
+            painter.setPen(chip_text)
+            painter.drawText(
+                chip_rect,
+                int(Qt.AlignmentFlag.AlignCenter),
+                reason,
+            )
+            chip_x += width_for_chip + self.CHIP_GAP
 
         painter.restore()
 
@@ -668,6 +858,10 @@ class ResultsView(QListView):
         self.setMouseTracking(True)
         self.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setStyleSheet(
+            "QListView { background: transparent; border: none; outline: none; }"
+            "QListView::item { background: transparent; border: none; }"
+        )
         self.setAccessibleName("Search results")
         self.setAccessibleDescription(
             "List of matching notes. Click a checkbox or press Space to include "

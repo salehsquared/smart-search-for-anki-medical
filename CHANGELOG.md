@@ -18,7 +18,8 @@
 - Browser opening for the exact selected card set.
 - Undoable card flags, suspend/unsuspend actions, and note tags from the toolbar
   or result context menu.
-- Compact visual indicators for live flag and suspension state.
+- Palette-aware result cards, compact live flag/suspension indicators, a clear
+  Semantic setup surface, and polished Settings/About screens.
 - Automatic targeted refresh after ordinary note additions, edits, and deletes.
 - Settings and About surfaces with privacy, support, MedBrevia, and creator
   details.

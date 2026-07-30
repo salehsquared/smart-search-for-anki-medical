@@ -27,6 +27,7 @@ try:  # Anki runtime (Anki re-exports Qt, signals, and widget classes)
         QEvent,
         QFont,
         QFontMetrics,
+        QIcon,
         QFormLayout,
         QFrame,
         QHBoxLayout,
@@ -40,6 +41,7 @@ try:  # Anki runtime (Anki re-exports Qt, signals, and widget classes)
         QObject,
         QPainter,
         QPalette,
+        QPen,
         QPixmap,
         QProgressBar,
         QPushButton,
@@ -83,10 +85,12 @@ except ImportError:  # standalone development / testing
         QDesktopServices,
         QFont,
         QFontMetrics,
+        QIcon,
         QAction,
         QKeySequence,
         QPainter,
         QPalette,
+        QPen,
         QPixmap,
         QShortcut,
         QTextDocument,
@@ -158,19 +162,33 @@ class PaletteMixin:
 
     def _palette_colors(self: QWidget) -> dict[str, str]:
         pal = self.palette()
-        base = pal.color(QPalette.ColorRole.Base)
-        text = pal.color(QPalette.ColorRole.Text)
-        accent = pal.color(QPalette.ColorRole.Highlight)
-        window = pal.color(QPalette.ColorRole.Window)
+        app_pal = QApplication.palette()
+
+        def concrete(role):
+            color = pal.color(role)
+            return app_pal.color(role) if color.alpha() == 0 else color
+
+        base = concrete(QPalette.ColorRole.Base)
+        text = concrete(QPalette.ColorRole.Text)
+        accent = concrete(QPalette.ColorRole.Highlight)
+        window = concrete(QPalette.ColorRole.Window)
+        button = concrete(QPalette.ColorRole.Button)
         is_dark = base.lightness() < 128
         return {
             "base": _hex(base),
             "text": _hex(text),
             "accent": _hex(accent),
+            "accent_text": _hex(
+                concrete(QPalette.ColorRole.HighlightedText)
+            ),
             "accent_soft": _hex(blend_colors(base, accent, 0.18)),
             "accent_mid": _hex(blend_colors(base, accent, 0.35)),
             "chip_bg": _hex(blend_colors(window, text, 0.07)),
             "chip_border": _hex(blend_colors(window, text, 0.22)),
+            "surface": _hex(blend_colors(window, text, 0.055)),
+            "surface_high": _hex(blend_colors(window, text, 0.085)),
+            "button": _hex(button),
+            "muted": _hex(concrete(QPalette.ColorRole.PlaceholderText)),
             "window": _hex(window),
             # Semantic status colors chosen per-theme for contrast; the
             # accompanying text label always carries the meaning too.
@@ -180,22 +198,73 @@ class PaletteMixin:
         }
 
 
-class SearchField(QLineEdit):
-    """The dominant query input with a native clear affordance."""
+class SearchField(QLineEdit, PaletteMixin):
+    """The dominant query input with a quiet leading search glyph."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setPlaceholderText("Search notes, tags, decks…")
         self.setClearButtonEnabled(True)
-        self.setMinimumHeight(38)
+        self.setMinimumHeight(48)
         font = self.font()
-        font.setPointSizeF(font.pointSizeF() * 1.25)
+        font.setPointSizeF(font.pointSizeF() * 1.12)
         self.setFont(font)
+        self._search_action = self.addAction(
+            QIcon(),
+            QLineEdit.ActionPosition.LeadingPosition,
+        )
         self.setAccessibleName("Search query")
         self.setAccessibleDescription(
             "Type to search notes. Press Down to move to results, "
             f"{_PRIMARY_KEY}+1, 2 or 3 switches search mode."
         )
+        self.refresh_palette()
+
+    def _search_icon(self, color: str) -> QIcon:
+        pixmap = QPixmap(22, 22)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor(color), 1.8)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawEllipse(3, 3, 11, 11)
+        painter.drawLine(12, 12, 18, 18)
+        painter.end()
+        return QIcon(pixmap)
+
+    def refresh_palette(self) -> None:
+        c = self._palette_colors()
+        self._search_action.setIcon(self._search_icon(c["muted"]))
+        self.setStyleSheet(
+            "QLineEdit {"
+            f" background: {c['surface']}; color: {c['text']};"
+            f" border: 1px solid {c['chip_border']}; border-radius: 11px;"
+            " padding: 0 12px 0 4px;"
+            " selection-background-color: "
+            f"{c['accent']}; selection-color: {c['accent_text']};"
+            "}"
+            f"QLineEdit:hover {{ border-color: {c['accent_mid']}; }}"
+            f"QLineEdit:focus {{ border: 1px solid {c['accent']};"
+            f" background: {c['surface_high']}; }}"
+            f"QLineEdit:disabled {{ color: {c['muted']}; }}"
+        )
+
+    def changeEvent(self, event: QEvent) -> None:
+        if (
+            event.type()
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+            )
+            and not getattr(self, "_refreshing_palette", False)
+        ):
+            self._refreshing_palette = True
+            try:
+                self.refresh_palette()
+            finally:
+                self._refreshing_palette = False
+        super().changeEvent(event)
 
 
 class SegmentedModeControl(QWidget, PaletteMixin):
@@ -211,7 +280,7 @@ class SegmentedModeControl(QWidget, PaletteMixin):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        layout.setSpacing(4)
 
         hints = {
             SearchMode.SMART: f"Smart search: typo tolerance and aliases ({_PRIMARY_KEY}+1)",
@@ -225,6 +294,7 @@ class SegmentedModeControl(QWidget, PaletteMixin):
             btn.setToolTip(hints[mode])
             btn.setAccessibleName(f"{mode.label} search mode")
             btn.setAccessibleDescription(hints[mode])
+            btn.setMinimumSize(92, 48)
             btn.clicked.connect(lambda _checked=False, m=mode: self.modeChanged.emit(m))
             self._group.addButton(btn)
             self._buttons[mode] = btn
@@ -252,21 +322,25 @@ class SegmentedModeControl(QWidget, PaletteMixin):
         self.setStyleSheet(
             "QToolButton {"
             f"  border: 1px solid {c['chip_border']};"
-            f"  background: {c['window']}; color: {c['text']};"
-            "  padding: 6px 14px; font-weight: 500;"
+            f"  background: {c['surface']}; color: {c['muted']};"
+            "  border-radius: 10px; padding: 8px 16px; font-weight: 600;"
             "}"
-            "QToolButton:first { border-top-left-radius: 8px; border-bottom-left-radius: 8px; }"
-            "QToolButton:last { border-top-right-radius: 8px; border-bottom-right-radius: 8px; }"
-            "QToolButton:middle { border-left: none; border-right: none; }"
-            f"QToolButton:checked {{ background: {c['accent_soft']}; color: {c['text']};"
-            f"  border-color: {c['accent_mid']}; font-weight: 600; }}"
-            f"QToolButton:focus {{ border-color: {c['accent']}; }}"
-            f"QToolButton:hover:!checked {{ background: {c['chip_bg']}; }}"
+            f"QToolButton:checked {{ background: {c['accent']};"
+            f" color: {c['accent_text']}; border-color: {c['accent']}; }}"
+            f"QToolButton:focus {{ border: 2px solid {c['accent']}; }}"
+            f"QToolButton:hover:!checked {{ background: {c['surface_high']};"
+            f" color: {c['text']}; }}"
+            f"QToolButton:disabled {{ color: {c['muted']};"
+            f" background: {c['window']}; }}"
         )
 
     def changeEvent(self, event: QEvent) -> None:
         if (
-            event.type() == QEvent.Type.PaletteChange
+            event.type()
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+            )
             and not getattr(self, "_refreshing_palette", False)
         ):
             self._refreshing_palette = True
@@ -294,9 +368,10 @@ class Chip(QFrame, PaletteMixin):
     ) -> None:
         super().__init__(parent)
         self._accent = accent
+        self.setMinimumHeight(32)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 4, 2)
-        layout.setSpacing(4)
+        layout.setContentsMargins(12, 3, 7, 3)
+        layout.setSpacing(5)
 
         label = QLabel(text, self)
         label.setAccessibleName(text)
@@ -332,16 +407,21 @@ class Chip(QFrame, PaletteMixin):
         border = c["accent_mid"] if self._accent else c["chip_border"]
         bg = c["accent_soft"] if self._accent else c["chip_bg"]
         self.setStyleSheet(
-            f"Chip {{ background: {bg}; border: 1px solid {border}; border-radius: 9px; }}"
-            "QLabel { background: transparent; border: none; }"
-            "QToolButton { background: transparent; border: none; padding: 0px 4px;"
-            f"  color: {c['text']}; font-weight: 600; }}"
+            f"Chip {{ background: {bg}; border: 1px solid {border};"
+            " border-radius: 16px; }"
+            "QLabel { background: transparent; border: none; font-weight: 600; }"
+            "QToolButton { background: transparent; border: none; padding: 1px 4px;"
+            f"  color: {c['muted']}; font-weight: 600; }}"
             f"QToolButton:hover {{ color: {c['accent']}; }}"
         )
 
     def changeEvent(self, event: QEvent) -> None:
         if (
-            event.type() == QEvent.Type.PaletteChange
+            event.type()
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+            )
             and not getattr(self, "_refreshing_palette", False)
         ):
             self._refreshing_palette = True
@@ -362,8 +442,8 @@ class ChipBar(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._layout = QHBoxLayout(self)
-        self._layout.setContentsMargins(0, 0, 0, 0)
-        self._layout.setSpacing(6)
+        self._layout.setContentsMargins(0, 2, 0, 2)
+        self._layout.setSpacing(8)
         self._layout.addStretch(1)
         self.setAccessibleName("Active filters and corrections")
         self.setAccessibleDescription(
@@ -406,16 +486,36 @@ class ChipBar(QWidget):
         self.setVisible(bool(filters or corrections))
 
 
+class _StatusDot(QFrame):
+    """Tiny status indicator painted directly to avoid Qt QSS cache drift."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._color = QColor("#808080")
+        self.setFixedSize(10, 10)
+
+    def set_color(self, color: str) -> None:
+        self._color = QColor(color)
+        self.update()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(self._color)
+        painter.drawEllipse(self.rect())
+        painter.end()
+
+
 class IndexStatusWidget(QFrame, PaletteMixin):
     """Compact search status: colored dot plus always-present text."""
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(8, 2, 8, 2)
-        layout.setSpacing(6)
-        self._dot = QFrame(self)
-        self._dot.setFixedSize(10, 10)
+        layout.setContentsMargins(4, 2, 4, 2)
+        layout.setSpacing(8)
+        self._dot = _StatusDot(self)
         self._label = QLabel(self)
         layout.addWidget(self._dot)
         layout.addWidget(self._label)
@@ -430,6 +530,9 @@ class IndexStatusWidget(QFrame, PaletteMixin):
     def status(self) -> IndexStatus:
         return self._status
 
+    def refresh_palette(self) -> None:
+        self._apply()
+
     def _apply(self) -> None:
         c = self._palette_colors()
         color = {
@@ -441,20 +544,23 @@ class IndexStatusWidget(QFrame, PaletteMixin):
         text = self._status.summary
         if self._status.detail:
             text = f"{text} — {self._status.detail}"
-        self._dot.setStyleSheet(f"background: {color}; border-radius: 5px;")
+        self._dot.set_color(color)
         self._label.setText(text)
         self.setToolTip(text)
         self.setAccessibleDescription(text)
         self.setStyleSheet(
-            f"IndexStatusWidget {{ background: {c['chip_bg']};"
-            f" border: 1px solid {c['chip_border']}; border-radius: 9px; }}"
-            "QLabel { background: transparent; border: none; }"
-            "QFrame { border: none; }"
+            "IndexStatusWidget { background: transparent; border: none; }"
+            f"QLabel {{ background: transparent; border: none; color: {c['muted']};"
+            " font-weight: 600; }"
         )
 
     def changeEvent(self, event: QEvent) -> None:
         if (
-            event.type() == QEvent.Type.PaletteChange
+            event.type()
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+            )
             and not getattr(self, "_refreshing_palette", False)
         ):
             self._refreshing_palette = True
@@ -466,21 +572,22 @@ class IndexStatusWidget(QFrame, PaletteMixin):
 
 
 _ABOUT_TAGLINE = (
-    "Search your collection with exact terms, typo-tolerant matching, "
-    "or meaning."
+    "Fast, forgiving medical search—without sending card content away."
 )
-_ABOUT_PRIVACY = (
-    "Searches, card contents, and indexes remain on this computer. "
-    "The add-on connects to the internet only when you explicitly set up "
-    "or repair optional Semantic Search."
+_ABOUT_PRIVACY_LOCAL = (
+    "Searches, card contents, and indexes remain on this computer."
 )
+_ABOUT_PRIVACY_NETWORK = (
+    "Networking occurs only when you explicitly set up or repair Semantic Search."
+)
+_ABOUT_PRIVACY = f"{_ABOUT_PRIVACY_LOCAL} {_ABOUT_PRIVACY_NETWORK}"
 _ABOUT_INDEPENDENCE = (
     "Independent add-on; not affiliated with or endorsed by Anki."
 )
-_ABOUT_LOGO_SIZE = 72
+_ABOUT_LOGO_SIZE = 96
 
 
-class AboutPanel(QWidget):
+class AboutPanel(QWidget, PaletteMixin):
     """The quiet About tab: logo, identity, attribution, privacy, links.
 
     All content comes from :class:`AboutInfo` plus fixed truthful copy, so
@@ -495,11 +602,12 @@ class AboutPanel(QWidget):
     ) -> None:
         super().__init__(parent)
         self._about = about
+        self.setObjectName("aboutPanel")
         self.setAccessibleName(f"About {about.product_name}")
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(20, 16, 20, 12)
-        outer.setSpacing(5)
+        outer.setContentsMargins(42, 28, 42, 20)
+        outer.setSpacing(9)
         outer.addStretch(1)
 
         self.logo_label = QLabel(self)
@@ -522,10 +630,12 @@ class AboutPanel(QWidget):
         self.logo_label.setVisible(not self.logo_label.pixmap().isNull())
         outer.addWidget(self.logo_label)
 
+        outer.addSpacing(8)
+
         self.name_label = QLabel(about.product_name, self)
         name_font = self.name_label.font()
         name_font.setBold(True)
-        name_font.setPointSizeF(name_font.pointSizeF() * 1.15)
+        name_font.setPointSizeF(name_font.pointSizeF() * 1.45)
         self.name_label.setFont(name_font)
         self.name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.name_label.setAccessibleName(about.product_name)
@@ -537,19 +647,10 @@ class AboutPanel(QWidget):
         self.version_label.setVisible(bool(about.version))
         outer.addWidget(self.version_label)
 
-        outer.addSpacing(4)
-
-        self.tagline_label = QLabel(_ABOUT_TAGLINE, self)
-        self.tagline_label.setWordWrap(True)
-        self.tagline_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.tagline_label.setAccessibleName("What Smart Search does")
-        self.tagline_label.setAccessibleDescription(_ABOUT_TAGLINE)
-        outer.addWidget(self.tagline_label)
-
-        outer.addSpacing(4)
+        outer.addSpacing(6)
 
         self.attribution_label = QLabel(
-            f"Built by MedBrevia<br>Created by {escape(about.creator)}",
+            f"Created by {escape(about.creator)} with MedBrevia",
             self,
         )
         self.attribution_label.setTextFormat(Qt.TextFormat.RichText)
@@ -560,14 +661,90 @@ class AboutPanel(QWidget):
         )
         outer.addWidget(self.attribution_label)
 
-        outer.addSpacing(4)
+        outer.addSpacing(2)
 
-        self.privacy_label = QLabel(_ABOUT_PRIVACY, self)
+        self.tagline_label = QLabel(_ABOUT_TAGLINE, self)
+        self.tagline_label.setWordWrap(True)
+        self.tagline_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.tagline_label.setAccessibleName("What Smart Search does")
+        self.tagline_label.setAccessibleDescription(_ABOUT_TAGLINE)
+        outer.addWidget(self.tagline_label)
+
+        outer.addSpacing(8)
+
+        # The privacy promise sits in a quiet two-row card so the local-data
+        # and networking guarantees remain easy to scan.
+        self.privacy_callout = QFrame(self)
+        self.privacy_callout.setObjectName("privacyCallout")
+        callout = QVBoxLayout(self.privacy_callout)
+        callout.setContentsMargins(18, 14, 18, 14)
+        callout.setSpacing(10)
+
+        local_row = QHBoxLayout()
+        local_row.setSpacing(11)
+        self.privacy_dot = _StatusDot(self.privacy_callout)
+        self.privacy_dot.setAccessibleName("")
+        local_row.addWidget(
+            self.privacy_dot,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.privacy_label = QLabel(
+            _ABOUT_PRIVACY_LOCAL,
+            self.privacy_callout,
+        )
         self.privacy_label.setWordWrap(True)
-        self.privacy_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.privacy_label.setAccessibleName("Privacy statement")
         self.privacy_label.setAccessibleDescription(_ABOUT_PRIVACY)
-        outer.addWidget(self.privacy_label)
+        local_row.addWidget(self.privacy_label, 1)
+        callout.addLayout(local_row)
+
+        network_row = QHBoxLayout()
+        network_row.setSpacing(11)
+        self.network_dot = _StatusDot(self.privacy_callout)
+        self.network_dot.setAccessibleName("")
+        network_row.addWidget(
+            self.network_dot,
+            0,
+            Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.network_label = QLabel(
+            _ABOUT_PRIVACY_NETWORK,
+            self.privacy_callout,
+        )
+        self.network_label.setWordWrap(True)
+        self.network_label.setAccessibleName("Networking statement")
+        self.network_label.setAccessibleDescription(_ABOUT_PRIVACY_NETWORK)
+        network_row.addWidget(self.network_label, 1)
+        callout.addLayout(network_row)
+        outer.addWidget(self.privacy_callout)
+
+        outer.addSpacing(8)
+
+        button_row = QHBoxLayout()
+        button_row.setSpacing(12)
+        button_row.addStretch(1)
+        self.mobile_button = QPushButton("Mobile App", self)
+        self.mobile_button.setObjectName("aboutPrimaryButton")
+        self.mobile_button.setMinimumSize(144, 42)
+        self.mobile_button.setAccessibleName("Open the MedBrevia mobile app")
+        self.mobile_button.setVisible(bool(about.website_url))
+        self.mobile_button.clicked.connect(
+            lambda _checked=False: self._open_link(about.website_url)
+        )
+        button_row.addWidget(self.mobile_button)
+
+        self.feedback_button = QPushButton("Feedback", self)
+        self.feedback_button.setObjectName("aboutSecondaryButton")
+        self.feedback_button.setMinimumSize(128, 42)
+        self.feedback_button.setAccessibleName("Send Smart Search feedback")
+        self.feedback_button.setVisible(bool(about.feedback_url))
+        self.feedback_button.clicked.connect(
+            lambda _checked=False: self._open_link(about.feedback_url)
+        )
+        button_row.addWidget(self.feedback_button)
+        button_row.addStretch(1)
+        outer.addLayout(button_row)
 
         self.independence_label = QLabel(_ABOUT_INDEPENDENCE, self)
         self.independence_label.setWordWrap(True)
@@ -576,7 +753,7 @@ class AboutPanel(QWidget):
         self.independence_label.setAccessibleDescription(_ABOUT_INDEPENDENCE)
         outer.addWidget(self.independence_label)
 
-        outer.addSpacing(4)
+        outer.addSpacing(6)
 
         self.links_label = QLabel(self)
         self.links_label.setTextFormat(Qt.TextFormat.RichText)
@@ -586,19 +763,23 @@ class AboutPanel(QWidget):
             | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
         )
         self.links_label.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.links_label.setOpenExternalLinks(False)
         links: list[str] = []
-        for url, text in (
-            (about.website_url, "Mobile App"),
-            (about.feedback_url, "Feedback"),
-            (about.privacy_url, "Privacy"),
-        ):
-            if url:
-                links.append(f'<a href="{escape(url, quote=True)}">{text}</a>')
+        if about.website_url:
+            links.append(
+                f'<a href="{escape(about.website_url, quote=True)}">'
+                "medbrevia.com/app</a>"
+            )
+        if about.privacy_url:
+            links.append(
+                f'<a href="{escape(about.privacy_url, quote=True)}">'
+                "Privacy</a>"
+            )
         self.links_label.setText(" &nbsp;·&nbsp; ".join(links))
         self.links_label.setVisible(bool(links))
         self.links_label.setAccessibleName("About links")
         self.links_label.setAccessibleDescription(
-            "Mobile app, feedback, and privacy links. "
+            "MedBrevia mobile app and privacy links. "
             "Each opens only when you activate it."
         )
         # openExternalLinks stays False: navigation requires an explicit
@@ -608,6 +789,63 @@ class AboutPanel(QWidget):
         outer.addWidget(self.links_label)
 
         outer.addStretch(1)
+        self.refresh_palette()
+
+    def refresh_palette(self) -> None:
+        c = self._palette_colors()
+        self.setStyleSheet(
+            "AboutPanel#aboutPanel { background: transparent; border: none; }"
+            "QFrame#privacyCallout {"
+            f" background: {c['surface_high']};"
+            f" border: 1px solid {c['chip_border']}; border-radius: 12px;"
+            "}"
+            "QPushButton#aboutPrimaryButton {"
+            f" background: {c['accent']}; color: {c['accent_text']};"
+            f" border: 1px solid {c['accent']}; border-radius: 9px;"
+            " font-weight: 700;"
+            "}"
+            "QPushButton#aboutSecondaryButton {"
+            f" background: {c['surface_high']}; color: {c['text']};"
+            f" border: 1px solid {c['chip_border']}; border-radius: 9px;"
+            " font-weight: 700;"
+            "}"
+            "QPushButton#aboutSecondaryButton:hover {"
+            f" border-color: {c['accent_mid']};"
+            "}"
+        )
+        self.version_label.setStyleSheet(
+            f"color: {c['muted']}; background: transparent;"
+        )
+        self.tagline_label.setStyleSheet(
+            f"color: {c['text']}; background: transparent;"
+        )
+        self.attribution_label.setStyleSheet(
+            f"color: {c['muted']}; background: transparent;"
+        )
+        self.independence_label.setStyleSheet(
+            f"color: {c['muted']}; background: transparent;"
+        )
+        self.privacy_dot.set_color(c["ok"])
+        self.network_dot.set_color(c["ok"])
+        self.privacy_label.setStyleSheet("background: transparent;")
+        self.network_label.setStyleSheet("background: transparent;")
+
+    def changeEvent(self, event: QEvent) -> None:
+        if (
+            event.type()
+            in (
+                QEvent.Type.PaletteChange,
+                QEvent.Type.ApplicationPaletteChange,
+            )
+            and not getattr(self, "_refreshing_palette", False)
+        ):
+            self._refreshing_palette = True
+            try:
+                self.refresh_palette()
+            finally:
+                self._refreshing_palette = False
+        super().changeEvent(event)
 
     def _open_link(self, url: str) -> None:
-        self._url_opener(QUrl(str(url)))
+        if url:
+            self._url_opener(QUrl(str(url)))

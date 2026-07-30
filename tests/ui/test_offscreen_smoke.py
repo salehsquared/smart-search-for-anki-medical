@@ -29,7 +29,14 @@ try:
     from ui.controller import SearchController
     from ui.dialog import SearchDialog, _SettingsDialog
     from ui.results import card_state_summary, snippet_html
-    from ui.widgets import AboutPanel, QApplication, Qt
+    from ui.widgets import (
+        AboutPanel,
+        QApplication,
+        QColor,
+        QEvent,
+        QPalette,
+        Qt,
+    )
 except ImportError as error:  # PyQt6 is intentionally not a package dependency.
     IMPORT_ERROR = error
 else:
@@ -314,6 +321,39 @@ class OffscreenSmokeTests(unittest.TestCase):
         dialog.set_mode(SearchMode.EXACT)
         dialog._emit_search()
         self.assertEqual(requested, ["bupropion", "bupropion"])
+        dialog.deleteLater()
+
+    def test_leaving_unprepared_semantic_hides_stale_setup_notice(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                semantic=SemanticStatus(SemanticState.NOT_INSTALLED),
+            )
+        )
+        dialog.set_query("heart failure")
+        dialog.set_mode(SearchMode.SEMANTIC)
+        self.app.processEvents()
+        self.assertTrue(dialog.index_notice.isVisibleTo(dialog))
+
+        dialog.set_mode(SearchMode.SMART)
+        dialog.show_searching()
+        self.app.processEvents()
+        self.assertFalse(dialog.index_notice.isVisibleTo(dialog))
+
+        dialog.show_response(
+            SearchResponse(
+                request_id=3,
+                query="heart failure",
+                results=(SearchResult(note_id=3, title="Heart failure"),),
+                total_results=1,
+                elapsed_ms=18,
+            ),
+            (),
+        )
+        self.assertFalse(dialog.index_notice.isVisibleTo(dialog))
+        self.assertEqual(dialog.summary.text(), "1 result · 18 ms")
         dialog.deleteLater()
 
     def test_edit_during_debounce_does_not_claim_search_is_running(self) -> None:
@@ -759,37 +799,38 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertIn("1.0.10", panel.version_label.text())
         self.assertEqual(
             panel.tagline_label.text(),
-            "Search your collection with exact terms, typo-tolerant matching, "
-            "or meaning.",
+            "Fast, forgiving medical search—without sending card content away.",
         )
-        self.assertIn("Built by MedBrevia", panel.attribution_label.text())
         self.assertIn("Created by Saleh Mostafa", panel.attribution_label.text())
+        self.assertIn("MedBrevia", panel.attribution_label.text())
         self.assertEqual(
             panel.privacy_label.text(),
-            "Searches, card contents, and indexes remain on this computer. "
-            "The add-on connects to the internet only when you explicitly set "
-            "up or repair optional Semantic Search.",
+            "Searches, card contents, and indexes remain on this computer.",
+        )
+        self.assertEqual(
+            panel.network_label.text(),
+            "Networking occurs only when you explicitly set up or repair "
+            "Semantic Search.",
         )
         self.assertIn(
             "not affiliated with or endorsed by Anki",
             panel.independence_label.text(),
         )
 
-        # The canonical bundled logo loads and renders at the restrained size.
+        # The canonical bundled logo loads and renders at the designed size.
         self.assertTrue(LOGO_PATH.is_file())
         self.assertFalse(panel.logo_label.pixmap().isNull())
-        self.assertLessEqual(panel.logo_label.pixmap().width(), 72)
-        self.assertLessEqual(panel.logo_label.pixmap().height(), 72)
+        self.assertLessEqual(panel.logo_label.pixmap().width(), 96)
+        self.assertLessEqual(panel.logo_label.pixmap().height(), 96)
 
         links_text = panel.links_label.text()
         self.assertIn('href="https://medbrevia.com/app"', links_text)
-        self.assertIn('href="mailto:product@medbrevia.com"', links_text)
         self.assertIn(
             'href="https://medbrevia.com/legal/smart-search-privacy"',
             links_text,
         )
-        self.assertIn("Mobile App", links_text)
-        self.assertIn("Feedback", links_text)
+        self.assertEqual(panel.mobile_button.text(), "Mobile App")
+        self.assertEqual(panel.feedback_button.text(), "Feedback")
         self.assertIn("Privacy", links_text)
         # Links need explicit activation and stay keyboard reachable.
         self.assertFalse(panel.links_label.openExternalLinks())
@@ -807,6 +848,9 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertTrue(panel.logo_label.accessibleName())
         self.assertTrue(panel.attribution_label.accessibleName())
         self.assertTrue(panel.privacy_label.accessibleName())
+        self.assertTrue(panel.network_label.accessibleName())
+        self.assertTrue(panel.mobile_button.accessibleName())
+        self.assertTrue(panel.feedback_button.accessibleName())
         self.assertTrue(panel.links_label.accessibleName())
         dialog.deleteLater()
 
@@ -815,13 +859,19 @@ class OffscreenSmokeTests(unittest.TestCase):
         opened: list[str] = []
         panel._url_opener = lambda url: opened.append(url.toString())
 
+        panel.mobile_button.click()
+        panel.feedback_button.click()
         panel.links_label.linkActivated.emit(
             "https://medbrevia.com/legal/smart-search-privacy"
         )
 
         self.assertEqual(
             opened,
-            ["https://medbrevia.com/legal/smart-search-privacy"],
+            [
+                "https://medbrevia.com/app",
+                "mailto:product@medbrevia.com",
+                "https://medbrevia.com/legal/smart-search-privacy",
+            ],
         )
         panel.deleteLater()
 
@@ -1065,6 +1115,80 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertNotIn("ONNX", settings_text)
         settings.deleteLater()
         dialog.deleteLater()
+
+    def test_ready_status_dot_repaints_with_the_ready_color(self) -> None:
+        dialog = SearchDialog()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        dialog.show()
+        self.app.processEvents()
+
+        dot = dialog.status._dot
+        center = dot.grab().toImage().pixelColor(
+            dot.width() // 2,
+            dot.height() // 2,
+        )
+        self.assertEqual(center.name(), dot._color.name())
+        self.assertIn(dot._color.name(), {"#1d7a34", "#3d9a50"})
+        dialog.deleteLater()
+
+    def test_live_palette_switch_restyles_status_and_results(self) -> None:
+        original = QPalette(self.app.palette())
+        dialog = SearchDialog()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        dialog.show_response(
+            SearchResponse(
+                request_id=4,
+                query="palette",
+                results=(SearchResult(note_id=4, title="Palette result"),),
+                total_results=1,
+            ),
+            (),
+        )
+        dialog.show()
+        try:
+            dark = QPalette(original)
+            dark.setColor(QPalette.ColorRole.Window, QColor("#191d24"))
+            dark.setColor(QPalette.ColorRole.Base, QColor("#232830"))
+            dark.setColor(QPalette.ColorRole.Text, QColor("#eef1f5"))
+            dark.setColor(
+                QPalette.ColorRole.PlaceholderText,
+                QColor("#8992a0"),
+            )
+            self.app.setPalette(dark)
+            QApplication.sendEvent(
+                dialog,
+                QEvent(QEvent.Type.PaletteChange),
+            )
+            self.app.processEvents()
+            dark_dot = dialog.status._dot._color.name()
+
+            light = QPalette(original)
+            light.setColor(QPalette.ColorRole.Window, QColor("#f6f7f9"))
+            light.setColor(QPalette.ColorRole.Base, QColor("#ffffff"))
+            light.setColor(QPalette.ColorRole.Text, QColor("#20242b"))
+            light.setColor(
+                QPalette.ColorRole.PlaceholderText,
+                QColor("#68707c"),
+            )
+            self.app.setPalette(light)
+            QApplication.sendEvent(
+                dialog,
+                QEvent(QEvent.Type.PaletteChange),
+            )
+            self.app.processEvents()
+            light_dot = dialog.status._dot._color.name()
+            center = dialog.status._dot.grab().toImage().pixelColor(
+                dialog.status._dot.width() // 2,
+                dialog.status._dot.height() // 2,
+            )
+
+            self.assertNotEqual(dark_dot, light_dot)
+            self.assertEqual(center.name(), light_dot)
+            self.assertFalse(dialog.grab().isNull())
+        finally:
+            dialog.deleteLater()
+            self.app.setPalette(original)
+            self.app.processEvents()
 
     def test_range_checking_and_browser_open_use_only_checked_results(self) -> None:
         dialog = SearchDialog()
