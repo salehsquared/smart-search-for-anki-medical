@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.11] — 2026-07-30
+
+### Added
+
+- Native Anki card Preview for the highlighted search result, including the
+  rendered template, cloze behavior, media, MathJax, audio, flags, and theme.
+- Up/Down navigation through search results while Preview is open.
+- Exact-scope sibling-card navigation for results that represent more than one
+  card, with a compact “Card 1 of N” window title.
+- A Preview toolbar button and Ctrl+Shift+P shortcut.
+
+### Reliability
+
+- Preview follows the highlighted row without changing independent bulk-action
+  checkboxes.
+- Preview closes with the search dialog, tolerates cards deleted after a
+  search, refreshes after card actions, and uses separate saved window geometry
+  from Anki's Browser Preview.
+
 ## [1.0.10] — 2026-07-29
 
 ### Added

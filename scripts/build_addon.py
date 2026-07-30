@@ -462,7 +462,7 @@ def main() -> None:
         type=Path,
         default=Path(__file__).resolve().parent.parent
         / "dist"
-        / "Smart_Search_Medical_1.0.10.ankiaddon",
+        / "Smart_Search_Medical_1.0.11.ankiaddon",
     )
     arguments = parser.parse_args()
     print(

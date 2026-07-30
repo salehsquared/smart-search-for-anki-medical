@@ -42,9 +42,11 @@ from .anki_actions import (
 )
 from .anki_adapter import (
     AnkiCollectionReader,
+    create_result_previewer,
     open_card_ids_in_browser,
     open_native_query_in_browser,
     open_note_ids_in_browser,
+    preview_card_ids,
     profile_key,
 )
 from .backend.anki_reader import iter_collection_notes
@@ -2434,6 +2436,7 @@ class SmartSearchAddonController:
         self._started = False
         self._dialog: Any | None = None
         self._ui_controller: Any | None = None
+        self._previewer: Any | None = None
         self._reconcile_timer: Any | None = None
         self._reconcile_request_lock = threading.Lock()
         self._pending_reconcile_note_ids: set[int] = set()
@@ -2591,6 +2594,11 @@ class SmartSearchAddonController:
                 self._set_results_suspended
             )
             ui_controller.tagActionRequested.connect(self._change_result_tags)
+            dialog.previewToggleRequested.connect(self._toggle_previewer)
+            dialog.previewResultChanged.connect(
+                self._preview_selection_changed
+            )
+            dialog.dialogClosed.connect(self._close_previewer)
 
             config = self.backend._read_config()
             debounce = _bounded_int(
@@ -2624,6 +2632,128 @@ class SmartSearchAddonController:
             pass
         package = sys.modules.get(self.backend.addon_module)
         return str(getattr(package, "__version__", "") or "")
+
+    # ---------------------------------------------------------- card preview
+
+    def _toggle_previewer(self, result: object | None) -> None:
+        if not preview_card_ids(result):
+            self._close_previewer()
+            return
+        if self._previewer is not None:
+            try:
+                self._previewer.raise_()
+                self._previewer.activateWindow()
+            except Exception:
+                self._close_previewer()
+            else:
+                return
+
+        dialog = self._dialog
+        if dialog is None or getattr(self.mw, "col", None) is None:
+            return
+        previewer = None
+        try:
+            previewer = create_result_previewer(
+                self.mw,
+                initial_result=result,
+                on_close=self._previewer_closed,
+                on_previous=lambda: self._move_preview_result(-1),
+                on_next=lambda: self._move_preview_result(1),
+                has_previous=lambda: self._can_move_preview_result(-1),
+                has_next=lambda: self._can_move_preview_result(1),
+            )
+            self._previewer = previewer
+            previewer.open()
+            dialog.set_preview_active(True)
+            # Keep keyboard scrolling in the result list by default. Clicking
+            # the Preview window still exposes its native controls, plus its
+            # own Up/Down shortcuts.
+            dialog.raise_()
+            dialog.activateWindow()
+            dialog.results.setFocus()
+        except Exception as error:
+            self._previewer = None
+            if previewer is not None:
+                try:
+                    previewer.cancel_timer()
+                    previewer.close()
+                except Exception:
+                    pass
+            try:
+                dialog.set_preview_active(False)
+            except RuntimeError:
+                pass
+            self._show_error(f"Could not open card preview: {error}")
+
+    def _preview_selection_changed(self, result: object | None) -> None:
+        previewer = self._previewer
+        if previewer is None:
+            return
+        if not preview_card_ids(result):
+            self._close_previewer()
+            return
+        try:
+            previewer.set_result(result)
+        except Exception as error:
+            self._close_previewer()
+            self._show_error(f"Could not update card preview: {error}")
+
+    def _move_preview_result(self, offset: int) -> bool:
+        dialog = self._dialog
+        if dialog is None:
+            return False
+        try:
+            return bool(dialog.move_result(offset))
+        except RuntimeError:
+            return False
+
+    def _can_move_preview_result(self, offset: int) -> bool:
+        dialog = self._dialog
+        if dialog is None:
+            return False
+        try:
+            return bool(dialog.can_move_result(offset))
+        except RuntimeError:
+            return False
+
+    def _refresh_previewer(self) -> None:
+        previewer = self._previewer
+        dialog = self._dialog
+        if previewer is None or dialog is None:
+            return
+        try:
+            previewer.set_result(
+                dialog.results.current_result(),
+                force=True,
+            )
+        except Exception as error:
+            self._close_previewer()
+            self._show_error(f"Could not refresh card preview: {error}")
+
+    def _previewer_closed(self) -> None:
+        self._previewer = None
+        dialog = self._dialog
+        if dialog is not None:
+            try:
+                dialog.set_preview_active(False)
+            except RuntimeError:
+                pass
+
+    def _close_previewer(self) -> None:
+        previewer = self._previewer
+        self._previewer = None
+        if previewer is not None:
+            try:
+                previewer.cancel_timer()
+                previewer.close()
+            except Exception:
+                pass
+        dialog = self._dialog
+        if dialog is not None:
+            try:
+                dialog.set_preview_active(False)
+            except RuntimeError:
+                pass
 
     def open_native_search(self, query: str) -> None:
         """Public escape hatch for callers that explicitly want native search."""
@@ -2777,6 +2907,7 @@ class SmartSearchAddonController:
                 dialog.finish_batch_action(True, message)
             except RuntimeError:
                 pass
+        self._refresh_previewer()
         self._show_message(message)
         if search_generation is None or int(getattr(outcome, "changed", 0)) <= 0:
             return
@@ -3351,6 +3482,7 @@ class SmartSearchAddonController:
             run_on_main(callback)
 
     def _close_dialog(self) -> None:
+        self._close_previewer()
         dialog = self._dialog
         self._dialog = None
         self._ui_controller = None

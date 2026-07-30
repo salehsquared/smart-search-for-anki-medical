@@ -125,6 +125,173 @@ class _Collection:
 
 
 class TargetedAnkiReaderTests(unittest.TestCase):
+    def test_preview_card_scope_is_positive_ordered_and_deduplicated(self) -> None:
+        result = types.SimpleNamespace(card_ids=(4, "5", 4, 0, -1, "bad"))
+
+        self.assertEqual(adapter.preview_card_ids(result), (4, 5))
+        self.assertEqual(adapter.preview_card_ids(None), ())
+
+    def test_native_previewer_tracks_exact_siblings_and_result_navigation(
+        self,
+    ) -> None:
+        class _Signal:
+            def __init__(self) -> None:
+                self.callbacks = []
+
+            def connect(self, callback) -> None:
+                self.callbacks.append(callback)
+
+            def emit(self) -> None:
+                for callback in tuple(self.callbacks):
+                    callback()
+
+        class _Shortcut:
+            def __init__(self, sequence, parent) -> None:
+                self.sequence = sequence
+                self.parent = parent
+                self.activated = _Signal()
+
+        class _Previewer:
+            def __init__(self, parent, mw, on_close) -> None:
+                self.parent = parent
+                self.mw = mw
+                self._close_callback = on_close
+                self._web = None
+                self._state = "question"
+                self._last_state = None
+                self.render_count = 0
+                self.button_update_count = 0
+                self.title = ""
+
+            def _create_gui(self) -> None:
+                return None
+
+            def open(self) -> None:
+                self._create_gui()
+                self._web = object()
+                self.render_card()
+
+            def render_card(self) -> None:
+                self.render_count += 1
+                self.card_changed()
+                self.card()
+
+            def _render_scheduled(self) -> None:
+                self.card_changed()
+                self.card()
+
+            def _updateButtons(self) -> None:
+                self.button_update_count += 1
+
+            def cancel_timer(self) -> None:
+                return None
+
+            def close(self) -> None:
+                self._on_finished(0)
+
+            def setWindowTitle(self, title: str) -> None:
+                self.title = title
+
+            def _should_enable_prev(self) -> bool:
+                return False
+
+            def _should_enable_next(self) -> bool:
+                return False
+
+            def _on_close(self) -> None:
+                self._web = None
+                self._close_callback()
+
+        restored: list[str] = []
+        saved: list[str] = []
+        previous_moves: list[bool] = []
+        next_moves: list[bool] = []
+        closed: list[bool] = []
+        cards = {
+            11: object(),
+            12: object(),
+            21: object(),
+        }
+        mw = types.SimpleNamespace(
+            col=types.SimpleNamespace(get_card=lambda card_id: cards[card_id])
+        )
+
+        aqt = types.ModuleType("aqt")
+        browser = types.ModuleType("aqt.browser")
+        previewer_module = types.ModuleType("aqt.browser.previewer")
+        previewer_module.MultiCardPreviewer = _Previewer
+        qt = types.ModuleType("aqt.qt")
+        qt.QKeySequence = lambda value: value
+        qt.QShortcut = _Shortcut
+        qt.qconnect = lambda signal, callback: signal.connect(callback)
+        utils = types.ModuleType("aqt.utils")
+        utils.restoreGeom = lambda _widget, key: restored.append(key)
+        utils.saveGeom = lambda _widget, key: saved.append(key)
+
+        replacements = {
+            "aqt": aqt,
+            "aqt.browser": browser,
+            "aqt.browser.previewer": previewer_module,
+            "aqt.qt": qt,
+            "aqt.utils": utils,
+        }
+        original = {name: sys.modules.get(name) for name in replacements}
+        sys.modules.update(replacements)
+        try:
+            preview = adapter.create_result_previewer(
+                mw,
+                initial_result=types.SimpleNamespace(
+                    note_id=1,
+                    card_ids=(11, 12, 11),
+                ),
+                on_close=lambda: closed.append(True),
+                on_previous=lambda: previous_moves.append(True) or True,
+                on_next=lambda: next_moves.append(True) or True,
+                has_previous=lambda: False,
+                has_next=lambda: True,
+            )
+            preview.open()
+
+            self.assertEqual(preview.card(), cards[11])
+            self.assertEqual(preview.title, "Preview · Card 1 of 2")
+            self.assertEqual(restored, ["smartSearchPreview"])
+
+            preview._on_next_card()
+            self.assertEqual(preview.card(), cards[12])
+            self.assertEqual(preview.title, "Preview · Card 2 of 2")
+            self.assertEqual(next_moves, [])
+            preview._on_next_card()
+            self.assertEqual(next_moves, [True])
+
+            preview._on_prev_card()
+            self.assertEqual(preview.card(), cards[11])
+            self.assertEqual(previous_moves, [])
+            preview._up_result_shortcut.activated.emit()
+            preview._down_result_shortcut.activated.emit()
+            self.assertEqual(previous_moves, [True])
+            self.assertEqual(next_moves, [True, True])
+
+            preview.set_result(
+                types.SimpleNamespace(note_id=2, card_ids=(21,))
+            )
+            self.assertEqual(preview.card(), cards[21])
+            self.assertEqual(preview.title, "Preview")
+            preview._render_scheduled()
+            self.assertEqual(preview.button_update_count, 1)
+            preview.set_result(
+                types.SimpleNamespace(note_id=3, card_ids=(999,))
+            )
+            self.assertIsNone(preview.card())
+            preview._render_scheduled()
+            self.assertEqual(saved, ["smartSearchPreview"])
+            self.assertEqual(closed, [True])
+        finally:
+            for name, module in original.items():
+                if module is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = module
+
     def test_reads_only_requested_live_ids_and_omits_deleted_ids(self) -> None:
         collection = _Collection(
             notes={

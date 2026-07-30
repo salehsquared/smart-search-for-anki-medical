@@ -131,8 +131,9 @@ The builder:
 ## Keyboard reference
 
 - **Command/Ctrl-K:** open or focus Smart Search
-- **Up/Down** or **Control-J/Control-K:** move through results
+- **Up/Down** or **Control-J/Control-K:** move through results; an open Preview follows
 - **Return:** open the highlighted result in Anki's Browser
+- **Control-Shift-P:** open or close Anki's native card Preview
 - **Command/Ctrl-Return:** open checked results, or all shown when none are
   checked
 - **Space:** check or uncheck the focused result

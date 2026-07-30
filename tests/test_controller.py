@@ -1681,6 +1681,115 @@ class ControllerTests(unittest.TestCase):
             backend._context.token,
         )
 
+    def test_native_previewer_lifecycle_and_navigation_are_dialog_scoped(
+        self,
+    ) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        result = contracts.SearchResult(
+            note_id=7,
+            card_ids=(71, 72),
+            title="Seven",
+        )
+        replacement = contracts.SearchResult(
+            note_id=8,
+            card_ids=(81,),
+            title="Eight",
+        )
+        active_states: list[bool] = []
+        moves: list[int] = []
+        focus_count: list[bool] = []
+        dialog = types.SimpleNamespace(
+            set_preview_active=active_states.append,
+            move_result=lambda offset: moves.append(offset) or True,
+            can_move_result=lambda offset: offset < 0,
+            raise_=lambda: None,
+            activateWindow=lambda: None,
+            results=types.SimpleNamespace(
+                setFocus=lambda: focus_count.append(True),
+                current_result=lambda: replacement,
+            ),
+        )
+        addon._dialog = dialog
+
+        class _Preview:
+            def __init__(self, closed) -> None:
+                self.closed = closed
+                self.open_count = 0
+                self.cancel_count = 0
+                self.close_count = 0
+                self.updated = []
+
+            def open(self) -> None:
+                self.open_count += 1
+
+            def set_result(self, current, *, force=False) -> None:
+                self.updated.append((current, force))
+
+            def cancel_timer(self) -> None:
+                self.cancel_count += 1
+
+            def close(self) -> None:
+                self.close_count += 1
+                self.closed()
+
+            def raise_(self) -> None:
+                return None
+
+            def activateWindow(self) -> None:
+                return None
+
+        preview_holder = {}
+
+        def create_preview(_mw, **kwargs):
+            preview = _Preview(kwargs["on_close"])
+            preview_holder["preview"] = preview
+            preview_holder["callbacks"] = kwargs
+            return preview
+
+        with patch.object(
+            controller,
+            "create_result_previewer",
+            side_effect=create_preview,
+        ) as factory:
+            addon._toggle_previewer(result)
+
+        preview = preview_holder["preview"]
+        callbacks = preview_holder["callbacks"]
+        factory.assert_called_once()
+        self.assertEqual(factory.call_args.kwargs["initial_result"], result)
+        self.assertEqual(preview.open_count, 1)
+        self.assertEqual(active_states, [True])
+        self.assertEqual(focus_count, [True])
+
+        self.assertTrue(callbacks["on_previous"]())
+        self.assertTrue(callbacks["on_next"]())
+        self.assertEqual(moves, [-1, 1])
+        self.assertTrue(callbacks["has_previous"]())
+        self.assertFalse(callbacks["has_next"]())
+
+        addon._preview_selection_changed(replacement)
+        addon._refresh_previewer()
+        self.assertEqual(
+            preview.updated,
+            [(replacement, False), (replacement, True)],
+        )
+
+        addon._preview_selection_changed(
+            contracts.SearchResult(
+                note_id=9,
+                card_ids=(),
+                title="No live cards",
+            )
+        )
+        self.assertEqual(preview.cancel_count, 1)
+        self.assertEqual(preview.close_count, 1)
+        self.assertIsNone(addon._previewer)
+        self.assertEqual(active_states[-1], False)
+
     def test_semantic_progress_updates_are_coalesced_for_the_gui(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),

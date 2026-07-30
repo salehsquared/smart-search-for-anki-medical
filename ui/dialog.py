@@ -87,9 +87,10 @@ Smart and Exact while Semantic is being prepared.</p>
 <p>Use structured filters such as <b>deck:AnKing</b>, <b>tag:cardio</b>, or
 <b>notetype:Cloze</b> to narrow results.</p>
 <ul>
-<li><b>Down / Up</b> — move between the search field and results</li>
+<li><b>Down / Up</b> — move through results; an open Preview follows</li>
 <li><b>Return in the search field</b> — run the current search immediately</li>
 <li><b>Return in the results</b> — open the highlighted note in the Browser</li>
+<li><b>Ctrl+Shift+P</b> — toggle Anki's card Preview</li>
 <li><b>Space</b> — check or uncheck the highlighted result for bulk actions</li>
 <li><b>Shift+click</b> — check a range of results</li>
 <li><b>Right-click</b> — open, flag, suspend, or tag the clicked/checked results</li>
@@ -395,6 +396,8 @@ class SearchDialog(QDialog):
     modeSelected = pyqtSignal(object)          # SearchMode
     openRequested = pyqtSignal(object)         # SearchResult
     openAllRequested = pyqtSignal(object)      # tuple[SearchResult, ...]
+    previewToggleRequested = pyqtSignal(object)  # SearchResult | None
+    previewResultChanged = pyqtSignal(object)  # SearchResult | None
     filterRemoveRequested = pyqtSignal(object)   # FilterChip
     correctionDismissRequested = pyqtSignal(object)  # Correction
     correctionLiteralRequested = pyqtSignal(object)  # Correction
@@ -483,6 +486,9 @@ class SearchDialog(QDialog):
         self.results.activated.connect(self._on_index_activated)
         self.results.resultContextRequested.connect(
             self._show_result_context_menu
+        )
+        self.results.currentResultChanged.connect(
+            self._on_current_result_changed
         )
         self.stack.insertWidget(_PAGE_RESULTS, self.results)
 
@@ -607,6 +613,19 @@ class SearchDialog(QDialog):
         )
         self.select_button.setMenu(select_menu)
         batch.addWidget(self.select_button)
+
+        self.preview_button = QToolButton(self.batch_bar)
+        self.preview_button.setObjectName("batchPreview")
+        self.preview_button.setText("Preview")
+        self.preview_button.setCheckable(True)
+        self.preview_button.setToolTip(
+            "Show Anki's card preview for the highlighted result"
+        )
+        self.preview_button.setAccessibleName(
+            "Toggle card preview for highlighted result"
+        )
+        self.preview_button.clicked.connect(self._toggle_preview)
+        batch.addWidget(self.preview_button)
 
         self.open_selected_button = QToolButton(self.batch_bar)
         self.open_selected_button.setObjectName("batchBrowser")
@@ -876,6 +895,7 @@ class SearchDialog(QDialog):
         sc("Ctrl+3", lambda: self.set_mode(SearchMode.SEMANTIC))
         sc("Ctrl+L", self.focus_query)
         sc("Ctrl+Return", self._open_all_results)
+        sc("Ctrl+Shift+P", self._toggle_preview_shortcut)
         if sys.platform == "darwin":
             sc("Meta+1", lambda: self.set_mode(SearchMode.SMART))
             sc("Meta+2", lambda: self.set_mode(SearchMode.EXACT))
@@ -897,6 +917,24 @@ class SearchDialog(QDialog):
     def focus_query(self) -> None:
         self.search.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self.search.selectAll()
+
+    def move_result(self, offset: int) -> bool:
+        """Move the highlighted result while preserving current focus."""
+
+        if self.stack.currentIndex() != _PAGE_RESULTS:
+            return False
+        return self.results.move_current_row(offset)
+
+    def can_move_result(self, offset: int) -> bool:
+        return (
+            self.stack.currentIndex() == _PAGE_RESULTS
+            and self.results.can_move(offset)
+        )
+
+    def set_preview_active(self, active: bool) -> None:
+        """Reflect native Preview window state without re-emitting intent."""
+
+        self.preview_button.setChecked(bool(active))
 
     # --------------------------------------------------------- bulk actions
 
@@ -928,6 +966,12 @@ class SearchDialog(QDialog):
         has_selection = selected_rows > 0 and not self._batch_busy
         self.master_check.setEnabled(available)
         self.select_button.setEnabled(available)
+        current_result = self.results.current_result()
+        self.preview_button.setEnabled(
+            available
+            and current_result is not None
+            and bool(current_result.card_ids)
+        )
         self.open_selected_button.setEnabled(has_selection and card_count > 0)
         self.flag_button.setEnabled(has_selection and card_count > 0)
         self.suspend_button.setEnabled(has_selection and card_count > 0)
@@ -948,6 +992,25 @@ class SearchDialog(QDialog):
 
     def _selected_results(self):
         return self.results.results_model().checked_results()
+
+    def _on_current_result_changed(self, result) -> None:
+        self.preview_button.setEnabled(
+            result is not None
+            and bool(result.card_ids)
+            and not self._batch_busy
+        )
+        self.previewResultChanged.emit(result)
+
+    def _toggle_preview(self, checked: bool = False) -> None:
+        result = self.results.current_result()
+        if checked and (result is None or not result.card_ids):
+            self.preview_button.setChecked(False)
+            return
+        self.previewToggleRequested.emit(result if checked else None)
+
+    def _toggle_preview_shortcut(self) -> None:
+        if self.preview_button.isEnabled():
+            self.preview_button.click()
 
     def _prepare_result_context_selection(self, row: int):
         """Resolve the stable bulk-action target for a right-clicked row.

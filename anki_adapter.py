@@ -19,6 +19,223 @@ def profile_key(profile_name: str, collection_path: str) -> str:
     return hashlib.sha256(identity).hexdigest()[:20]
 
 
+def preview_card_ids(result: object | None) -> tuple[int, ...]:
+    """Return the exact, de-duplicated card scope represented by a result."""
+
+    if result is None:
+        return ()
+    output: list[int] = []
+    seen: set[int] = set()
+    for value in getattr(result, "card_ids", ()) or ():
+        try:
+            card_id = int(value)
+        except (TypeError, ValueError):
+            continue
+        if card_id > 0 and card_id not in seen:
+            output.append(card_id)
+            seen.add(card_id)
+    return tuple(output)
+
+
+def create_result_previewer(
+    mw: Any,
+    *,
+    initial_result: object,
+    on_close: Callable[[], None],
+    on_previous: Callable[[], bool],
+    on_next: Callable[[], bool],
+    has_previous: Callable[[], bool],
+    has_next: Callable[[], bool],
+) -> Any:
+    """Create Anki's native reviewer-rendered Preview for search results.
+
+    Imports remain lazy so this module is safe in plain-Python tests. Using
+    Anki's own Previewer preserves card templates, clozes, media, MathJax,
+    reviewer hooks, flags, audio, and theme behavior. Only the card supplier,
+    exact-scope sibling traversal, and Up/Down result navigation are custom.
+    """
+
+    from aqt.browser.previewer import MultiCardPreviewer
+    from aqt.qt import QKeySequence, QShortcut, qconnect
+    from aqt.utils import restoreGeom, saveGeom
+
+    class SearchResultPreviewer(MultiCardPreviewer):
+        def __init__(self) -> None:
+            self._result_key: tuple[int, tuple[int, ...]] = (0, ())
+            self._result_card_ids: tuple[int, ...] = ()
+            self._sibling_index = 0
+            self._cached_card: Any | None = None
+            self._cached_card_id = 0
+            self._last_result_card_id = 0
+            self._set_result_state(initial_result)
+            super().__init__(parent=None, mw=mw, on_close=on_close)
+
+        def _set_result_state(self, result: object | None) -> bool:
+            card_ids = preview_card_ids(result)
+            try:
+                note_id = int(getattr(result, "note_id", 0) or 0)
+            except (TypeError, ValueError):
+                note_id = 0
+            key = (note_id, card_ids)
+            changed = key != self._result_key
+            self._result_key = key
+            self._result_card_ids = card_ids
+            if changed:
+                self._sibling_index = 0
+            elif card_ids:
+                self._sibling_index = min(
+                    self._sibling_index,
+                    len(card_ids) - 1,
+                )
+            else:
+                self._sibling_index = 0
+            return changed
+
+        def _current_card_id(self) -> int:
+            if not self._result_card_ids:
+                return 0
+            return self._result_card_ids[self._sibling_index]
+
+        def _update_title(self) -> None:
+            count = len(self._result_card_ids)
+            if count > 1:
+                self.setWindowTitle(
+                    f"Preview · Card {self._sibling_index + 1} of {count}"
+                )
+            else:
+                self.setWindowTitle("Preview")
+
+        def set_result(self, result: object | None, *, force: bool = False) -> None:
+            changed = self._set_result_state(result)
+            if changed or force:
+                self._cached_card = None
+                self._cached_card_id = 0
+            if force:
+                self._last_state = None
+            self._update_title()
+            if getattr(self, "_web", None) is not None:
+                self.render_card()
+
+        def open(self) -> None:
+            # Base Previewer restores Anki's native Browser geometry. Apply a
+            # separate key immediately afterwards so neither preview changes
+            # the other one's saved placement.
+            super().open()
+            restoreGeom(self, "smartSearchPreview")
+            self._update_title()
+
+        def _on_finished(self, _ok: int) -> None:
+            saveGeom(self, "smartSearchPreview")
+            self._on_close()
+
+        def card(self) -> Any | None:
+            card_id = self._current_card_id()
+            if card_id <= 0 or getattr(self.mw, "col", None) is None:
+                return None
+            if self._cached_card is not None and self._cached_card_id == card_id:
+                return self._cached_card
+            return self._refresh_current_card()
+
+        def _refresh_current_card(self) -> Any | None:
+            """Reload the current card so deleted results never reach Previewer."""
+
+            card_id = self._current_card_id()
+            self._cached_card = None
+            self._cached_card_id = 0
+            if card_id <= 0 or getattr(self.mw, "col", None) is None:
+                return None
+            try:
+                card = self.mw.col.get_card(card_id)
+            except Exception:
+                # A card can be deleted after the immutable result arrives.
+                return None
+            self._cached_card = card
+            self._cached_card_id = card_id
+            return card
+
+        def _close_for_missing_card(self) -> None:
+            self.cancel_timer()
+            self.close()
+
+        def card_changed(self) -> bool:
+            card_id = self._current_card_id()
+            changed = card_id != self._last_result_card_id
+            self._last_result_card_id = card_id
+            return changed
+
+        def _create_gui(self) -> None:
+            super()._create_gui()
+            self._up_result_shortcut = QShortcut(QKeySequence("Up"), self)
+            self._down_result_shortcut = QShortcut(QKeySequence("Down"), self)
+            qconnect(self._up_result_shortcut.activated, on_previous)
+            qconnect(self._down_result_shortcut.activated, on_next)
+            self._update_title()
+
+        def _select_sibling(self, offset: int) -> bool:
+            target = self._sibling_index + int(offset)
+            if not 0 <= target < len(self._result_card_ids):
+                return False
+            self._sibling_index = target
+            self._cached_card = None
+            self._cached_card_id = 0
+            self._update_title()
+            self.render_card()
+            return True
+
+        def _on_prev_card(self) -> None:
+            if not self._select_sibling(-1):
+                on_previous()
+
+        def _on_next_card(self) -> None:
+            if not self._select_sibling(1):
+                on_next()
+
+        def _should_enable_prev(self) -> bool:
+            return (
+                super()._should_enable_prev()
+                or self._sibling_index > 0
+                or has_previous()
+            )
+
+        def _should_enable_next(self) -> bool:
+            return (
+                super()._should_enable_next()
+                or self._sibling_index + 1 < len(self._result_card_ids)
+                or has_next()
+            )
+
+        def _on_replay_audio(self) -> None:
+            if self._refresh_current_card() is None:
+                self._close_for_missing_card()
+                return
+            super()._on_replay_audio()
+
+        def _on_show_both_sides(self, toggle: bool) -> None:
+            if self._refresh_current_card() is None:
+                self._close_for_missing_card()
+                return
+            super()._on_show_both_sides(toggle)
+
+        def _on_bridge_cmd(self, cmd: str) -> Any:
+            if cmd.startswith("play:") and self._refresh_current_card() is None:
+                self._close_for_missing_card()
+                return None
+            return super()._on_bridge_cmd(cmd)
+
+        def _render_scheduled(self) -> None:
+            # MultiCardPreviewer provides the navigation buttons, while its
+            # Browser-specific subclass normally refreshes their enabled
+            # states after each render. This preview has a different result
+            # source, so mirror that final native step here.
+            if self._refresh_current_card() is None:
+                self._close_for_missing_card()
+                return
+            super()._render_scheduled()
+            self._updateButtons()
+
+    return SearchResultPreviewer()
+
+
 class AnkiCollectionReader:
     """Create immutable note snapshots through an open ``Collection`` object.
 

@@ -845,6 +845,7 @@ class ResultsView(QListView):
     """Single-column, keyboard-first result list."""
 
     resultContextRequested = pyqtSignal(int, object)  # row, global QPoint
+    currentResultChanged = pyqtSignal(object)  # SearchResult | None
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -882,12 +883,47 @@ class ResultsView(QListView):
     def select_row(self, row: int) -> None:
         if 0 <= row < self._model.count():
             self.setCurrentIndex(self._model.index(row, 0))
+            self.scrollTo(
+                self.currentIndex(),
+                QListView.ScrollHint.EnsureVisible,
+            )
+
+    def move_current_row(self, offset: int) -> bool:
+        """Move the highlight without changing independent bulk checkboxes."""
+
+        count = self._model.count()
+        if count <= 0:
+            return False
+        current = self.currentIndex().row()
+        if not 0 <= current < count:
+            target = 0 if offset >= 0 else count - 1
+        else:
+            target = max(0, min(count - 1, current + int(offset)))
+        if target == current:
+            return False
+        self.select_row(target)
+        return True
+
+    def can_move(self, offset: int) -> bool:
+        count = self._model.count()
+        current = self.currentIndex().row()
+        if count <= 0:
+            return False
+        if not 0 <= current < count:
+            return True
+        return 0 <= current + int(offset) < count
 
     def checked_results(self) -> tuple[SearchResult, ...]:
         return self._model.checked_results()
 
     def _reset_check_anchor(self) -> None:
         self._range_anchor_row = None
+
+    def currentChanged(self, current: QModelIndex, previous: QModelIndex) -> None:
+        """Publish highlighted-row changes for the optional native preview."""
+
+        super().currentChanged(current, previous)
+        self.currentResultChanged.emit(self._model.result_at(current.row()))
 
     def check_range_to(self, row: int, *, checked: bool = True) -> bool:
         """Check an inclusive range from the persistent click/keyboard anchor."""

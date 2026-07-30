@@ -915,7 +915,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         values = {
             "product_name": "Smart Search for Anki — Medical",
             "creator": "Saleh Mostafa",
-            "version": "1.0.10",
+            "version": "1.0.11",
             "logo_path": str(LOGO_PATH),
             "website_url": "https://medbrevia.com/app",
             "feedback_url": "mailto:product@medbrevia.com",
@@ -965,7 +965,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         panel = dialog.about_panel
         self.assertTrue(panel.isVisibleTo(dialog))
         self.assertEqual(panel.name_label.text(), "Smart Search for Anki — Medical")
-        self.assertIn("1.0.10", panel.version_label.text())
+        self.assertIn("1.0.11", panel.version_label.text())
         self.assertIn("Created by Saleh Mostafa", panel.attribution_label.text())
         self.assertIn("MedBrevia", panel.attribution_label.text())
         self.assertEqual(
@@ -1044,7 +1044,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.10")
+        self.assertEqual(fallback.version, "1.0.11")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())
@@ -1400,6 +1400,97 @@ class OffscreenSmokeTests(unittest.TestCase):
             [1, 2, 3, 4],
         )
         self.assertFalse(dialog.open_selected_button.isEnabled())
+        dialog.deleteLater()
+
+    def test_preview_follows_arrow_navigation_without_changing_checkboxes(
+        self,
+    ) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        results = tuple(
+            SearchResult(
+                note_id=note_id,
+                card_ids=(note_id * 10,),
+                title=f"Result {note_id}",
+            )
+            for note_id in (1, 2, 3)
+        )
+        changed: list[SearchResult | None] = []
+        toggled: list[SearchResult | None] = []
+        dialog.previewResultChanged.connect(changed.append)
+        dialog.previewToggleRequested.connect(toggled.append)
+        dialog.show_response(
+            SearchResponse(
+                request_id=13,
+                query="preview",
+                results=results,
+                total_results=3,
+            ),
+            (),
+        )
+        dialog.results.results_model().set_checked(0, True)
+        dialog.results.setFocus()
+        self.app.processEvents()
+
+        self.assertTrue(dialog.preview_button.isEnabled())
+        dialog.preview_button.click()
+        self.assertEqual(toggled[-1], results[0])
+
+        QTest.keyClick(dialog.results, Qt.Key.Key_Down)
+        self.app.processEvents()
+        self.assertEqual(dialog.results.current_result(), results[1])
+        self.assertEqual(changed[-1], results[1])
+        self.assertEqual(
+            dialog.results.results_model().checked_results(),
+            (results[0],),
+        )
+
+        self.assertTrue(dialog.move_result(1))
+        self.assertEqual(dialog.results.current_result(), results[2])
+        self.assertFalse(dialog.move_result(1))
+        self.assertTrue(dialog.can_move_result(-1))
+        self.assertFalse(dialog.can_move_result(1))
+
+        dialog.set_preview_active(False)
+        self.assertFalse(dialog.preview_button.isChecked())
+        dialog.deleteLater()
+
+    def test_preview_shortcut_toggles_only_when_a_result_is_available(self) -> None:
+        dialog = SearchDialog()
+        toggled: list[SearchResult | None] = []
+        dialog.previewToggleRequested.connect(toggled.append)
+        dialog._toggle_preview_shortcut()
+        self.assertEqual(toggled, [])
+
+        result = SearchResult(note_id=7, card_ids=(71,), title="Seven")
+        dialog.show_response(
+            SearchResponse(
+                request_id=14,
+                query="seven",
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        dialog._toggle_preview_shortcut()
+        dialog._toggle_preview_shortcut()
+
+        self.assertEqual(toggled, [result, None])
+
+        no_card = SearchResult(note_id=8, card_ids=(), title="No live cards")
+        dialog.show_response(
+            SearchResponse(
+                request_id=15,
+                query="missing",
+                results=(no_card,),
+                total_results=1,
+            ),
+            (),
+        )
+        self.assertFalse(dialog.preview_button.isEnabled())
+        dialog._toggle_preview_shortcut()
+        self.assertEqual(toggled, [result, None])
         dialog.deleteLater()
 
     def test_bulk_action_payloads_busy_state_and_success_clear(self) -> None:
