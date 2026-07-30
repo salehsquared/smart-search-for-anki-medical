@@ -39,6 +39,7 @@ try:
         QRect,
         Qt,
     )
+    from PyQt6.QtTest import QTest
 except ImportError as error:  # PyQt6 is intentionally not a package dependency.
     IMPORT_ERROR = error
 else:
@@ -491,7 +492,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller.deleteLater()
         dialog.deleteLater()
 
-    def test_activating_result_still_opens_that_result(self) -> None:
+    def test_return_in_results_opens_highlighted_result(self) -> None:
         dialog = SearchDialog()
         result = SearchResult(note_id=1, title="Selected result")
         dialog.show_response(
@@ -505,12 +506,15 @@ class OffscreenSmokeTests(unittest.TestCase):
         )
         opened: list[SearchResult] = []
         dialog.openRequested.connect(opened.append)
+        dialog.show()
+        dialog.results.select_row(0)
+        dialog.results.setFocus()
+        self.app.processEvents()
 
-        dialog._on_index_activated(
-            dialog.results.results_model().index(0, 0)
-        )
+        QTest.keyClick(dialog.results, Qt.Key.Key_Return)
+        QTest.keyClick(dialog.results, Qt.Key.Key_Enter)
 
-        self.assertEqual(opened, [result])
+        self.assertEqual(opened, [result, result])
         dialog.deleteLater()
 
     def test_search_error_keeps_query_field_editable_and_focused(self) -> None:

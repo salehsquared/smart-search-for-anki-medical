@@ -963,6 +963,15 @@ class ResultsView(QListView):
         event.accept()
 
     def keyPressEvent(self, event) -> None:
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+            index = self.currentIndex()
+            if index.isValid():
+                # QListView's platform styles do not consistently emit
+                # `activated` for Return. Emit it explicitly so keyboard
+                # opening is deterministic while preserving double-click.
+                self.activated.emit(index)
+                event.accept()
+                return
         if event.key() == Qt.Key.Key_Space:
             row = self.currentIndex().row()
             if 0 <= row < self._model.count():

@@ -38,6 +38,27 @@ DEFAULT_FILTER_KEYS = frozenset(
         "has-cd",
     }
 )
+# Anki accepts an empty value for a number of native operators (for example
+# ``re:``, ``deck:``, ``tag:``, and ``card:``), so those must not be mistaken
+# for transient input. These operators are the documented parser branches
+# whose empty value is invalid and can safely be deferred while typing.
+_FILTER_KEYS_REQUIRING_VALUE = frozenset(
+    {
+        "added",
+        "cid",
+        "did",
+        "dupe",
+        "edited",
+        "flag",
+        "introduced",
+        "is",
+        "mid",
+        "nid",
+        "prop",
+        "rated",
+        "resched",
+    }
+)
 _FILTER_RE = re.compile(
     r'^(?P<neg>-?)(?P<key>"(?:\\.|[^"])*"|[^:\s()]+):(?P<value>.*)$',
     re.DOTALL,
@@ -97,7 +118,10 @@ def strip_incomplete_filter_tokens(
         )
         value = match.group("value")
         unfinished = (
-            (native and _filter_value_is_empty(value))
+            (
+                key in _FILTER_KEYS_REQUIRING_VALUE
+                and _filter_value_is_empty(value)
+            )
             or ((native or field) and _quoted_value_is_unfinished(value))
         )
         if unfinished:

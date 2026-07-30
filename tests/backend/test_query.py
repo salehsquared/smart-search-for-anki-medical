@@ -96,14 +96,53 @@ class QueryParserTests(unittest.TestCase):
         self.assertEqual(executable, "Front:")
         self.assertEqual(incomplete, ())
 
-    def test_ui_notetype_alias_can_be_treated_as_incomplete(self) -> None:
+    def test_ui_notetype_alias_preserves_valid_empty_field_search(self) -> None:
         executable, incomplete = strip_incomplete_filter_tokens(
             "bupropion notetype:",
             filter_keys=DEFAULT_FILTER_KEYS | {"notetype"},
         )
 
-        self.assertEqual(executable, "bupropion")
-        self.assertEqual(incomplete, ("notetype:",))
+        self.assertEqual(executable, "bupropion notetype:")
+        self.assertEqual(incomplete, ())
+
+    def test_native_operators_that_accept_empty_values_are_preserved(self) -> None:
+        for operator in (
+            "re",
+            "nc",
+            "sc",
+            "w",
+            "deck",
+            "note",
+            "tag",
+            "card",
+            "preset",
+            "has-cd",
+        ):
+            with self.subTest(operator=operator):
+                query = f"bupropion {operator}:"
+                executable, incomplete = strip_incomplete_filter_tokens(query)
+                self.assertEqual(executable, query)
+                self.assertEqual(incomplete, ())
+
+    def test_native_operators_that_reject_empty_values_are_deferred(self) -> None:
+        for operator in (
+            "added",
+            "cid",
+            "dupe",
+            "edited",
+            "flag",
+            "introduced",
+            "is",
+            "nid",
+            "prop",
+            "rated",
+        ):
+            with self.subTest(operator=operator):
+                executable, incomplete = strip_incomplete_filter_tokens(
+                    f"bupropion {operator}:"
+                )
+                self.assertEqual(executable, "bupropion")
+                self.assertEqual(incomplete, (f"{operator}:",))
 
     def test_incomplete_filter_preserves_valid_prefix_verbatim(self) -> None:
         executable, incomplete = strip_incomplete_filter_tokens(
