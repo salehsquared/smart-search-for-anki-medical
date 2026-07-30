@@ -1,3 +1,4 @@
 # Source-test dependencies only; these are not bundled in the add-on.
-numpy==2.5.1
+numpy==2.4.6; python_version < "3.12"
+numpy==2.5.1; python_version >= "3.12"
 PyQt6==6.10.2
