@@ -583,7 +583,7 @@ def about_privacy() -> str:
             text(472, 163, "About", size=15, fill="#fff", weight=700, anchor="middle"),
             f'<image href="data:image/png;base64,{logo_data}" x="644" y="219" width="152" height="152"/>',
             text(720, 409, "Smart Search for Anki — Medical", size=27, weight=740, anchor="middle"),
-            text(720, 440, "Version 1.0.12", size=14, fill=FAINT, weight=600, anchor="middle"),
+            text(720, 440, "Version 1.0.13", size=14, fill=FAINT, weight=600, anchor="middle"),
             text(720, 483, "Created by Saleh Mostafa with MedBrevia", size=17, fill=MUTED, anchor="middle"),
             text(
                 720,

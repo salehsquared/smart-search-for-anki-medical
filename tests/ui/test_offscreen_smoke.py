@@ -28,7 +28,7 @@ try:
     )
     from ui.controller import SearchController
     from ui.dialog import SearchDialog, _SettingsDialog
-    from ui.results import card_state_summary, snippet_html
+    from ui.results import ResultsView, card_state_summary, snippet_html
     from ui.widgets import (
         AboutPanel,
         QApplication,
@@ -39,6 +39,8 @@ try:
         QRect,
         Qt,
     )
+    from PyQt6.QtCore import QPoint, QPointF
+    from PyQt6.QtGui import QWheelEvent
     from PyQt6.QtTest import QTest
 except ImportError as error:  # PyQt6 is intentionally not a package dependency.
     IMPORT_ERROR = error
@@ -976,7 +978,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         values = {
             "product_name": "Smart Search for Anki — Medical",
             "creator": "Saleh Mostafa",
-            "version": "1.0.12",
+            "version": "1.0.13",
             "logo_path": str(LOGO_PATH),
             "website_url": "https://medbrevia.com/app",
             "feedback_url": "mailto:product@medbrevia.com",
@@ -1027,7 +1029,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         panel = dialog.about_panel
         self.assertTrue(panel.isVisibleTo(dialog))
         self.assertEqual(panel.name_label.text(), "Smart Search for Anki — Medical")
-        self.assertIn("1.0.12", panel.version_label.text())
+        self.assertIn("1.0.13", panel.version_label.text())
         self.assertIn("Created by Saleh Mostafa", panel.attribution_label.text())
         self.assertIn("MedBrevia", panel.attribution_label.text())
         self.assertEqual(
@@ -1106,7 +1108,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.12")
+        self.assertEqual(fallback.version, "1.0.13")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())
@@ -1463,6 +1465,58 @@ class OffscreenSmokeTests(unittest.TestCase):
         )
         self.assertFalse(dialog.open_selected_button.isEnabled())
         dialog.deleteLater()
+
+    def test_mouse_wheel_moves_about_one_card_without_changing_selection(
+        self,
+    ) -> None:
+        view = ResultsView()
+        view.resize(760, 320)
+        view.results_model().set_results(
+            tuple(
+                SearchResult(
+                    note_id=note_id,
+                    card_ids=(note_id * 10,),
+                    title=f"Result {note_id}",
+                )
+                for note_id in range(1, 31)
+            )
+        )
+        view.show()
+        self.app.processEvents()
+        self.assertGreater(view.verticalScrollBar().maximum(), 0)
+        self.assertEqual(view.verticalScrollBar().singleStep(), 40)
+
+        view.select_row(0)
+        view.results_model().set_checked(0, True)
+        highlighted = []
+        view.currentResultChanged.connect(highlighted.append)
+        global_position = QPointF(
+            view.viewport().mapToGlobal(QPoint(20, 20))
+        )
+        wheel = QWheelEvent(
+            QPointF(20, 20),
+            global_position,
+            QPoint(),
+            QPoint(0, -120),
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.ScrollUpdate,
+            False,
+        )
+        QApplication.sendEvent(view.viewport(), wheel)
+        self.app.processEvents()
+
+        # The platform default is three wheel lines, so a 40px single step
+        # moves about one 128px card instead of three cards per notch.
+        self.assertGreater(view.verticalScrollBar().value(), 0)
+        self.assertLessEqual(view.verticalScrollBar().value(), 128)
+        self.assertEqual(view.currentIndex().row(), 0)
+        self.assertEqual(
+            [result.note_id for result in view.checked_results()],
+            [1],
+        )
+        self.assertEqual(highlighted, [])
+        view.deleteLater()
 
     def test_preview_follows_arrow_navigation_without_changing_checkboxes(
         self,

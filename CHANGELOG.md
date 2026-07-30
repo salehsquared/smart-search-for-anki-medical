@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.13] — 2026-07-30
+
+### Added
+
+- Added a compact search-icon **Smart** entry immediately after Browse in
+  Anki's main toolbar.
+
+### Changed
+
+- Reduced ordinary mouse-wheel movement in search results from about three
+  result cards to about one card per notch while preserving native precision
+  trackpad scrolling.
+
 ## [1.0.12] — 2026-07-30
 
 ### Changed

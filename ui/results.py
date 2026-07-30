@@ -72,6 +72,13 @@ _DARK_FLAG_COLORS = {
     7: "#c084fc",
 }
 
+# QListView multiplies its scrollbar single-step by the platform's configured
+# wheel-line count (normally three). The automatic per-pixel step is one full
+# 128px result card, which makes a normal mouse-wheel notch jump about three
+# cards. Forty pixels keeps a notch close to one card while precision
+# trackpads retain Qt's native pixel scrolling and momentum.
+_MOUSE_WHEEL_SINGLE_STEP_PX = 40
+
 
 def snippet_html(snippet: str, spans, fg_hex: str, hl_hex: str, *, bold_only: bool = False) -> str:
     """Build escaped, span-highlighted HTML for a plain-text snippet."""
@@ -859,6 +866,7 @@ class ResultsView(QListView):
         self.setUniformItemSizes(True)
         self.setMouseTracking(True)
         self.setVerticalScrollMode(QListView.ScrollMode.ScrollPerPixel)
+        self.verticalScrollBar().setSingleStep(_MOUSE_WHEEL_SINGLE_STEP_PX)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setStyleSheet(
             "QListView { background: transparent; border: none; outline: none; }"
