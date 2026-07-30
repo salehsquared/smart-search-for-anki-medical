@@ -47,6 +47,7 @@ from .widgets import (  # Qt shim + custom widgets
     QProgressBar,
     QPushButton,
     QShortcut,
+    QSizePolicy,
     QSpinBox,
     QStackedWidget,
     Qt,
@@ -192,16 +193,36 @@ class _SettingsDialog(QDialog):
         self.limit_spin.setAccessibleName("Maximum results per search")
         form.addRow("Result limit", self.limit_spin)
 
-        self.semantic_status = QLabel(search_page)
+        # The status copy and its action share one field column: the wrapping
+        # label reserves its full height-for-width (Minimum vertical policy,
+        # so the layout can never squeeze it into clipping) and the button
+        # sits directly below it at its natural width.
+        semantic_field = QWidget(search_page)
+        semantic_field.setObjectName("semanticSettingsField")
+        semantic_column = QVBoxLayout(semantic_field)
+        semantic_column.setContentsMargins(0, 0, 0, 0)
+        semantic_column.setSpacing(12)
+
+        self.semantic_status = QLabel(semantic_field)
         self.semantic_status.setWordWrap(True)
         self.semantic_status.setAccessibleName("Semantic search status")
-        self.semantic_action = QPushButton(search_page)
+        self.semantic_status.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Minimum,
+        )
+        semantic_column.addWidget(self.semantic_status)
+
+        self.semantic_action = QPushButton(semantic_field)
         self.semantic_action.setObjectName("semanticSettingsAction")
         self.semantic_action.setMinimumHeight(40)
         self.semantic_action.setAccessibleName("Set up semantic search")
+        semantic_column.addWidget(
+            self.semantic_action,
+            0,
+            Qt.AlignmentFlag.AlignLeft,
+        )
         self._set_semantic_status(semantic)
-        form.addRow("Semantic search", self.semantic_status)
-        form.addRow("", self.semantic_action)
+        form.addRow("Semantic search", semantic_field)
 
         self.about_panel = AboutPanel(
             about if about is not None else _default_about_info(),

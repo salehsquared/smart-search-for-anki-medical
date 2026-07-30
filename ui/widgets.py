@@ -48,6 +48,7 @@ try:  # Anki runtime (Anki re-exports Qt, signals, and widget classes)
         QRect,
         QShortcut,
         QSize,
+        QSizePolicy,
         QSpinBox,
         QStackedWidget,
         QStyle,
@@ -113,6 +114,7 @@ except ImportError:  # standalone development / testing
         QMessageBox,
         QProgressBar,
         QPushButton,
+        QSizePolicy,
         QSpinBox,
         QStackedWidget,
         QStyle,
@@ -572,9 +574,6 @@ class IndexStatusWidget(QFrame, PaletteMixin):
         super().changeEvent(event)
 
 
-_ABOUT_TAGLINE = (
-    "Fast, forgiving medical search—without sending card content away."
-)
 _ABOUT_PRIVACY_LOCAL = (
     "Searches, card contents, and indexes remain on this computer."
 )
@@ -589,10 +588,11 @@ _ABOUT_LOGO_SIZE = 96
 
 
 class AboutPanel(QWidget, PaletteMixin):
-    """The quiet About tab: logo, identity, attribution, privacy, links.
+    """The quiet About tab: logo, identity, attribution, privacy, actions.
 
     All content comes from :class:`AboutInfo` plus fixed truthful copy, so
-    the panel stays a dumb renderer.  Links open only on explicit activation
+    the panel stays a dumb renderer.  The Mobile App and Feedback buttons
+    are the only outbound controls; they open only on explicit activation
     and carry no card or search data.
     """
 
@@ -603,6 +603,7 @@ class AboutPanel(QWidget, PaletteMixin):
     ) -> None:
         super().__init__(parent)
         self._about = about
+        self._url_opener = QDesktopServices.openUrl
         self.setObjectName("aboutPanel")
         self.setAccessibleName(f"About {about.product_name}")
 
@@ -661,15 +662,6 @@ class AboutPanel(QWidget, PaletteMixin):
             f"Built by MedBrevia. Created by {about.creator}."
         )
         outer.addWidget(self.attribution_label)
-
-        outer.addSpacing(2)
-
-        self.tagline_label = QLabel(_ABOUT_TAGLINE, self)
-        self.tagline_label.setWordWrap(True)
-        self.tagline_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.tagline_label.setAccessibleName("What Smart Search does")
-        self.tagline_label.setAccessibleDescription(_ABOUT_TAGLINE)
-        outer.addWidget(self.tagline_label)
 
         outer.addSpacing(8)
 
@@ -754,41 +746,6 @@ class AboutPanel(QWidget, PaletteMixin):
         self.independence_label.setAccessibleDescription(_ABOUT_INDEPENDENCE)
         outer.addWidget(self.independence_label)
 
-        outer.addSpacing(6)
-
-        self.links_label = QLabel(self)
-        self.links_label.setTextFormat(Qt.TextFormat.RichText)
-        self.links_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.links_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.LinksAccessibleByMouse
-            | Qt.TextInteractionFlag.LinksAccessibleByKeyboard
-        )
-        self.links_label.setFocusPolicy(Qt.FocusPolicy.TabFocus)
-        self.links_label.setOpenExternalLinks(False)
-        links: list[str] = []
-        if about.website_url:
-            links.append(
-                f'<a href="{escape(about.website_url, quote=True)}">'
-                "medbrevia.com/app</a>"
-            )
-        if about.privacy_url:
-            links.append(
-                f'<a href="{escape(about.privacy_url, quote=True)}">'
-                "Privacy</a>"
-            )
-        self.links_label.setText(" &nbsp;·&nbsp; ".join(links))
-        self.links_label.setVisible(bool(links))
-        self.links_label.setAccessibleName("About links")
-        self.links_label.setAccessibleDescription(
-            "MedBrevia mobile app and privacy links. "
-            "Each opens only when you activate it."
-        )
-        # openExternalLinks stays False: navigation requires an explicit
-        # activation, routed through the desktop services handler.
-        self._url_opener = QDesktopServices.openUrl
-        self.links_label.linkActivated.connect(self._open_link)
-        outer.addWidget(self.links_label)
-
         outer.addStretch(1)
         self.refresh_palette()
 
@@ -816,9 +773,6 @@ class AboutPanel(QWidget, PaletteMixin):
         )
         self.version_label.setStyleSheet(
             f"color: {c['muted']}; background: transparent;"
-        )
-        self.tagline_label.setStyleSheet(
-            f"color: {c['text']}; background: transparent;"
         )
         self.attribution_label.setStyleSheet(
             f"color: {c['muted']}; background: transparent;"

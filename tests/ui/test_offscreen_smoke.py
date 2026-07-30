@@ -34,7 +34,9 @@ try:
         QApplication,
         QColor,
         QEvent,
+        QLabel,
         QPalette,
+        QRect,
         Qt,
     )
 except ImportError as error:  # PyQt6 is intentionally not a package dependency.
@@ -810,6 +812,91 @@ class OffscreenSmokeTests(unittest.TestCase):
         )
         dialog.deleteLater()
 
+    def _assert_semantic_row_fits(self, dialog: _SettingsDialog) -> None:
+        """Status copy and its action fit the Search page without overlap."""
+
+        page = dialog.tabs.widget(0)
+        page_rect = page.rect()
+
+        def page_rect_of(widget) -> QRect:
+            return QRect(widget.mapTo(page, widget.rect().topLeft()), widget.size())
+
+        status_rect = page_rect_of(dialog.semantic_status)
+        self.assertTrue(page_rect.contains(status_rect))
+        # The wrapping label gets at least the height its width requires:
+        # no vertical clipping of any line.
+        self.assertGreaterEqual(
+            status_rect.height(),
+            dialog.semantic_status.heightForWidth(status_rect.width()),
+        )
+        if dialog.semantic_action.isVisibleTo(dialog):
+            action_rect = page_rect_of(dialog.semantic_action)
+            self.assertTrue(page_rect.contains(action_rect))
+            self.assertFalse(status_rect.intersects(action_rect))
+            # The button keeps its full natural width: no truncated label.
+            self.assertGreaterEqual(
+                action_rect.width(),
+                dialog.semantic_action.sizeHint().width(),
+            )
+
+    def test_settings_search_tab_semantic_copy_fits_at_all_sizes(self) -> None:
+        long_indexing = SemanticStatus(
+            SemanticState.INDEXING,
+            detail="Embedding notes 10,000/40,657.",
+            progress=0.17,
+        )
+        model_error = SemanticStatus(
+            SemanticState.ERROR,
+            detail="Semantic preparation stopped unexpectedly.",
+            recovery=SemanticRecovery.MODEL,
+        )
+        waiting = SemanticStatus(
+            SemanticState.MODEL_READY,
+            detail="Build this profile's local semantic index.",
+        )
+        cases = (
+            # Long INDEXING copy plus the waiting-for-Smart-&-Exact line.
+            (long_indexing, False),
+            (long_indexing, True),
+            # Long ERROR copy plus the waiting line, with a visible action.
+            (model_error, False),
+            # Waiting-for-Smart-&-Exact copy with a disabled action.
+            (waiting, False),
+        )
+        for width, height in ((620, 540), (760, 620), (982, 614)):
+            for status, text_index_ready in cases:
+                with self.subTest(
+                    size=(width, height),
+                    state=status.state,
+                    text_index_ready=text_index_ready,
+                ):
+                    dialog = _SettingsDialog(
+                        SearchMode.SMART,
+                        50,
+                        status,
+                        text_index_ready=text_index_ready,
+                    )
+                    dialog.resize(width, height)
+                    dialog.show()
+                    self.app.processEvents()
+
+                    self._assert_semantic_row_fits(dialog)
+                    # All Search-tab controls stay keyboard reachable and
+                    # screen-reader labeled.
+                    for control in (
+                        dialog.mode_combo,
+                        dialog.limit_spin,
+                        dialog.semantic_action,
+                    ):
+                        self.assertNotEqual(
+                            control.focusPolicy(),
+                            Qt.FocusPolicy.NoFocus,
+                        )
+                        self.assertTrue(control.accessibleName())
+                    self.assertTrue(dialog.semantic_status.accessibleName())
+                    dialog.deleteLater()
+                    self.app.processEvents()
+
     def _about_info(self, **overrides) -> AboutInfo:
         values = {
             "product_name": "Smart Search for Anki — Medical",
@@ -850,7 +937,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         )
         dialog.deleteLater()
 
-    def test_about_tab_shows_attribution_privacy_version_logo_and_links(self) -> None:
+    def test_about_tab_shows_attribution_privacy_version_logo_and_buttons(self) -> None:
         dialog = _SettingsDialog(
             SearchMode.SMART,
             50,
@@ -865,10 +952,6 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertTrue(panel.isVisibleTo(dialog))
         self.assertEqual(panel.name_label.text(), "Smart Search for Anki — Medical")
         self.assertIn("1.0.10", panel.version_label.text())
-        self.assertEqual(
-            panel.tagline_label.text(),
-            "Fast, forgiving medical search—without sending card content away.",
-        )
         self.assertIn("Created by Saleh Mostafa", panel.attribution_label.text())
         self.assertIn("MedBrevia", panel.attribution_label.text())
         self.assertEqual(
@@ -885,30 +968,33 @@ class OffscreenSmokeTests(unittest.TestCase):
             panel.independence_label.text(),
         )
 
+        # The tagline and the inline text links were removed entirely.
+        self.assertFalse(hasattr(panel, "tagline_label"))
+        self.assertFalse(hasattr(panel, "links_label"))
+        for label in panel.findChildren(QLabel):
+            self.assertNotIn("Fast, forgiving", label.text())
+            self.assertNotIn("<a ", label.text())
+            self.assertNotIn("medbrevia.com/app", label.text())
+
         # The canonical bundled logo loads and renders at the designed size.
         self.assertTrue(LOGO_PATH.is_file())
         self.assertFalse(panel.logo_label.pixmap().isNull())
         self.assertLessEqual(panel.logo_label.pixmap().width(), 96)
         self.assertLessEqual(panel.logo_label.pixmap().height(), 96)
 
-        links_text = panel.links_label.text()
-        self.assertIn('href="https://medbrevia.com/app"', links_text)
-        self.assertIn(
-            'href="https://medbrevia.com/legal/smart-search-privacy"',
-            links_text,
-        )
+        # The Mobile App and Feedback buttons are the only outbound controls
+        # and stay visible and keyboard reachable.
         self.assertEqual(panel.mobile_button.text(), "Mobile App")
         self.assertEqual(panel.feedback_button.text(), "Feedback")
-        self.assertIn("Privacy", links_text)
-        # Links need explicit activation and stay keyboard reachable.
-        self.assertFalse(panel.links_label.openExternalLinks())
-        self.assertTrue(
-            panel.links_label.textInteractionFlags()
-            & Qt.TextInteractionFlag.LinksAccessibleByKeyboard
+        self.assertTrue(panel.mobile_button.isVisibleTo(dialog))
+        self.assertTrue(panel.feedback_button.isVisibleTo(dialog))
+        self.assertNotEqual(
+            panel.mobile_button.focusPolicy(),
+            Qt.FocusPolicy.NoFocus,
         )
-        self.assertEqual(
-            panel.links_label.focusPolicy(),
-            Qt.FocusPolicy.TabFocus,
+        self.assertNotEqual(
+            panel.feedback_button.focusPolicy(),
+            Qt.FocusPolicy.NoFocus,
         )
 
         # Meaningful accessible names for assistive technology.
@@ -919,7 +1005,6 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertTrue(panel.network_label.accessibleName())
         self.assertTrue(panel.mobile_button.accessibleName())
         self.assertTrue(panel.feedback_button.accessibleName())
-        self.assertTrue(panel.links_label.accessibleName())
         dialog.deleteLater()
 
     def test_about_link_activation_routes_to_desktop_services(self) -> None:
@@ -929,16 +1014,12 @@ class OffscreenSmokeTests(unittest.TestCase):
 
         panel.mobile_button.click()
         panel.feedback_button.click()
-        panel.links_label.linkActivated.emit(
-            "https://medbrevia.com/legal/smart-search-privacy"
-        )
 
         self.assertEqual(
             opened,
             [
                 "https://medbrevia.com/app",
                 "mailto:product@medbrevia.com",
-                "https://medbrevia.com/legal/smart-search-privacy",
             ],
         )
         panel.deleteLater()
