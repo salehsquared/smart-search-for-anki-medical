@@ -119,7 +119,7 @@ def strip_incomplete_filter_tokens(
         value = match.group("value")
         unfinished = (
             (
-                key in _FILTER_KEYS_REQUIRING_VALUE
+                native and key in _FILTER_KEYS_REQUIRING_VALUE
                 and _filter_value_is_empty(value)
             )
             or ((native or field) and _quoted_value_is_unfinished(value))

@@ -171,6 +171,15 @@ class QueryParserTests(unittest.TestCase):
         self.assertEqual(executable, "is: bupropion")
         self.assertEqual(incomplete, ())
 
+    def test_filter_key_override_controls_which_empty_tokens_are_deferred(self) -> None:
+        executable, incomplete = strip_incomplete_filter_tokens(
+            "bupropion is:",
+            filter_keys=(),
+        )
+
+        self.assertEqual(executable, "bupropion is:")
+        self.assertEqual(incomplete, ())
+
     def test_current_native_operators_and_empty_fields_are_filters(self) -> None:
         parser = QueryParser(field_names=("Front",))
         for query in (
