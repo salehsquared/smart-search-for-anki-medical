@@ -31,6 +31,7 @@ from .manifest import (
 ProgressCallback = Callable[[str, int, int], None]
 MACOS_ARM64_RUNTIME_TAG = "darwin-arm64-py313"
 MINIMUM_SEMANTIC_MACOS_MAJOR = 14
+DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.10"
 
 
 class ModelInstallError(RuntimeError):
@@ -223,7 +224,7 @@ class ModelManager:
         part = destination.with_suffix(destination.suffix + ".part")
         resumed_at = part.stat().st_size if part.exists() else 0
         headers = {
-            "User-Agent": "Anki-Smart-Search/1.0",
+            "User-Agent": DOWNLOAD_USER_AGENT,
             "Accept": "application/octet-stream",
         }
         if resumed_at:
