@@ -480,6 +480,67 @@ class ControllerTests(unittest.TestCase):
         self.assertIn("Spelling correction", received[0].results[0].match_reasons)
         self.assertTrue(received[0].results[0].spans)
 
+    def test_unfinished_filter_searches_completed_terms_without_error(self) -> None:
+        context = self.backend._context
+        assert context
+        context.index.rebuild(
+            [
+                models.IndexedNote(
+                    note_id=1001,
+                    fields={"Text": "Bupropion treats depression."},
+                    card_ids=(2001,),
+                    guid="incomplete-filter-test",
+                )
+            ]
+        )
+        context.note_count = 1
+        context.lexical_generation = context.index.generation
+        context.engine = controller.SearchEngine(context.index)
+        self.backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="1 note indexed.",
+        )
+
+        received = []
+        errors = []
+        self.backend.submit_search(
+            contracts.SearchRequest(
+                request_id=70,
+                query="BUPROPRION is:",
+                mode=contracts.SearchMode.SMART,
+            ),
+            received.append,
+            errors.append,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(received[0].query, "BUPROPRION is:")
+        self.assertEqual(received[0].results[0].note_id, 1001)
+        self.assertTrue(
+            any("unfinished filter" in warning for warning in received[0].warnings)
+        )
+        self.assertNotIn("is:", self.backend.mw.col.queries)
+
+    def test_only_unfinished_filter_returns_nonfatal_empty_response(self) -> None:
+        received = []
+        errors = []
+
+        self.backend.submit_search(
+            contracts.SearchRequest(
+                request_id=71,
+                query="is:",
+                mode=contracts.SearchMode.EXACT,
+            ),
+            received.append,
+            errors.append,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(received[0].query, "is:")
+        self.assertEqual(received[0].results, ())
+        self.assertTrue(received[0].warnings)
+        self.assertEqual(self.backend.mw.col.queries, [])
+
     def test_smart_results_include_live_flag_and_suspension_state(self) -> None:
         context = self.backend._context
         assert context

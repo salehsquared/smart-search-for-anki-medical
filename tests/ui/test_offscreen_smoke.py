@@ -458,6 +458,74 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller.deleteLater()
         dialog.deleteLater()
 
+    def test_return_in_search_field_runs_search_without_opening_result(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.show_response(
+            SearchResponse(
+                request_id=1,
+                query="old",
+                results=(SearchResult(note_id=1, title="Old result"),),
+                total_results=1,
+            ),
+            (),
+        )
+        opened: list[SearchResult] = []
+        dialog.openRequested.connect(opened.append)
+        dialog.search.setText("bupropion is:suspended")
+        dialog._on_text_edited("bupropion is:suspended")
+        self.assertTrue(dialog._debounce.isActive())
+
+        dialog.search.returnPressed.emit()
+
+        self.assertFalse(dialog._debounce.isActive())
+        self.assertEqual(len(backend.requests), 1)
+        self.assertEqual(
+            backend.requests[0].query,
+            "bupropion is:suspended",
+        )
+        self.assertEqual(opened, [])
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_activating_result_still_opens_that_result(self) -> None:
+        dialog = SearchDialog()
+        result = SearchResult(note_id=1, title="Selected result")
+        dialog.show_response(
+            SearchResponse(
+                request_id=1,
+                query="selected",
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        opened: list[SearchResult] = []
+        dialog.openRequested.connect(opened.append)
+
+        dialog._on_index_activated(
+            dialog.results.results_model().index(0, 0)
+        )
+
+        self.assertEqual(opened, [result])
+        dialog.deleteLater()
+
+    def test_search_error_keeps_query_field_editable_and_focused(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.search.setText("bupropion is:")
+        dialog.search.setFocus()
+        self.app.processEvents()
+
+        dialog.show_error("This search could not be completed.")
+        self.app.processEvents()
+
+        self.assertTrue(dialog.search.isEnabled())
+        self.assertIs(dialog.focusWidget(), dialog.search)
+        self.assertFalse(dialog.retry_button.hasFocus())
+        dialog.deleteLater()
+
     def test_conditional_rerun_never_supersedes_newer_search_intent(self) -> None:
         backend = _HeldSearchBackend()
         dialog = SearchDialog()

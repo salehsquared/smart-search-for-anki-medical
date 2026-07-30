@@ -87,7 +87,8 @@ Smart and Exact while Semantic is being prepared.</p>
 <b>notetype:Cloze</b> to narrow results.</p>
 <ul>
 <li><b>Down / Up</b> — move between the search field and results</li>
-<li><b>Return</b> — open the selected note in the Browser</li>
+<li><b>Return in the search field</b> — run the current search immediately</li>
+<li><b>Return in the results</b> — open the highlighted note in the Browser</li>
 <li><b>Space</b> — check or uncheck the highlighted result for bulk actions</li>
 <li><b>Shift+click</b> — check a range of results</li>
 <li><b>Right-click</b> — open, flag, suspend, or tag the clicked/checked results</li>
@@ -1261,7 +1262,9 @@ class SearchDialog(QDialog):
         self.message_label.setText(f"Search failed:\n{message}")
         self.message_action.setVisible(False)
         self.retry_button.setVisible(True)
-        self.retry_button.setFocus()
+        # A search syntax/host error should never steal the caret and prevent
+        # the user from correcting the query. Retry remains reachable by Tab.
+        self.search.setFocus(Qt.FocusReason.OtherFocusReason)
         self.stack.setCurrentIndex(_PAGE_MESSAGE)
         self.summary.setText("Error")
         self.summary.setAccessibleDescription(f"Search failed: {message}")
@@ -1650,10 +1653,10 @@ class SearchDialog(QDialog):
         self.modeSelected.emit(mode)
 
     def _on_search_return(self) -> None:
-        """Return in the field opens the first result, if any."""
-        result = self.results.results_model().result_at(0)
-        if result is not None and self.stack.currentIndex() == _PAGE_RESULTS:
-            self.openRequested.emit(result)
+        """Return in the search field commits the current query immediately."""
+
+        self._debounce.stop()
+        self._emit_search()
 
     def _on_index_activated(self, index) -> None:
         result = self.results.results_model().result_at(index.row())

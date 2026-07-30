@@ -215,7 +215,8 @@ class SearchField(QLineEdit, PaletteMixin):
         )
         self.setAccessibleName("Search query")
         self.setAccessibleDescription(
-            "Type to search notes. Press Down to move to results, "
+            "Type to search notes. Press Return to search now, "
+            "Down to move to results, "
             f"{_PRIMARY_KEY}+1, 2 or 3 switches search mode."
         )
         self.refresh_palette()

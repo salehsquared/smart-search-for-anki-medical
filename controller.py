@@ -58,7 +58,11 @@ from .backend.models import (
     IndexedNote,
     SearchResponse as BackendSearchResponse,
 )
-from .backend.query import QueryParser
+from .backend.query import (
+    DEFAULT_FILTER_KEYS,
+    QueryParser,
+    strip_incomplete_filter_tokens,
+)
 from .backend.search import SearchEngine
 from .backend.text import normalize_text, strip_html_and_cloze, tokenize
 from .semantic.service import SemanticDocument, SemanticService
@@ -772,7 +776,51 @@ class AnkiSearchBackend:
         event = self._new_cancellation()
         context = self._context
         token = context.token if context else -1
-        query = _canonical_query(request.query)
+        executable_query, incomplete_filters = strip_incomplete_filter_tokens(
+            request.query,
+            filter_keys=DEFAULT_FILTER_KEYS | {"notetype"},
+            field_names=context.field_names if context is not None else (),
+        )
+        effective_request = (
+            replace(request, query=executable_query)
+            if incomplete_filters
+            else request
+        )
+        query = _canonical_query(executable_query)
+
+        def deliver(response: SearchResponse) -> None:
+            if incomplete_filters:
+                quoted = ", ".join(
+                    f"“{token}”" for token in incomplete_filters
+                )
+                noun = (
+                    "filter was"
+                    if len(incomplete_filters) == 1
+                    else "filters were"
+                )
+                notice = (
+                    f"The unfinished {noun} ignored: {quoted}. "
+                    "Finish it to apply that filter."
+                )
+                response = replace(
+                    response,
+                    query=request.query,
+                    warnings=tuple(
+                        dict.fromkeys((*response.warnings, notice))
+                    ),
+                )
+            on_success(response)
+
+        if not query:
+            self._forget_cancellation(event)
+            deliver(
+                SearchResponse(
+                    request_id=request.request_id,
+                    query=request.query,
+                )
+            )
+            return event.set
+
         parsed = None
         if context is not None:
             try:
@@ -783,13 +831,13 @@ class AnkiSearchBackend:
         # Exact mode is the deterministic escape hatch.  Let Anki parse and
         # execute the complete expression instead of approximating Boolean
         # semantics through the hybrid parser.
-        if request.literal or request.mode is SearchMode.EXACT:
+        if effective_request.literal or effective_request.mode is SearchMode.EXACT:
             self._submit_native_fallback(
-                request,
+                effective_request,
                 query,
                 event,
                 token,
-                on_success,
+                deliver,
                 on_error,
                 warning="",
                 parsed=parsed,
@@ -801,11 +849,11 @@ class AnkiSearchBackend:
             or self.get_status().state is not IndexState.READY
         ):
             self._submit_native_fallback(
-                request,
+                effective_request,
                 query,
                 event,
                 token,
-                on_success,
+                deliver,
                 on_error,
                 warning="Smart Search was unavailable; Exact search was used.",
                 parsed=parsed,
@@ -814,11 +862,11 @@ class AnkiSearchBackend:
 
         if parsed is None:
             self._submit_native_fallback(
-                request,
+                effective_request,
                 query,
                 event,
                 token,
-                on_success,
+                deliver,
                 on_error,
                 warning="Anki's standard search was used for this query.",
                 parsed=None,
@@ -827,11 +875,11 @@ class AnkiSearchBackend:
 
         if parsed.native_search_required:
             self._submit_native_fallback(
-                request,
+                effective_request,
                 query,
                 event,
                 token,
-                on_success,
+                deliver,
                 on_error,
                 warning=(
                     "Mixed Boolean, grouped, or wildcard syntax was evaluated "
@@ -848,20 +896,20 @@ class AnkiSearchBackend:
                     collection, parsed.anki_filter_query
                 ),
                 success=lambda card_scope: self._start_external_search(
-                    request,
+                    effective_request,
                     query,
                     card_scope,
                     event,
                     context,
-                    on_success,
+                    deliver,
                     on_error,
                 ),
                 failure=lambda _error: self._submit_native_fallback(
-                    request,
+                    effective_request,
                     query,
                     event,
                     token,
-                    on_success,
+                    deliver,
                     on_error,
                     warning="Anki's standard search was used for this query.",
                     parsed=parsed,
@@ -869,12 +917,12 @@ class AnkiSearchBackend:
             )
         else:
             self._start_external_search(
-                request,
+                effective_request,
                 query,
                 None,
                 event,
                 context,
-                on_success,
+                deliver,
                 on_error,
             )
         return event.set

@@ -51,6 +51,74 @@ class _Part:
     kind: str
 
 
+def strip_incomplete_filter_tokens(
+    raw_query: str,
+    *,
+    filter_keys: Iterable[str] = DEFAULT_FILTER_KEYS,
+    field_names: Iterable[str] = (),
+) -> tuple[str, tuple[str, ...]]:
+    """Remove only unfinished recognized filters from an executable query.
+
+    Search runs after a short debounce, so a user may pause at ``is:`` or in
+    the middle of ``deck:"Some deck``. Passing those transient fragments to
+    Anki produces a syntax error and can interrupt typing. Built-in operators
+    with no value and recognized filters with an unterminated quoted value are
+    therefore ignored until completed. Empty note-field searches such as
+    ``Front:`` remain valid and untouched.
+    """
+
+    raw = str(raw_query or "").strip()
+    if not raw:
+        return "", ()
+
+    native_keys = {normalize_text(key) for key in filter_keys}
+    known_fields = {normalize_text(name) for name in field_names}
+    tokens, _warnings = _scan(raw)
+    incomplete: list[str] = []
+
+    # Only suppress trailing fragments. An empty operator in the middle of a
+    # submitted query may be intentional input that Anki should validate; the
+    # final token is the transient state produced while someone is typing.
+    for token in reversed(tokens):
+        # Match the token as written. A deliberately quoted literal such as
+        # ``"is:"`` should continue to behave as free text.
+        match = _FILTER_RE.match(token)
+        if match is None:
+            break
+
+        key_text = match.group("key")
+        if len(key_text) >= 2 and key_text[0] == key_text[-1] == '"':
+            key_text = _unescape_quoted(key_text[1:-1])
+        key = normalize_text(key_text)
+        native = key in native_keys
+        field = (
+            key in known_fields
+            or _matches_field_pattern(key, known_fields)
+        )
+        value = match.group("value")
+        unfinished = (
+            (native and _filter_value_is_empty(value))
+            or ((native or field) and _quoted_value_is_unfinished(value))
+        )
+        if unfinished:
+            incomplete.append(token)
+        else:
+            break
+
+    if not incomplete:
+        return raw, ()
+
+    # Source-slice instead of rebuilding tokens so quotes, grouping, Boolean
+    # casing, and whitespace in the valid prefix remain exactly as entered.
+    cut = len(raw)
+    for token in incomplete:
+        start = raw.rfind(token, 0, cut)
+        if start < 0:  # Defensive: _scan() tokens always originate in raw.
+            break
+        cut = start
+    return raw[:cut].rstrip(), tuple(reversed(incomplete))
+
+
 class QueryParser:
     """Split simple conjunctive queries without changing their meaning.
 
@@ -238,6 +306,32 @@ def _scan(raw: str) -> tuple[list[str], tuple[str, ...]]:
 
 def _unescape_quoted(value: str) -> str:
     return value.replace(r"\"", '"').replace(r"\\", "\\")
+
+
+def _quoted_value_is_unfinished(value: str) -> bool:
+    if not value.startswith('"'):
+        return False
+    escaped = False
+    for character in value[1:]:
+        if escaped:
+            escaped = False
+        elif character == "\\":
+            escaped = True
+        elif character == '"':
+            return False
+    return True
+
+
+def _filter_value_is_empty(value: str) -> bool:
+    if not value:
+        return True
+    if _quoted_value_is_unfinished(value):
+        return False
+    return (
+        len(value) >= 2
+        and value[0] == value[-1] == '"'
+        and not _unescape_quoted(value[1:-1])
+    )
 
 
 def _unwrap_whole_term_quote(raw: str) -> str:

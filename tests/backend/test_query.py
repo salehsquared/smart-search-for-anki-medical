@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from backend.query import QueryParser
+from backend.query import (
+    DEFAULT_FILTER_KEYS,
+    QueryParser,
+    strip_incomplete_filter_tokens,
+)
 
 
 class QueryParserTests(unittest.TestCase):
@@ -60,6 +64,73 @@ class QueryParserTests(unittest.TestCase):
     def test_unmatched_quote_is_reported_not_raised(self) -> None:
         parsed = QueryParser().parse('"heart failure')
         self.assertTrue(parsed.warnings)
+
+    def test_transient_incomplete_native_filter_is_omitted(self) -> None:
+        executable, incomplete = strip_incomplete_filter_tokens(
+            "bupropon is:"
+        )
+
+        self.assertEqual(executable, "bupropon")
+        self.assertEqual(incomplete, ("is:",))
+
+    def test_unfinished_quoted_filter_is_omitted_until_closed(self) -> None:
+        incomplete_query = 'bupropion deck:"Psychiatry'
+        executable, incomplete = strip_incomplete_filter_tokens(
+            incomplete_query
+        )
+        complete, complete_fragments = strip_incomplete_filter_tokens(
+            'bupropion deck:"Psychiatry Cards"'
+        )
+
+        self.assertEqual(executable, "bupropion")
+        self.assertEqual(incomplete, ('deck:"Psychiatry',))
+        self.assertEqual(complete, 'bupropion deck:"Psychiatry Cards"')
+        self.assertEqual(complete_fragments, ())
+
+    def test_empty_note_field_search_remains_valid(self) -> None:
+        executable, incomplete = strip_incomplete_filter_tokens(
+            "Front:",
+            field_names=("Front",),
+        )
+
+        self.assertEqual(executable, "Front:")
+        self.assertEqual(incomplete, ())
+
+    def test_ui_notetype_alias_can_be_treated_as_incomplete(self) -> None:
+        executable, incomplete = strip_incomplete_filter_tokens(
+            "bupropion notetype:",
+            filter_keys=DEFAULT_FILTER_KEYS | {"notetype"},
+        )
+
+        self.assertEqual(executable, "bupropion")
+        self.assertEqual(incomplete, ("notetype:",))
+
+    def test_incomplete_filter_preserves_valid_prefix_verbatim(self) -> None:
+        executable, incomplete = strip_incomplete_filter_tokens(
+            '  (deck:"Step 2" OR deck:Current)  BUPROPRION   is:  '
+        )
+
+        self.assertEqual(
+            executable,
+            '(deck:"Step 2" OR deck:Current)  BUPROPRION',
+        )
+        self.assertEqual(incomplete, ("is:",))
+
+    def test_quoted_filter_lookalike_remains_free_text(self) -> None:
+        executable, incomplete = strip_incomplete_filter_tokens(
+            'bupropion "is:"'
+        )
+
+        self.assertEqual(executable, 'bupropion "is:"')
+        self.assertEqual(incomplete, ())
+
+    def test_nontrailing_empty_operator_is_left_for_anki_to_validate(self) -> None:
+        executable, incomplete = strip_incomplete_filter_tokens(
+            "is: bupropion"
+        )
+
+        self.assertEqual(executable, "is: bupropion")
+        self.assertEqual(incomplete, ())
 
     def test_current_native_operators_and_empty_fields_are_filters(self) -> None:
         parser = QueryParser(field_names=("Front",))
