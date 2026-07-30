@@ -1,0 +1,2 @@
+# Preserve exact upstream notice bytes, including source-authored blank-line spaces.
+licenses/tokenizers-0.23.1-NOTICES.txt whitespace=-blank-at-eol

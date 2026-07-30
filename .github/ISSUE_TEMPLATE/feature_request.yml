@@ -1,0 +1,64 @@
+name: Feature request
+description: Suggest an improvement to Smart Search for Anki — Medical
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the workflow problem first. Please use synthetic examples and do not include private card or patient information.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem would this solve?
+      placeholder: "When I search a large collection, I need to …"
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed experience
+      description: Describe what you expect to see or do in the interface.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Smart search
+        - Exact search
+        - Semantic search
+        - Native Anki filters
+        - Results and ranking
+        - Selection and Browser
+        - Flags, suspension, or tags
+        - Indexing and performance
+        - Settings or accessibility
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current workaround
+      description: Explain how you handle this in Anki today, if applicable.
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Collection or privacy considerations
+      description: Could this modify cards, require networking, or expose card content?
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Confirmation
+      options:
+        - label: I used synthetic or fully redacted examples.
+          required: true

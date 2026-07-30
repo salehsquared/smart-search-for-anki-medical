@@ -1,0 +1,63 @@
+# Known limitations
+
+## Platform and installation
+
+- Smart Search runs in Anki Desktop only. AnkiMobile and AnkiDroid do not load
+  desktop add-ons.
+- Semantic Search currently supports **macOS 14 or later on Apple-silicon Macs
+  only**.
+- On an unsupported computer, Semantic should present an unavailable state;
+  Smart and Exact remain usable.
+- Only the Anki versions declared on the release's AnkiWeb listing are supported.
+
+## Indexes and sync
+
+- Smart/Exact and Semantic use separate local indexes. Each Anki profile needs
+  its own initial preparation.
+- The indexes do not sync through AnkiWeb. A second computer prepares its own
+  local copy.
+- Smart and Exact become available after their initial fast setup. Semantic
+  preparation is separate, typically longer, and may temporarily use noticeable
+  CPU and memory.
+- Smart and Exact remain available while Semantic indexes.
+- Adds, edits, and deletes are normally refreshed incrementally. Sync, import,
+  undo/redo, native bulk operations, deck changes, and note-type changes may
+  require a later full reconciliation because Anki does not always expose the
+  affected note IDs.
+- Collection reads share Anki's serialized collection worker. They run away from
+  the graphical interface but can briefly queue behind other collection work.
+- Local model inference competes for CPU and memory with Anki even though it is
+  not performed on the graphical interface thread.
+
+## Search behavior
+
+- Smart search improves misspellings and expands supported aliases, but no
+  spelling or terminology system can infer every intended term.
+- RxTerms improves medication-name matching but is not a comprehensive drug,
+  disease, procedure, laboratory, or guideline ontology.
+- Semantic ranking is approximate. It can miss relevant cards or rank a loosely
+  related card too highly.
+- Adaptive relevance cutoffs intentionally hide weak trailing results. A broader
+  query, Exact mode, or native Anki Browser search may reveal additional cards.
+- Native Anki operators are delegated to Anki. Results may therefore change when
+  Anki changes its search grammar or semantics.
+- Results are grouped for readability, but card-specific filters and actions
+  operate on the exact matching card IDs.
+
+## Actions and state
+
+- Tags apply to notes; flags and suspension apply to cards. A selected note can
+  represent multiple sibling cards, so the selection summary should be reviewed
+  before a bulk action.
+- “All shown” means the currently displayed result set, not every possible
+  result when a relevance cutoff or display limit is active.
+- Anki's Browser remains the authoritative interface for reviewing complex
+  queries and collection state.
+
+## Clinical use
+
+- The add-on searches the user's existing study material. It does not verify
+  whether a card is current or medically correct.
+- Search results and generated similarity rankings are not medical advice and
+  should not be used as a substitute for current clinical references or
+  professional judgment.

@@ -1,0 +1,9 @@
+{
+  "shortcut": "Ctrl+K",
+  "result_limit": 50,
+  "debounce_ms": 160,
+  "auto_reconcile": true,
+  "semantic_enabled": true,
+  "auto_semantic_index": true,
+  "semantic_autostart_delay_ms": 20000
+}

@@ -1,0 +1,1287 @@
+from __future__ import annotations
+
+import os
+from pathlib import Path
+import unittest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+BUNDLE_ROOT = Path(__file__).resolve().parents[2]
+LOGO_PATH = BUNDLE_ROOT / "resources" / "medbrevia-logo.png"
+
+try:
+    from ui.contracts import (
+        AboutInfo,
+        CardState,
+        Correction,
+        HighlightSpan,
+        IndexState,
+        IndexStatus,
+        MatchKind,
+        SearchMode,
+        SearchResponse,
+        SearchResult,
+        SemanticRecovery,
+        SemanticState,
+        SemanticStatus,
+        UISettings,
+    )
+    from ui.controller import SearchController
+    from ui.dialog import SearchDialog, _SettingsDialog
+    from ui.results import card_state_summary, snippet_html
+    from ui.widgets import AboutPanel, QApplication, Qt
+except ImportError as error:  # PyQt6 is intentionally not a package dependency.
+    IMPORT_ERROR = error
+else:
+    IMPORT_ERROR = None
+
+
+class _HeldSearchBackend:
+    def __init__(self, *, submit_error: Exception | None = None) -> None:
+        self.status = IndexStatus(
+            IndexState.READY,
+            semantic=SemanticStatus(SemanticState.READY),
+        )
+        self.submit_error = submit_error
+        self.requests = []
+        self.callbacks = []
+        self.cancel_count = 0
+
+    def load_settings(self):
+        return UISettings()
+
+    def save_settings(self, _settings) -> None:
+        return None
+
+    def get_status(self):
+        return self.status
+
+    def submit_search(self, request, on_success, on_error):
+        if self.submit_error is not None:
+            raise self.submit_error
+        self.requests.append(request)
+        self.callbacks.append((on_success, on_error))
+
+        def cancel() -> None:
+            self.cancel_count += 1
+
+        return cancel
+
+    def rebuild_index(self, on_progress, on_success, on_error):
+        del on_progress, on_success, on_error
+        return None
+
+
+@unittest.skipIf(IMPORT_ERROR is not None, f"Qt runtime unavailable: {IMPORT_ERROR}")
+class OffscreenSmokeTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_dialog_renders_results_and_semantic_setup_state(self) -> None:
+        dialog = SearchDialog()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                semantic=SemanticStatus(SemanticState.NOT_INSTALLED),
+            )
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=1,
+                query="buproprion",
+                results=(
+                    SearchResult(
+                        note_id=42,
+                        title="Bupropion",
+                        snippet="Bupropion is an NDRI.",
+                        spans=(HighlightSpan(0, 9, MatchKind.CORRECTION),),
+                        deck="AnKing",
+                        note_type="Cloze",
+                        match_reasons=("Corrected typo",),
+                        sibling_count=2,
+                    ),
+                ),
+                corrections=(Correction("buproprion", "bupropion"),),
+                total_results=1,
+                elapsed_ms=12,
+            ),
+            (Correction("buproprion", "bupropion"),),
+        )
+
+        self.assertEqual(dialog.results.results_model().count(), 1)
+        self.assertTrue(dialog.semantic_action.isVisibleTo(dialog))
+        opened: list[tuple[SearchResult, ...]] = []
+        dialog.openAllRequested.connect(opened.append)
+        dialog._open_all_results()
+        self.assertEqual(opened[0][0].note_id, 42)
+        dialog.deleteLater()
+
+    def test_snippet_builder_escapes_card_text(self) -> None:
+        rendered = snippet_html(
+            "<script>alert(1)</script>",
+            (HighlightSpan(0, 8),),
+            "#000000",
+            "#ffff00",
+        )
+        self.assertNotIn("<script>", rendered)
+        self.assertIn("&lt;script&gt;", rendered)
+
+    def test_card_state_indicators_have_precise_nonvisual_descriptions(self) -> None:
+        result = SearchResult(
+            note_id=42,
+            card_ids=(101, 102, 103),
+            card_states=(
+                CardState(101, flag=1, suspended=True),
+                CardState(102, flag=4, suspended=True),
+                CardState(103),
+            ),
+            sibling_count=3,
+            title="Mixed card state",
+        )
+        self.assertEqual(
+            card_state_summary(result),
+            "2 of 3 cards suspended. Flags: red 1, blue 1, unflagged 1.",
+        )
+
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        dialog.show_response(
+            SearchResponse(
+                request_id=2,
+                query="mixed",
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        self.app.processEvents()
+        index = dialog.results.results_model().index(0, 0)
+        self.assertEqual(
+            index.data(Qt.ItemDataRole.ToolTipRole),
+            card_state_summary(result),
+        )
+        self.assertIn(
+            "Flags: red 1, blue 1, unflagged 1",
+            index.data(Qt.ItemDataRole.AccessibleTextRole),
+        )
+        # Exercise custom painting with state icons in the actual Qt runtime.
+        self.assertFalse(dialog.grab().isNull())
+        dialog.deleteLater()
+
+    def test_live_state_refresh_rejects_stale_sibling_scope(self) -> None:
+        dialog = SearchDialog()
+        model = dialog.results.results_model()
+        current = SearchResult(
+            note_id=42,
+            card_ids=(101,),
+            card_states=(CardState(101),),
+            title="New filtered result",
+            snippet="Current search content",
+            score=0.98,
+        )
+        model.set_results((current,))
+
+        accepted = model.refresh_results(
+            (
+                SearchResult(
+                    note_id=42,
+                    card_ids=(101, 102),
+                    card_states=(
+                        CardState(101, suspended=True),
+                        CardState(102, flag=1),
+                    ),
+                    title="Stale result",
+                    snippet="Old search content",
+                    score=0.12,
+                ),
+            )
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(model.result_at(0), current)
+        dialog.deleteLater()
+
+    def test_live_state_refresh_merges_only_card_status_metadata(self) -> None:
+        dialog = SearchDialog()
+        model = dialog.results.results_model()
+        current = SearchResult(
+            note_id=42,
+            card_ids=(101, 102),
+            card_states=(CardState(101), CardState(102)),
+            title="New result",
+            snippet="Current snippet",
+            spans=(HighlightSpan(0, 7),),
+            deck="Current deck",
+            note_type="Current type",
+            tags=("current",),
+            match_reasons=("Current reason",),
+            sibling_count=2,
+            browser_query="cid:101 OR cid:102",
+            score=0.98,
+        )
+        model.set_results((current,))
+        fresh_states = (
+            CardState(101, flag=4, suspended=True),
+            CardState(102, flag=1),
+        )
+
+        accepted = model.refresh_results(
+            (
+                SearchResult(
+                    note_id=42,
+                    card_ids=(101, 102),
+                    card_states=fresh_states,
+                    title="Stale title",
+                    snippet="Stale snippet",
+                    spans=(),
+                    deck="Stale deck",
+                    note_type="Stale type",
+                    tags=("stale",),
+                    match_reasons=("Stale reason",),
+                    sibling_count=3,
+                    browser_query="stale query",
+                    score=0.01,
+                ),
+            )
+        )
+
+        self.assertTrue(accepted)
+        merged = model.result_at(0)
+        self.assertIsNotNone(merged)
+        self.assertEqual(merged.card_states, fresh_states)
+        self.assertEqual(merged.sibling_count, 3)
+        self.assertEqual(merged.title, current.title)
+        self.assertEqual(merged.snippet, current.snippet)
+        self.assertEqual(merged.spans, current.spans)
+        self.assertEqual(merged.deck, current.deck)
+        self.assertEqual(merged.note_type, current.note_type)
+        self.assertEqual(merged.tags, current.tags)
+        self.assertEqual(merged.match_reasons, current.match_reasons)
+        self.assertEqual(merged.browser_query, current.browser_query)
+        self.assertEqual(merged.score, current.score)
+        dialog.deleteLater()
+
+    def test_initial_text_index_blocks_search_with_clear_progress(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.BUILDING,
+                progress=0.42,
+                detail="Indexing text 17,000/40,000 notes.",
+            )
+        )
+        self.app.processEvents()
+
+        self.assertFalse(dialog.search.isEnabled())
+        self.assertFalse(dialog.segmented.isEnabled())
+        self.assertIn("Initial setup", dialog.message_label.text())
+        self.assertIn("Smart &amp; Exact", dialog.message_label.text())
+        self.assertTrue(dialog.progress.isVisibleTo(dialog))
+        self.assertEqual(dialog.progress.value(), 42)
+        dialog.deleteLater()
+
+    def test_semantic_indexing_keeps_smart_and_exact_available(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                detail="40,657 notes indexed",
+                semantic=SemanticStatus(
+                    SemanticState.INDEXING,
+                    detail="Embedding notes 10,000/40,657.",
+                    progress=0.25,
+                ),
+            )
+        )
+        self.app.processEvents()
+
+        self.assertTrue(dialog.search.isEnabled())
+        self.assertTrue(dialog.segmented.isEnabled())
+        self.assertTrue(dialog.index_notice.isVisibleTo(dialog))
+        self.assertIn("Smart and Exact search remain available", dialog.index_notice.text())
+        self.assertTrue(dialog.semantic_progress.isVisibleTo(dialog))
+        self.assertEqual(dialog.semantic_progress.value(), 25)
+        self.assertFalse(dialog.semantic_action.isEnabled())
+
+        requested: list[str] = []
+        dialog.searchRequested.connect(requested.append)
+        dialog.set_mode(SearchMode.SMART)
+        dialog.set_query("bupropion")
+        dialog.set_mode(SearchMode.EXACT)
+        dialog._emit_search()
+        self.assertEqual(requested, ["bupropion", "bupropion"])
+        dialog.deleteLater()
+
+    def test_edit_during_debounce_does_not_claim_search_is_running(self) -> None:
+        dialog = SearchDialog()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        dialog.show_response(
+            SearchResponse(
+                request_id=1,
+                query="old",
+                results=(SearchResult(note_id=1, title="Old result"),),
+                total_results=1,
+            ),
+            (),
+        )
+        self.assertEqual(dialog.results.results_model().count(), 1)
+        dialog.set_summary("12 results · 18 ms")
+        dialog.search.setText("bup")
+
+        dialog._on_text_edited("bup")
+
+        self.assertTrue(dialog._debounce.isActive())
+        self.assertEqual(dialog.results.results_model().count(), 1)
+        self.assertFalse(dialog.results.isEnabled())
+        self.assertEqual(dialog.summary.text(), "")
+        self.assertNotEqual(dialog.summary.text(), "Searching…")
+        dialog.deleteLater()
+
+    def test_searching_keeps_prior_results_until_worker_replaces_them(self) -> None:
+        dialog = SearchDialog()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        dialog.show_response(
+            SearchResponse(
+                request_id=1,
+                query="old",
+                results=(SearchResult(note_id=1, title="Old result"),),
+                total_results=1,
+            ),
+            (),
+        )
+
+        dialog.show_searching()
+
+        self.assertEqual(dialog.results.results_model().count(), 1)
+        self.assertFalse(dialog.results.isEnabled())
+        self.assertEqual(dialog.summary.text(), "Searching…")
+
+        dialog.show_response(
+            SearchResponse(
+                request_id=2,
+                query="new",
+                results=(SearchResult(note_id=2, title="New result"),),
+                total_results=1,
+            ),
+            (),
+        )
+        self.assertTrue(dialog.results.isEnabled())
+        self.assertEqual(dialog.results.results_model().result_at(0).note_id, 2)
+        dialog.deleteLater()
+
+    def test_clear_cancels_active_search_and_rejects_late_response(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("first")
+        controller.submit_search("first")
+        self.assertEqual(dialog.summary.text(), "Searching…")
+
+        dialog.search.setText("")
+        dialog._on_text_edited("")
+        self.assertEqual(backend.cancel_count, 1)
+        self.assertEqual(dialog.summary.text(), "")
+
+        backend.callbacks[0][0](
+            SearchResponse(
+                request_id=backend.requests[0].request_id,
+                query="first",
+                results=(SearchResult(note_id=1, title="Stale"),),
+                total_results=1,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(dialog.results.results_model().count(), 0)
+        self.assertEqual(dialog.summary.text(), "")
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_mode_change_stops_debounce_and_dispatches_once(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("heart failure")
+        dialog._on_text_edited("heart failure")
+        self.assertTrue(dialog._debounce.isActive())
+
+        dialog.set_mode(SearchMode.EXACT)
+
+        self.assertFalse(dialog._debounce.isActive())
+        self.assertEqual(len(backend.requests), 1)
+        self.assertIs(backend.requests[0].mode, SearchMode.EXACT)
+        self.assertEqual(dialog.summary.text(), "Searching…")
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_conditional_rerun_never_supersedes_newer_search_intent(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("is:suspended")
+        controller.submit_search("is:suspended")
+        backend.callbacks[-1][0](
+            SearchResponse(
+                request_id=backend.requests[-1].request_id,
+                query="is:suspended",
+                results=(SearchResult(note_id=1, card_ids=(11,), title="One"),),
+                total_results=1,
+            )
+        )
+        self.app.processEvents()
+
+        current = controller.capture_search_generation()
+        self.assertTrue(controller.rerun_search_if_current(current))
+        self.assertEqual(len(backend.requests), 2)
+
+        superseded = controller.capture_search_generation()
+        dialog.search.setText("flag:1")
+        dialog._on_text_edited("flag:1")
+        self.assertFalse(controller.rerun_search_if_current(superseded))
+        self.assertEqual(len(backend.requests), 2)
+
+        before_mode_change = controller.capture_search_generation()
+        dialog.set_mode(SearchMode.EXACT)
+        self.assertFalse(controller.rerun_search_if_current(before_mode_change))
+        self.assertEqual(len(backend.requests), 3)
+        self.assertIs(backend.requests[-1].mode, SearchMode.EXACT)
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_synchronous_submit_error_cannot_leave_searching_state(self) -> None:
+        backend = _HeldSearchBackend(submit_error=RuntimeError("dispatch failed"))
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+
+        controller.submit_search("bupropion")
+
+        self.assertEqual(dialog.summary.text(), "Error")
+        self.assertIn("dispatch failed", dialog.message_label.text())
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_semantic_mode_explains_separate_preparation_and_starts_it(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        requested: list[bool] = []
+        dialog.semanticIndexRequested.connect(lambda: requested.append(True))
+        status = IndexStatus(
+            IndexState.READY,
+            semantic=SemanticStatus(
+                SemanticState.MODEL_READY,
+                detail="Build this profile's local semantic index.",
+            ),
+        )
+        dialog.show_status(status)
+        dialog.set_mode(SearchMode.SEMANTIC)
+        self.app.processEvents()
+
+        self.assertIn("separate one-time preparation", dialog.message_label.text())
+        self.assertEqual(
+            dialog.message_action.text(), "Prepare / Resume Semantic Search"
+        )
+        self.assertTrue(dialog.message_action.isVisibleTo(dialog))
+        dialog.message_action.click()
+        self.assertEqual(requested, [True])
+        dialog.deleteLater()
+
+    def test_semantic_autostart_is_explained_with_build_now_action(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        status = SemanticStatus(
+            SemanticState.MODEL_READY,
+            auto_start=True,
+        )
+        dialog.show_status(IndexStatus(IndexState.READY, semantic=status))
+        dialog.set_mode(SearchMode.SEMANTIC)
+
+        self.assertIn("start automatically", dialog.message_label.text())
+        self.assertEqual(
+            dialog.message_action.text(),
+            "Prepare Semantic Search Now",
+        )
+        self.assertEqual(dialog.semantic_action.text(), "Prepare Now")
+        dialog.deleteLater()
+
+    def test_no_results_replaces_semantic_action_and_escapes_query(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                semantic=SemanticStatus(SemanticState.MODEL_READY),
+            )
+        )
+        dialog.set_mode(SearchMode.SEMANTIC)
+        self.assertTrue(dialog.message_action.isVisibleTo(dialog))
+
+        dialog.show_response(
+            SearchResponse(request_id=2, query="<b>missing</b>"),
+            (),
+        )
+        self.app.processEvents()
+
+        self.assertFalse(dialog.message_action.isVisibleTo(dialog))
+        self.assertEqual(
+            dialog.message_label.textFormat(),
+            Qt.TextFormat.PlainText,
+        )
+        self.assertIn("<b>missing</b>", dialog.message_label.text())
+        dialog.deleteLater()
+
+    def test_semantic_ready_retries_pending_query_once_and_clears_message(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                semantic=SemanticStatus(SemanticState.INDEXING, progress=0.99),
+            )
+        )
+        dialog.set_mode(SearchMode.SEMANTIC)
+        dialog.search.setText("heart failure")
+        self.assertEqual(dialog._message_kind, "semantic")
+
+        requested: list[str] = []
+        dialog.searchRequested.connect(requested.append)
+        ready = IndexStatus(
+            IndexState.READY,
+            semantic=SemanticStatus(SemanticState.READY, indexed_notes=100),
+        )
+        dialog.show_status(ready)
+        self.app.processEvents()
+
+        self.assertEqual(requested, ["heart failure"])
+        self.assertEqual(dialog._message_kind, "")
+        self.assertEqual(dialog.stack.currentIndex(), 0)
+        self.assertFalse(dialog.message_action.isVisibleTo(dialog))
+
+        # A later periodic READY refresh must not submit the same query again.
+        dialog.show_status(ready)
+        self.assertEqual(requested, ["heart failure"])
+        dialog.deleteLater()
+
+    def test_semantic_ready_without_query_returns_to_help(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                semantic=SemanticStatus(SemanticState.INDEXING),
+            )
+        )
+        dialog.set_mode(SearchMode.SEMANTIC)
+        self.assertEqual(dialog._message_kind, "semantic")
+
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                semantic=SemanticStatus(SemanticState.READY),
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(dialog._message_kind, "")
+        self.assertEqual(dialog.stack.currentIndex(), 0)
+        dialog.deleteLater()
+
+    def test_semantic_error_retries_index_not_install(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        index_requests: list[bool] = []
+        install_requests: list[bool] = []
+        dialog.semanticIndexRequested.connect(lambda: index_requests.append(True))
+        dialog.semanticInstallRequested.connect(lambda: install_requests.append(True))
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                semantic=SemanticStatus(
+                    SemanticState.ERROR,
+                    detail="Embedding stopped.",
+                ),
+            )
+        )
+
+        self.assertEqual(dialog.semantic_action.text(), "Try Again")
+        dialog.semantic_action.click()
+        dialog.set_mode(SearchMode.SEMANTIC)
+        self.assertEqual(dialog.message_action.text(), "Try Again")
+        dialog.message_action.click()
+
+        self.assertEqual(index_requests, [True, True])
+        self.assertEqual(install_requests, [])
+        dialog.deleteLater()
+
+    def test_settings_semantic_error_retries_index(self) -> None:
+        dialog = _SettingsDialog(
+            SearchMode.SMART,
+            50,
+            SemanticStatus(SemanticState.ERROR),
+        )
+        dialog.show()
+        index_requests: list[bool] = []
+        install_requests: list[bool] = []
+        dialog.semanticIndexRequested.connect(lambda: index_requests.append(True))
+        dialog.semanticInstallRequested.connect(lambda: install_requests.append(True))
+
+        self.assertEqual(dialog.semantic_action.text(), "Try Again")
+        dialog.semantic_action.click()
+
+        self.assertEqual(index_requests, [True])
+        self.assertEqual(install_requests, [])
+        dialog.deleteLater()
+
+    def test_semantic_model_error_routes_to_repair(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        index_requests: list[bool] = []
+        install_requests: list[bool] = []
+        dialog.semanticIndexRequested.connect(lambda: index_requests.append(True))
+        dialog.semanticInstallRequested.connect(lambda: install_requests.append(True))
+        status = SemanticStatus(
+            SemanticState.ERROR,
+            detail="Could not load ONNX runtime.",
+            recovery=SemanticRecovery.MODEL,
+        )
+        dialog.show_status(IndexStatus(IndexState.READY, semantic=status))
+
+        self.assertEqual(dialog.semantic_action.text(), "Repair Semantic")
+        self.assertNotIn("ONNX", dialog.semantic_status.toolTip())
+        dialog.semantic_action.click()
+        dialog.set_mode(SearchMode.SEMANTIC)
+        self.assertEqual(dialog.message_action.text(), "Repair Semantic Search")
+        self.assertNotIn("ONNX", dialog.message_label.text())
+        dialog.message_action.click()
+
+        self.assertEqual(index_requests, [])
+        self.assertEqual(install_requests, [True, True])
+        dialog.deleteLater()
+
+    def test_settings_semantic_model_error_routes_to_repair(self) -> None:
+        dialog = _SettingsDialog(
+            SearchMode.SMART,
+            50,
+            SemanticStatus(
+                SemanticState.ERROR,
+                recovery=SemanticRecovery.MODEL,
+            ),
+        )
+        dialog.show()
+        install_requests: list[bool] = []
+        dialog.semanticInstallRequested.connect(lambda: install_requests.append(True))
+
+        self.assertEqual(dialog.semantic_action.text(), "Repair Semantic Search")
+        dialog.semantic_action.click()
+
+        self.assertEqual(install_requests, [True])
+        dialog.deleteLater()
+
+    def test_settings_semantic_action_waits_for_text_index(self) -> None:
+        dialog = _SettingsDialog(
+            SearchMode.SMART,
+            50,
+            SemanticStatus(SemanticState.MODEL_READY),
+            text_index_ready=False,
+        )
+        dialog.show()
+        self.app.processEvents()
+
+        self.assertTrue(dialog.semantic_action.isVisibleTo(dialog))
+        self.assertFalse(dialog.semantic_action.isEnabled())
+        self.assertIn(
+            "waiting for Smart & Exact setup",
+            dialog.semantic_status.text(),
+        )
+        self.assertIn(
+            "Wait for Smart & Exact setup",
+            dialog.semantic_action.toolTip(),
+        )
+        dialog.deleteLater()
+
+    def _about_info(self, **overrides) -> AboutInfo:
+        values = {
+            "product_name": "Smart Search for Anki — Medical",
+            "creator": "Saleh Mostafa",
+            "version": "1.0.10",
+            "logo_path": str(LOGO_PATH),
+            "website_url": "https://medbrevia.com/app",
+            "feedback_url": "mailto:product@medbrevia.com",
+            "privacy_url": "https://medbrevia.com/legal/smart-search-privacy",
+        }
+        values.update(overrides)
+        return AboutInfo(**values)
+
+    def test_settings_dialog_offers_search_and_about_tabs(self) -> None:
+        dialog = _SettingsDialog(
+            SearchMode.EXACT,
+            80,
+            None,
+            about=self._about_info(),
+        )
+        dialog.show()
+        self.app.processEvents()
+
+        self.assertEqual(dialog.tabs.count(), 2)
+        self.assertEqual(dialog.tabs.tabText(0), "Search")
+        self.assertEqual(dialog.tabs.tabText(1), "About")
+        # Existing settings behavior and values are unchanged.
+        self.assertEqual(dialog.values(), (SearchMode.EXACT, 80))
+        dialog.mode_combo.setCurrentIndex(0)
+        dialog.limit_spin.setValue(120)
+        self.assertEqual(dialog.values(), (SearchMode.SMART, 120))
+        dialog.tabs.setCurrentIndex(1)
+        self.app.processEvents()
+        self.assertTrue(dialog.button_box.isVisibleTo(dialog))
+        self.assertLessEqual(
+            dialog.button_box.geometry().bottom(),
+            dialog.contentsRect().bottom(),
+        )
+        dialog.deleteLater()
+
+    def test_about_tab_shows_attribution_privacy_version_logo_and_links(self) -> None:
+        dialog = _SettingsDialog(
+            SearchMode.SMART,
+            50,
+            None,
+            about=self._about_info(),
+        )
+        dialog.show()
+        dialog.tabs.setCurrentIndex(1)
+        self.app.processEvents()
+
+        panel = dialog.about_panel
+        self.assertTrue(panel.isVisibleTo(dialog))
+        self.assertEqual(panel.name_label.text(), "Smart Search for Anki — Medical")
+        self.assertIn("1.0.10", panel.version_label.text())
+        self.assertEqual(
+            panel.tagline_label.text(),
+            "Search your collection with exact terms, typo-tolerant matching, "
+            "or meaning.",
+        )
+        self.assertIn("Built by MedBrevia", panel.attribution_label.text())
+        self.assertIn("Created by Saleh Mostafa", panel.attribution_label.text())
+        self.assertEqual(
+            panel.privacy_label.text(),
+            "Searches, card contents, and indexes remain on this computer. "
+            "The add-on connects to the internet only when you explicitly set "
+            "up or repair optional Semantic Search.",
+        )
+        self.assertIn(
+            "not affiliated with or endorsed by Anki",
+            panel.independence_label.text(),
+        )
+
+        # The canonical bundled logo loads and renders at the restrained size.
+        self.assertTrue(LOGO_PATH.is_file())
+        self.assertFalse(panel.logo_label.pixmap().isNull())
+        self.assertLessEqual(panel.logo_label.pixmap().width(), 72)
+        self.assertLessEqual(panel.logo_label.pixmap().height(), 72)
+
+        links_text = panel.links_label.text()
+        self.assertIn('href="https://medbrevia.com/app"', links_text)
+        self.assertIn('href="mailto:product@medbrevia.com"', links_text)
+        self.assertIn(
+            'href="https://medbrevia.com/legal/smart-search-privacy"',
+            links_text,
+        )
+        self.assertIn("Mobile App", links_text)
+        self.assertIn("Feedback", links_text)
+        self.assertIn("Privacy", links_text)
+        # Links need explicit activation and stay keyboard reachable.
+        self.assertFalse(panel.links_label.openExternalLinks())
+        self.assertTrue(
+            panel.links_label.textInteractionFlags()
+            & Qt.TextInteractionFlag.LinksAccessibleByKeyboard
+        )
+        self.assertEqual(
+            panel.links_label.focusPolicy(),
+            Qt.FocusPolicy.TabFocus,
+        )
+
+        # Meaningful accessible names for assistive technology.
+        self.assertTrue(panel.accessibleName())
+        self.assertTrue(panel.logo_label.accessibleName())
+        self.assertTrue(panel.attribution_label.accessibleName())
+        self.assertTrue(panel.privacy_label.accessibleName())
+        self.assertTrue(panel.links_label.accessibleName())
+        dialog.deleteLater()
+
+    def test_about_link_activation_routes_to_desktop_services(self) -> None:
+        panel = AboutPanel(self._about_info())
+        opened: list[str] = []
+        panel._url_opener = lambda url: opened.append(url.toString())
+
+        panel.links_label.linkActivated.emit(
+            "https://medbrevia.com/legal/smart-search-privacy"
+        )
+
+        self.assertEqual(
+            opened,
+            ["https://medbrevia.com/legal/smart-search-privacy"],
+        )
+        panel.deleteLater()
+
+    def test_search_dialog_defaults_to_bundled_about_and_accepts_host_info(self) -> None:
+        # Standalone default stays safe and truthful.
+        dialog = SearchDialog()
+        fallback = dialog._about
+        self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
+        self.assertEqual(fallback.creator, "Saleh Mostafa")
+        self.assertEqual(fallback.version, "1.0.10")
+        self.assertTrue(Path(fallback.logo_path).is_file())
+        panel = AboutPanel(fallback)
+        self.assertFalse(panel.logo_label.pixmap().isNull())
+        panel.deleteLater()
+        dialog.deleteLater()
+
+        # Host-provided attribution flows into the settings About tab.
+        about = self._about_info(version="9.9.9-test")
+        dialog = SearchDialog(about=about)
+        self.assertIs(dialog._about, about)
+        settings = _SettingsDialog(
+            dialog.mode(),
+            50,
+            None,
+            dialog,
+            about=dialog._about,
+        )
+        self.assertIn("9.9.9-test", settings.about_panel.version_label.text())
+        settings.deleteLater()
+        dialog.deleteLater()
+
+    def test_semantic_action_waits_for_text_index_then_reenables(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        semantic = SemanticStatus(SemanticState.MODEL_READY)
+        dialog.show_status(
+            IndexStatus(
+                IndexState.BUILDING,
+                progress=0.5,
+                semantic=semantic,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertTrue(dialog.semantic_action.isVisibleTo(dialog))
+        self.assertFalse(dialog.semantic_action.isEnabled())
+        self.assertIn("waiting for Smart & Exact", dialog.semantic_status.text())
+        self.assertIn("after Smart & Exact", dialog.semantic_action.toolTip())
+
+        dialog.show_status(IndexStatus(IndexState.READY, semantic=semantic))
+        self.app.processEvents()
+
+        self.assertTrue(dialog.semantic_action.isEnabled())
+        self.assertNotIn("waiting for Smart & Exact", dialog.semantic_status.text())
+        self.assertEqual(dialog.semantic_action.toolTip(), "")
+        dialog.deleteLater()
+
+    def test_missing_semantic_status_hides_old_progress(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                semantic=SemanticStatus(
+                    SemanticState.INDEXING,
+                    progress=0.4,
+                ),
+            )
+        )
+        self.app.processEvents()
+        self.assertTrue(dialog.semantic_progress.isVisibleTo(dialog))
+
+        dialog.show_status(IndexStatus(IndexState.READY, semantic=None))
+        self.app.processEvents()
+
+        self.assertFalse(dialog.semantic_progress.isVisibleTo(dialog))
+        dialog.deleteLater()
+
+    def test_bulk_selection_counts_all_none_invert_and_resets(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        response = SearchResponse(
+            request_id=10,
+            query="pain",
+            results=(
+                SearchResult(
+                    note_id=1,
+                    card_ids=(101, 102),
+                    title="First",
+                    sibling_count=2,
+                ),
+                SearchResult(
+                    note_id=2,
+                    card_ids=(201,),
+                    title="Second",
+                    sibling_count=1,
+                ),
+            ),
+            total_results=2,
+        )
+        dialog.show_response(response, ())
+        self.app.processEvents()
+
+        model = dialog.results.results_model()
+        self.assertTrue(dialog.batch_bar.isVisibleTo(dialog))
+        self.assertEqual(
+            dialog.selection_summary.text(),
+            "0 notes · 0 cards selected",
+        )
+        model.set_checked(0, True)
+        self.assertEqual(
+            dialog.selection_summary.text(),
+            "1 note · 2 cards selected",
+        )
+        self.assertEqual(
+            dialog.master_check.checkState(),
+            Qt.CheckState.PartiallyChecked,
+        )
+        self.assertTrue(dialog.flag_button.isEnabled())
+        self.assertTrue(dialog.tags_button.isEnabled())
+
+        model.set_all_checked(True)
+        self.assertEqual(
+            dialog.selection_summary.text(),
+            "2 notes · 3 cards selected",
+        )
+        self.assertEqual(
+            dialog.master_check.checkState(),
+            Qt.CheckState.Checked,
+        )
+        model.invert_checked()
+        self.assertEqual(
+            dialog.selection_summary.text(),
+            "0 notes · 0 cards selected",
+        )
+        model.set_all_checked(True)
+        model.set_all_checked(False)
+        self.assertEqual(model.checked_results(), ())
+
+        dialog.show_response(
+            SearchResponse(
+                request_id=11,
+                query="new",
+                results=(
+                    SearchResult(note_id=3, card_ids=(301,), title="New"),
+                ),
+                total_results=1,
+            ),
+            (),
+        )
+        self.assertEqual(model.checked_results(), ())
+        self.assertEqual(
+            dialog.selection_summary.text(),
+            "0 notes · 0 cards selected",
+        )
+        dialog.deleteLater()
+
+    def test_batch_toolbar_sits_below_helpful_terms_and_above_results(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        correction = Correction("buproprion", "bupropion")
+        dialog.show_response(
+            SearchResponse(
+                request_id=11,
+                query="buproprion",
+                results=(
+                    SearchResult(
+                        note_id=3,
+                        card_ids=(301,),
+                        title="Bupropion",
+                    ),
+                ),
+                total_results=1,
+            ),
+            (correction,),
+        )
+        self.app.processEvents()
+
+        layout = dialog.layout()
+        self.assertTrue(dialog.chip_bar.isVisibleTo(dialog))
+        self.assertTrue(dialog.batch_bar.isVisibleTo(dialog))
+        self.assertLess(
+            layout.indexOf(dialog.chip_bar),
+            layout.indexOf(dialog.batch_bar),
+        )
+        self.assertEqual(
+            layout.indexOf(dialog.batch_bar) + 1,
+            layout.indexOf(dialog.stack),
+        )
+        dialog.deleteLater()
+
+    def test_status_ui_hides_model_and_runtime_identifiers(self) -> None:
+        internal_name = "MedEmbed-small-v0.1-int8"
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                model_name=internal_name,
+                semantic=SemanticStatus(
+                    SemanticState.READY,
+                    detail="Loaded MedEmbed through ONNX Runtime.",
+                ),
+            )
+        )
+        self.app.processEvents()
+
+        visible_status = " ".join(
+            (
+                dialog.status._label.text(),
+                dialog.status.toolTip(),
+                dialog.status.accessibleDescription(),
+                dialog.semantic_status.text(),
+                dialog.semantic_status.toolTip(),
+            )
+        )
+        self.assertNotIn("MedEmbed", visible_status)
+        self.assertNotIn("ONNX", visible_status)
+
+        settings = _SettingsDialog(
+            SearchMode.SMART,
+            50,
+            SemanticStatus(
+                SemanticState.READY,
+                detail="Loaded MedEmbed through ONNX Runtime.",
+            ),
+        )
+        settings.show()
+        self.app.processEvents()
+        settings_text = " ".join(
+            (
+                settings.semantic_status.text(),
+                settings.semantic_status.toolTip(),
+                settings.semantic_action.text(),
+                settings.semantic_action.toolTip(),
+            )
+        )
+        self.assertNotIn("MedEmbed", settings_text)
+        self.assertNotIn("ONNX", settings_text)
+        settings.deleteLater()
+        dialog.deleteLater()
+
+    def test_range_checking_and_browser_open_use_only_checked_results(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        results = tuple(
+            SearchResult(
+                note_id=note_id,
+                card_ids=(note_id * 10,),
+                card_states=(CardState(note_id * 10),),
+                title=f"Result {note_id}",
+            )
+            for note_id in (1, 2, 3, 4)
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=12,
+                query="range",
+                results=results,
+                total_results=4,
+            ),
+            (),
+        )
+        self.app.processEvents()
+
+        view = dialog.results
+        view.select_row(1)
+        self.assertTrue(view.check_range_to(3))
+        self.assertEqual(
+            [result.note_id for result in view.checked_results()],
+            [2, 3, 4],
+        )
+        self.assertTrue(dialog.open_selected_button.isEnabled())
+
+        opened: list[tuple[SearchResult, ...]] = []
+        dialog.openAllRequested.connect(opened.append)
+        dialog._open_selected_results()
+        self.assertEqual([result.note_id for result in opened[-1]], [2, 3, 4])
+        dialog._open_all_results()
+        self.assertEqual([result.note_id for result in opened[-1]], [2, 3, 4])
+
+        view.results_model().set_all_checked(False)
+        dialog._open_all_results()
+        self.assertEqual(
+            [result.note_id for result in opened[-1]],
+            [1, 2, 3, 4],
+        )
+        self.assertFalse(dialog.open_selected_button.isEnabled())
+        dialog.deleteLater()
+
+    def test_bulk_action_payloads_busy_state_and_success_clear(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        results = (
+            SearchResult(note_id=7, card_ids=(71, 72), title="Seven"),
+            SearchResult(note_id=8, card_ids=(81,), title="Eight"),
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=20,
+                query="heart",
+                results=results,
+                total_results=2,
+            ),
+            (),
+        )
+        model = dialog.results.results_model()
+        model.set_all_checked(True)
+
+        flags: list[tuple[tuple[SearchResult, ...], int]] = []
+        suspensions: list[tuple[tuple[SearchResult, ...], bool]] = []
+        tags: list[tuple[tuple[SearchResult, ...], bool]] = []
+        dialog.flagRequested.connect(
+            lambda selected, flag: flags.append((selected, flag))
+        )
+        dialog.suspensionRequested.connect(
+            lambda selected, suspend: suspensions.append((selected, suspend))
+        )
+        dialog.tagActionRequested.connect(
+            lambda selected, add: tags.append((selected, add))
+        )
+
+        dialog._emit_flag(3)
+        dialog._emit_suspension(False)
+        dialog._emit_tag_action(True)
+        self.assertEqual(
+            [result.note_id for result in flags[0][0]],
+            [7, 8],
+        )
+        self.assertEqual(flags[0][1], 3)
+        self.assertFalse(suspensions[0][1])
+        self.assertTrue(tags[0][1])
+
+        dialog.set_batch_action_busy(True, "Applying change…")
+        self.assertFalse(dialog.results.isEnabled())
+        self.assertFalse(dialog.search.isEnabled())
+        self.assertFalse(dialog.segmented.isEnabled())
+        self.assertFalse(dialog.settings_button.isEnabled())
+        self.assertFalse(dialog.rebuild_button.isEnabled())
+        self.assertFalse(dialog.flag_button.isEnabled())
+        self.assertFalse(dialog.tags_button.isEnabled())
+        dialog.finish_batch_action(
+            True,
+            "Suspended 3 cards from 2 notes — Undo available",
+        )
+        self.assertTrue(dialog.results.isEnabled())
+        self.assertTrue(dialog.search.isEnabled())
+        self.assertTrue(dialog.segmented.isEnabled())
+        self.assertTrue(dialog.settings_button.isEnabled())
+        self.assertTrue(dialog.rebuild_button.isEnabled())
+        self.assertEqual(model.checked_results(), ())
+        self.assertEqual(
+            dialog.summary.text(),
+            "Suspended 3 cards from 2 notes — Undo available",
+        )
+        dialog.deleteLater()
+
+    def test_result_context_menu_targets_clicked_or_checked_results(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        results = (
+            SearchResult(
+                note_id=1,
+                card_ids=(11,),
+                card_states=(CardState(11, suspended=False),),
+                title="One",
+            ),
+            SearchResult(
+                note_id=2,
+                card_ids=(21,),
+                card_states=(CardState(21, suspended=True),),
+                title="Two",
+            ),
+            SearchResult(
+                note_id=3,
+                card_ids=(31,),
+                card_states=(CardState(31, suspended=False),),
+                title="Three",
+            ),
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=21,
+                query="context",
+                results=results,
+                total_results=3,
+            ),
+            (),
+        )
+        model = dialog.results.results_model()
+        model.set_checked(0, True)
+        model.set_checked(1, True)
+
+        # A checked row keeps the complete checked selection as the target.
+        selected = dialog._prepare_result_context_selection(1)
+        self.assertEqual([result.note_id for result in selected], [1, 2])
+        mixed_menu = dialog._build_result_context_menu(selected)
+        mixed_labels = [action.text() for action in mixed_menu.actions()]
+        self.assertIn("Suspend", mixed_labels)
+        self.assertIn("Unsuspend", mixed_labels)
+        self.assertIn("Flag", mixed_labels)
+        self.assertIn("Tags", mixed_labels)
+
+        # An unchecked row becomes the sole selection and sole action target.
+        selected = dialog._prepare_result_context_selection(2)
+        self.assertEqual([result.note_id for result in selected], [3])
+        active_menu = dialog._build_result_context_menu(selected)
+        active_labels = [action.text() for action in active_menu.actions()]
+        self.assertIn("Suspend", active_labels)
+        self.assertNotIn("Unsuspend", active_labels)
+
+        flags: list[tuple[tuple[SearchResult, ...], int]] = []
+        tags: list[tuple[tuple[SearchResult, ...], bool]] = []
+        opened: list[tuple[SearchResult, ...]] = []
+        dialog.flagRequested.connect(
+            lambda target, flag: flags.append((target, flag))
+        )
+        dialog.tagActionRequested.connect(
+            lambda target, add: tags.append((target, add))
+        )
+        dialog.openAllRequested.connect(opened.append)
+
+        flag_action = next(
+            action
+            for action in next(
+                action for action in active_menu.actions()
+                if action.text() == "Flag"
+            ).menu().actions()
+            if action.text() == "Blue"
+        )
+        flag_action.trigger()
+        tag_action = next(
+            action
+            for action in next(
+                action for action in active_menu.actions()
+                if action.text() == "Tags"
+            ).menu().actions()
+            if action.text() == "Add Tag…"
+        )
+        tag_action.trigger()
+        next(
+            action for action in active_menu.actions()
+            if action.text() == "Open in Browser"
+        ).trigger()
+
+        self.assertEqual([result.note_id for result in flags[0][0]], [3])
+        self.assertEqual(flags[0][1], 4)
+        self.assertEqual([result.note_id for result in tags[0][0]], [3])
+        self.assertTrue(tags[0][1])
+        self.assertEqual([result.note_id for result in opened[0]], [3])
+
+        mixed_menu.deleteLater()
+        active_menu.deleteLater()
+        dialog.deleteLater()
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,191 @@
+# Smart Search for Anki — Medical
+
+Fast, forgiving medical search for Anki Desktop—with native filters, local
+semantic search, and safe card actions.
+
+Created by **Saleh Mostafa** with [MedBrevia](https://medbrevia.com/app).
+
+> **Release status:** public-source release candidate. The AnkiWeb install code
+> will be added after the isolated install, upgrade, rollback, and compatibility
+> matrix is complete.
+
+![Smart Search showing typo recovery and ranked synthetic medical results](release/assets/screenshots/01-smart-search.png)
+
+## Find the card you meant
+
+Open the palette with **Command-K** on macOS or **Ctrl-K** on Windows/Linux,
+type naturally, and press **Return** to open the result in Anki's Browser.
+
+- `buproprion` can find **bupropion**.
+- A supported brand name can find its generic medication.
+- Search is case-insensitive by default.
+- Native filters such as `deck:`, `tag:`, `note:`, `is:`, `flag:`, `prop:`,
+  `rated:`, field searches, Boolean groups, and wildcards are delegated to
+  Anki.
+- Card-specific filters return only the sibling cards that actually match.
+- Adaptive relevance cutoffs remove weak trailing results instead of filling
+  the list to an arbitrary maximum.
+
+### Three useful modes
+
+| Mode | Best for | Network/model required |
+| --- | --- | --- |
+| **Smart** | Typos, medical aliases, phrases, and everyday retrieval | No |
+| **Exact** | Literal text and full native Anki search syntax | No |
+| **Semantic** | Finding cards by clinical meaning | One explicit local setup |
+
+Smart/Exact and Semantic use separate local indexes. Smart and Exact remain
+usable while Semantic prepares.
+
+![Semantic Search setup explaining the separate index and supported platform](release/assets/screenshots/02-semantic-setup.png)
+
+## Work with results without losing context
+
+- See compact suspension and flag indicators on each result.
+- Check one result, Shift-click a range, or choose **All shown**, **None**, or
+  **Invert**.
+- Open exactly the checked cards in Anki's Browser.
+- Flag, suspend, unsuspend, add tags, or remove tags from the toolbar or
+  right-click menu.
+- Review the live selection summary before acting; tags apply to notes, while
+  flags and suspension apply to cards.
+
+Every collection change uses Anki's supported, undoable operations and creates
+one clean Undo step per action. Smart Search never writes directly to
+`collection.anki2`.
+
+![Bulk selection and card actions using synthetic content](release/assets/screenshots/03-bulk-actions.png)
+
+## Privacy by design
+
+Search, typo recovery, alias expansion, indexing, and semantic inference run on
+the user's computer.
+
+- No Smart Search account
+- No analytics, advertising, telemetry, or crash reporting
+- No upload of card text, queries, tags, deck names, profile names, or
+  embeddings
+- No automatic model installation
+
+When the user explicitly starts Semantic setup, the add-on downloads pinned
+model/tokenizer files over HTTPS and verifies their SHA-256 digests. Ordinary
+request metadata such as an IP address and user-agent can be visible to the
+download host; no Anki content or query is included.
+
+The local full-text index contains searchable copies of note/card content and
+metadata. The vector index contains embeddings derived from note text. Treat
+both with the same privacy as the Anki profile.
+
+Read the complete [privacy notice](PRIVACY.md), [data-source record](DATA_SOURCES.md),
+and [third-party notices](THIRD_PARTY_NOTICES.md). The intended hosted notice is
+`https://medbrevia.com/legal/smart-search-privacy`.
+
+## Compatibility
+
+- **Host:** Anki Desktop only. Desktop add-ons do not run inside AnkiMobile or
+  AnkiDroid.
+- **Smart and Exact:** designed for the Anki Desktop version range declared in
+  `manifest.json`; the final public support range will reflect the completed
+  distribution matrix.
+- **Semantic:** macOS 14 or later on Apple-silicon Macs only for this release.
+- On Windows, Linux, Intel Mac, or a Mac below macOS 14, Semantic is unavailable
+  gracefully while Smart and Exact remain usable.
+
+See [Known limitations](release/KNOWN_LIMITATIONS.md) for the practical
+boundaries around indexes, sync, ranking, and collection operations.
+
+## Installation
+
+### Release candidate
+
+1. Download the signed-off `.ankiaddon` archive from the future GitHub release
+   or AnkiWeb listing.
+2. In Anki Desktop, choose **Tools → Add-ons → Install from file…**.
+3. Select the archive and restart Anki.
+4. Press **Command/Ctrl-K**.
+
+The AnkiWeb numeric code is intentionally not published until the frozen
+archive passes the release checklist's clean-install and upgrade tests.
+
+### Development checkout
+
+Clone the repository, then run the validation and package builder:
+
+```sh
+python3 -m pip install -r scripts/requirements-test.txt
+python3 -m unittest discover -s tests -t . -p 'test_*.py' -v
+python3 scripts/build_addon.py
+```
+
+The builder:
+
+- starts from an explicit public-file allowlist;
+- excludes local models, expanded runtimes, indexes, caches, logs, profiles,
+  collection databases, credentials, and historical builds;
+- verifies every reviewed binary by SHA-256;
+- compiles all packaged Python;
+- validates resources, licenses, archive paths, CRCs, and a 64 MiB regression
+  ceiling; and
+- writes a SHA-256 checksum beside the deterministic archive.
+
+## Keyboard reference
+
+- **Command/Ctrl-K:** open or focus Smart Search
+- **Up/Down** or **Control-J/Control-K:** move through results
+- **Return:** open the highlighted result in Anki's Browser
+- **Command/Ctrl-Return:** open checked results, or all shown when none are
+  checked
+- **Space:** check or uncheck the focused result
+- **Shift-click:** select a continuous range
+- **Command/Ctrl-1, 2, or 3:** switch Smart, Exact, or Semantic
+- **Escape:** clear the query or close the palette
+
+## Architecture and safety
+
+The add-on reads bounded collection snapshots through Anki while Anki owns the
+collection connection. External SQLite work, text processing, spelling
+vocabulary construction, model inference, profile initialization, and cleanup
+run outside Anki's graphical interface thread.
+
+Adds, edits, and deletes normally refresh only affected notes. Operations for
+which Anki does not expose stable affected IDs—such as sync, imports, native
+bulk edits, undo/redo, and structural deck/note-type changes—schedule a
+debounced reconciliation for correctness.
+
+Indexes are disposable and profile-scoped under `user_files/`. They are not
+added to `collection.anki2` and are not synced by Smart Search.
+
+## Medical terminology and model provenance
+
+- RxTerms 202607 alias snapshot, U.S. National Library of Medicine
+- [MedEmbed-small-v0.1 reproducible ONNX INT8 export](https://huggingface.co/medbrevia/medembed-small-v0.1-onnx-int8),
+  based on BAAI BGE small English v1.5
+- Reproducible CLS-pooled, L2-normalized INT8 ONNX export for local inference
+- NumPy, ONNX Runtime, Hugging Face Tokenizers, and FlatBuffers
+
+These components improve retrieval; they do not verify that a card is current
+or medically correct. Search results are not medical advice.
+
+Exact versions, transforms, licenses, checksums, limitations, and required NLM
+attribution are recorded in [DATA_SOURCES.md](DATA_SOURCES.md) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Support and contribution
+
+- [Support](SUPPORT.md)
+- [Security reports](SECURITY.md)
+- [Contributing](CONTRIBUTING.md)
+- Private feedback: `product@medbrevia.com`
+
+Use synthetic or fully redacted examples. Never attach an Anki collection,
+profile folder, search database, vector index, patient information, credentials,
+or identifiable card content to a public issue.
+
+## License
+
+Original add-on code and documentation are available under the
+[MIT License](LICENSE.txt). Third-party components retain their own licenses and
+notices.
+
+Smart Search is an independent Anki add-on and is not affiliated with or
+endorsed by Anki or AnkiWeb.

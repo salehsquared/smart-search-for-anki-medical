@@ -1,0 +1,3 @@
+# Source-test dependencies only; these are not bundled in the add-on.
+numpy==2.5.1
+PyQt6==6.10.2

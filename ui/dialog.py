@@ -1,0 +1,1413 @@
+"""The smart-search dialog: layout, states, and keyboard-first interaction.
+
+The dialog is intentionally "dumb": it renders states and emits intent
+signals. All backend communication lives in :mod:`ui.controller`.
+"""
+
+from __future__ import annotations
+
+from html import escape
+import json
+from pathlib import Path
+import sys
+from typing import Optional, Sequence
+
+from .contracts import (
+    AboutInfo,
+    Correction,
+    IndexState,
+    IndexStatus,
+    SearchMode,
+    SearchResponse,
+    SemanticRecovery,
+    SemanticState,
+    SemanticStatus,
+)
+from .results import ResultsView
+from .widgets import (  # Qt shim + custom widgets
+    AboutPanel,
+    ChipBar,
+    IndexStatusWidget,
+    SearchField,
+    SegmentedModeControl,
+    QCheckBox,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QEvent,
+    QFormLayout,
+    QHBoxLayout,
+    QKeySequence,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QShortcut,
+    QSpinBox,
+    QStackedWidget,
+    Qt,
+    QTabWidget,
+    QTimer,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+    pyqtSignal,
+)
+
+DEBOUNCE_MS = 150
+BATCH_CONFIRM_THRESHOLD = 100
+
+_PAGE_HELP = 0
+_PAGE_RESULTS = 1
+_PAGE_MESSAGE = 2
+
+_PRIMARY_KEY = "⌘" if sys.platform == "darwin" else "Ctrl"
+
+HELP_HTML = f"""\
+<h3>Search your collection</h3>
+<p>Type above to search notes. Smart mode fixes typos and expands common
+medical aliases; Exact matches literally; Semantic matches by meaning.</p>
+<p><b>Smart and Exact</b> use the initial fast-search setup. <b>Semantic</b>
+has a separate one-time preparation that takes longer. You can keep using
+Smart and Exact while Semantic is being prepared.</p>
+<p>Use structured filters such as <b>deck:AnKing</b>, <b>tag:cardio</b>, or
+<b>notetype:Cloze</b> to narrow results.</p>
+<ul>
+<li><b>Down / Up</b> — move between the search field and results</li>
+<li><b>Return</b> — open the selected note in the Browser</li>
+<li><b>Space</b> — check or uncheck the highlighted result for bulk actions</li>
+<li><b>Shift+click</b> — check a range of results</li>
+<li><b>Right-click</b> — open, flag, suspend, or tag the clicked/checked results</li>
+<li><b>{_PRIMARY_KEY}+Return</b> — open checked results, or all shown if none are checked</li>
+<li><b>{_PRIMARY_KEY}+1 / 2 / 3</b> — Smart, Exact, Semantic mode</li>
+<li><b>{_PRIMARY_KEY}+L</b> — jump back to the search field</li>
+<li><b>Esc</b> — clear the query, then close</li>
+</ul>
+"""
+
+
+def _default_about_info() -> AboutInfo:
+    """Fallback attribution for standalone use; the host passes real values.
+
+    The version prefers the bundle manifest and falls back to the package
+    version, so tests and standalone development still see a truthful panel.
+    """
+
+    bundle_root = Path(__file__).resolve().parent.parent
+    version = ""
+    try:
+        manifest = json.loads(
+            (bundle_root / "manifest.json").read_text(encoding="utf-8")
+        )
+        version = str(manifest.get("human_version") or "").strip()
+    except Exception:
+        version = ""
+    if not version:
+        try:
+            from . import __version__ as package_version
+
+            version = str(package_version or "").strip()
+        except Exception:
+            version = ""
+    return AboutInfo(
+        product_name="Smart Search for Anki — Medical",
+        creator="Saleh Mostafa",
+        version=version,
+        logo_path=str(bundle_root / "resources" / "medbrevia-logo.png"),
+        website_url="https://medbrevia.com/app",
+        feedback_url="mailto:product@medbrevia.com",
+        privacy_url="https://medbrevia.com/legal/smart-search-privacy",
+    )
+
+
+class _SettingsDialog(QDialog):
+    """Small preferences dialog backed by UISettings, plus a quiet About tab."""
+
+    semanticInstallRequested = pyqtSignal()
+    semanticIndexRequested = pyqtSignal()
+
+    def __init__(
+        self,
+        mode: SearchMode,
+        result_limit: int,
+        semantic: Optional[SemanticStatus],
+        parent: Optional[QWidget] = None,
+        *,
+        text_index_ready: bool = True,
+        about: Optional[AboutInfo] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._text_index_ready = text_index_ready
+        self.setWindowTitle("Search settings")
+        self.setAccessibleName("Search settings")
+        # Keep the shared dialog large enough for the taller About page. Qt
+        # does not automatically grow a visible dialog when tabs change, and
+        # without this floor the bottom buttons can be clipped after opening
+        # Search first and then switching to About.
+        self.setMinimumSize(440, 460)
+
+        root = QVBoxLayout(self)
+        self.tabs = QTabWidget(self)
+        self.tabs.setAccessibleName("Settings sections")
+        root.addWidget(self.tabs)
+
+        search_page = QWidget(self.tabs)
+        form = QFormLayout(search_page)
+        self.tabs.addTab(search_page, "Search")
+
+        self.mode_combo = QComboBox(search_page)
+        for m in (SearchMode.SMART, SearchMode.EXACT, SearchMode.SEMANTIC):
+            self.mode_combo.addItem(m.label, m)
+        self.mode_combo.setCurrentIndex(
+            [SearchMode.SMART, SearchMode.EXACT, SearchMode.SEMANTIC].index(mode)
+        )
+        self.mode_combo.setAccessibleName("Default search mode")
+        form.addRow("Default mode", self.mode_combo)
+
+        self.limit_spin = QSpinBox(search_page)
+        self.limit_spin.setRange(10, 200)
+        self.limit_spin.setSingleStep(10)
+        self.limit_spin.setValue(result_limit)
+        self.limit_spin.setAccessibleName("Maximum results per search")
+        form.addRow("Result limit", self.limit_spin)
+
+        self.semantic_status = QLabel(search_page)
+        self.semantic_status.setWordWrap(True)
+        self.semantic_status.setAccessibleName("Semantic search status")
+        self.semantic_action = QPushButton(search_page)
+        self.semantic_action.setAccessibleName("Set up semantic search")
+        self._set_semantic_status(semantic)
+        form.addRow("Semantic search", self.semantic_status)
+        form.addRow("", self.semantic_action)
+
+        self.about_panel = AboutPanel(
+            about if about is not None else _default_about_info(),
+            self.tabs,
+        )
+        self.tabs.addTab(self.about_panel, "About")
+
+        self.button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        root.addWidget(self.button_box)
+
+    def values(self) -> tuple[SearchMode, int]:
+        return self.mode_combo.currentData(), self.limit_spin.value()
+
+    def _set_semantic_status(self, status: Optional[SemanticStatus]) -> None:
+        if status is None:
+            self.semantic_status.setText("Status is not available.")
+            self.semantic_action.setVisible(False)
+            return
+
+        separation = (
+            "\nSemantic has a separate preparation step from Smart and Exact."
+        )
+        if status.state is SemanticState.INDEXING:
+            separation += "\nSmart and Exact remain available while this finishes."
+        self.semantic_status.setText(
+            status.summary
+            + separation
+        )
+        state = status.state
+        if state is SemanticState.UNSUPPORTED:
+            self.semantic_action.setVisible(False)
+        elif state is SemanticState.NOT_INSTALLED:
+            self.semantic_action.setText("Enable Semantic Search")
+            self.semantic_action.setVisible(True)
+            self.semantic_action.clicked.connect(self.semanticInstallRequested)
+        elif state is SemanticState.MODEL_READY:
+            self.semantic_action.setText(
+                "Prepare Semantic Search Now"
+                if status.auto_start
+                else "Prepare Semantic Search"
+            )
+            self.semantic_action.setVisible(True)
+            self.semantic_action.clicked.connect(self.semanticIndexRequested)
+        elif state is SemanticState.ERROR:
+            repair_model = status.recovery is SemanticRecovery.MODEL
+            self.semantic_action.setText(
+                "Repair Semantic Search"
+                if repair_model
+                else "Try Again"
+            )
+            self.semantic_action.setVisible(True)
+            self.semantic_action.clicked.connect(
+                self.semanticInstallRequested
+                if repair_model
+                else self.semanticIndexRequested
+            )
+        elif state is SemanticState.INDEXING:
+            self.semantic_action.setText("Preparing Semantic Search…")
+            self.semantic_action.setEnabled(False)
+            self.semantic_action.setVisible(True)
+        else:
+            self.semantic_action.setVisible(False)
+
+        if not self._text_index_ready and not self.semantic_action.isHidden():
+            wait_text = (
+                "Wait for Smart & Exact setup to finish before using semantic "
+                "controls."
+            )
+            self.semantic_status.setText(
+                self.semantic_status.text()
+                + "\nSemantic controls are waiting for Smart & Exact setup."
+            )
+            self.semantic_action.setEnabled(False)
+            self.semantic_action.setToolTip(wait_text)
+            self.semantic_action.setAccessibleDescription(wait_text)
+
+
+class SearchDialog(QDialog):
+    """Keyboard-first command-palette search dialog."""
+
+    # Intents consumed by the controller.
+    queryEdited = pyqtSignal(str)              # immediate, before debounce
+    searchRequested = pyqtSignal(str)          # debounced query text
+    modeSelected = pyqtSignal(object)          # SearchMode
+    openRequested = pyqtSignal(object)         # SearchResult
+    openAllRequested = pyqtSignal(object)      # tuple[SearchResult, ...]
+    filterRemoveRequested = pyqtSignal(object)   # FilterChip
+    correctionDismissRequested = pyqtSignal(object)  # Correction
+    correctionLiteralRequested = pyqtSignal(object)  # Correction
+    rebuildRequested = pyqtSignal()
+    semanticInstallRequested = pyqtSignal()
+    semanticIndexRequested = pyqtSignal()
+    settingsChanged = pyqtSignal(object, int)  # SearchMode, result limit
+    flagRequested = pyqtSignal(object, int)  # tuple[SearchResult, ...], 0..7
+    suspensionRequested = pyqtSignal(object, bool)  # results, suspend?
+    tagActionRequested = pyqtSignal(object, bool)  # results, add?
+    dialogClosed = pyqtSignal()
+
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        *,
+        about: Optional[AboutInfo] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._about = about if about is not None else _default_about_info()
+        self.setWindowTitle("Smart Search")
+        self.setMinimumSize(760, 520)
+        self.resize(1040, 700)
+        self.setSizeGripEnabled(True)
+
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(DEBOUNCE_MS)
+        self._debounce.timeout.connect(self._emit_search)
+
+        self._last_response: Optional[SearchResponse] = None
+        self._last_status: Optional[IndexStatus] = None
+        self._message_kind = ""
+        self._result_limit = 50
+        self._batch_busy = False
+        self._batch_results_available = False
+        self._batch_control_states: list[tuple[QWidget, bool]] = []
+        self._build_ui()
+        self._install_shortcuts()
+        self.show_help()
+
+    # ------------------------------------------------------------------ UI
+
+    def _build_ui(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 10)
+        root.setSpacing(8)
+
+        top = QHBoxLayout()
+        top.setSpacing(10)
+        self.search = SearchField(self)
+        self.search.textEdited.connect(self._on_text_edited)
+        self.search.returnPressed.connect(self._on_search_return)
+        top.addWidget(self.search, 1)
+
+        self.segmented = SegmentedModeControl(self)
+        self.segmented.modeChanged.connect(self._on_mode_changed)
+        top.addWidget(self.segmented)
+        root.addLayout(top)
+
+        self.chip_bar = ChipBar(self)
+        self.chip_bar.filterRemoveRequested.connect(self.filterRemoveRequested)
+        self.chip_bar.correctionDismissRequested.connect(self.correctionDismissRequested)
+        self.chip_bar.correctionLiteralRequested.connect(self.correctionLiteralRequested)
+        root.addWidget(self.chip_bar)
+
+        self.index_notice = QLabel(self)
+        self.index_notice.setWordWrap(True)
+        self.index_notice.setTextFormat(Qt.TextFormat.RichText)
+        self.index_notice.setAccessibleName("Search index notice")
+        self.index_notice.setVisible(False)
+        self.index_notice.setStyleSheet(
+            "QLabel { padding: 7px 10px; border-radius: 7px;"
+            " background: palette(alternate-base); }"
+        )
+        root.addWidget(self.index_notice)
+
+        self.stack = QStackedWidget(self)
+        help_label = QLabel(HELP_HTML, self)
+        help_label.setWordWrap(True)
+        help_label.setTextFormat(Qt.TextFormat.RichText)
+        help_label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        help_label.setAccessibleName("Search help")
+        self.stack.insertWidget(_PAGE_HELP, help_label)
+
+        self.results = ResultsView(self)
+        # `activated` covers both Return and double-click on desktop styles.
+        self.results.activated.connect(self._on_index_activated)
+        self.results.resultContextRequested.connect(
+            self._show_result_context_menu
+        )
+        self.stack.insertWidget(_PAGE_RESULTS, self.results)
+
+        message_page = QWidget(self)
+        message_layout = QVBoxLayout(message_page)
+        message_layout.addStretch(1)
+        self.message_label = QLabel(message_page)
+        self.message_label.setWordWrap(True)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.message_label.setAccessibleName("Search status message")
+        message_layout.addWidget(self.message_label)
+        self.retry_button = QPushButton("Retry", message_page)
+        self.retry_button.setAccessibleName("Retry search")
+        self.retry_button.clicked.connect(self._emit_search)
+        self.retry_button.setVisible(False)
+        message_layout.addWidget(self.retry_button, 0, Qt.AlignmentFlag.AlignCenter)
+        self.message_action = QPushButton(message_page)
+        self.message_action.setVisible(False)
+        self.message_action.clicked.connect(self._run_message_action)
+        message_layout.addWidget(
+            self.message_action, 0, Qt.AlignmentFlag.AlignCenter
+        )
+        message_layout.addStretch(1)
+        self.stack.insertWidget(_PAGE_MESSAGE, message_page)
+
+        root.addWidget(self.stack, 1)
+
+        self.batch_bar = QWidget(self)
+        batch = QHBoxLayout(self.batch_bar)
+        batch.setContentsMargins(0, 2, 0, 2)
+        batch.setSpacing(7)
+
+        self.master_check = QCheckBox(self.batch_bar)
+        self.master_check.setTristate(True)
+        self.master_check.setAccessibleName("Select all shown results")
+        self.master_check.setToolTip("Select or clear every result currently shown.")
+        self.master_check.clicked.connect(self._toggle_all_results)
+        batch.addWidget(self.master_check)
+
+        self.selection_summary = QLabel(
+            "0 notes · 0 cards selected",
+            self.batch_bar,
+        )
+        self.selection_summary.setAccessibleName("Bulk selection summary")
+        batch.addWidget(self.selection_summary)
+
+        self.select_button = QToolButton(self.batch_bar)
+        self.select_button.setText("Select")
+        self.select_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self.select_button.setAccessibleName("Selection options")
+        select_menu = QMenu(self.select_button)
+        self.select_all_action = select_menu.addAction("All shown")
+        self.select_all_action.triggered.connect(
+            lambda _checked=False: self.results.results_model().set_all_checked(True)
+        )
+        self.select_none_action = select_menu.addAction("None")
+        self.select_none_action.triggered.connect(
+            lambda _checked=False: self.results.results_model().set_all_checked(False)
+        )
+        self.select_invert_action = select_menu.addAction("Invert")
+        self.select_invert_action.triggered.connect(
+            lambda _checked=False: self.results.results_model().invert_checked()
+        )
+        self.select_button.setMenu(select_menu)
+        batch.addWidget(self.select_button)
+
+        self.open_selected_button = QToolButton(self.batch_bar)
+        self.open_selected_button.setText("Browser")
+        self.open_selected_button.setToolTip(
+            "Open exactly the checked cards in Anki's Browser"
+        )
+        self.open_selected_button.setAccessibleName(
+            "Open checked cards in Browser"
+        )
+        self.open_selected_button.clicked.connect(self._open_selected_results)
+        batch.addWidget(self.open_selected_button)
+
+        batch.addStretch(1)
+
+        self.flag_button = QToolButton(self.batch_bar)
+        self.flag_button.setText("Flag")
+        self.flag_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self.flag_button.setAccessibleName("Set card flags")
+        flag_menu = QMenu(self.flag_button)
+        for flag, label in (
+            (0, "Clear"),
+            (1, "Red"),
+            (2, "Orange"),
+            (3, "Green"),
+            (4, "Blue"),
+            (5, "Pink"),
+            (6, "Turquoise"),
+            (7, "Purple"),
+        ):
+            action = flag_menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, value=flag: self._emit_flag(value)
+            )
+        self.flag_button.setMenu(flag_menu)
+        batch.addWidget(self.flag_button)
+
+        self.suspend_button = QToolButton(self.batch_bar)
+        self.suspend_button.setText("Suspend")
+        self.suspend_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self.suspend_button.setAccessibleName("Suspend or unsuspend cards")
+        suspend_menu = QMenu(self.suspend_button)
+        suspend_action = suspend_menu.addAction("Suspend")
+        suspend_action.triggered.connect(
+            lambda _checked=False: self._emit_suspension(True)
+        )
+        unsuspend_action = suspend_menu.addAction("Unsuspend")
+        unsuspend_action.triggered.connect(
+            lambda _checked=False: self._emit_suspension(False)
+        )
+        self.suspend_button.setMenu(suspend_menu)
+        batch.addWidget(self.suspend_button)
+
+        self.tags_button = QToolButton(self.batch_bar)
+        self.tags_button.setText("Tags")
+        self.tags_button.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup
+        )
+        self.tags_button.setAccessibleName("Add or remove note tags")
+        tags_menu = QMenu(self.tags_button)
+        add_tag_action = tags_menu.addAction("Add…")
+        add_tag_action.triggered.connect(
+            lambda _checked=False: self._emit_tag_action(True)
+        )
+        remove_tag_action = tags_menu.addAction("Remove…")
+        remove_tag_action.triggered.connect(
+            lambda _checked=False: self._emit_tag_action(False)
+        )
+        self.tags_button.setMenu(tags_menu)
+        batch.addWidget(self.tags_button)
+
+        self.batch_bar.setVisible(False)
+        root.insertWidget(root.indexOf(self.stack), self.batch_bar)
+        self.results.results_model().checkedChanged.connect(
+            self._update_batch_bar
+        )
+
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+        self.status = IndexStatusWidget(self)
+        bottom.addWidget(self.status)
+
+        self.semantic_status = QLabel("", self)
+        self.semantic_status.setAccessibleName("Semantic search status")
+        self.semantic_status.setVisible(False)
+        bottom.addWidget(self.semantic_status)
+
+        self.semantic_action = QToolButton(self)
+        self.semantic_action.setAccessibleName("Set up semantic search")
+        self.semantic_action.setVisible(False)
+        self.semantic_action.clicked.connect(self._run_semantic_action)
+        bottom.addWidget(self.semantic_action)
+
+        self.semantic_progress = QProgressBar(self)
+        self.semantic_progress.setRange(0, 100)
+        self.semantic_progress.setFixedWidth(150)
+        self.semantic_progress.setVisible(False)
+        self.semantic_progress.setAccessibleName("Semantic search preparation progress")
+        bottom.addWidget(self.semantic_progress)
+
+        self.progress = QProgressBar(self)
+        self.progress.setRange(0, 100)
+        self.progress.setFixedWidth(160)
+        self.progress.setVisible(False)
+        self.progress.setAccessibleName("Index rebuild progress")
+        bottom.addWidget(self.progress)
+
+        bottom.addStretch(1)
+
+        self.summary = QLabel("", self)
+        self.summary.setAccessibleName("Search summary")
+        bottom.addWidget(self.summary)
+
+        self.settings_button = QToolButton(self)
+        self.settings_button.setText("Settings")
+        self.settings_button.setAccessibleName("Search settings")
+        self.settings_button.setAccessibleDescription("Open search preferences.")
+        self.settings_button.clicked.connect(self._open_settings)
+        bottom.addWidget(self.settings_button)
+
+        self.rebuild_button = QToolButton(self)
+        self.rebuild_button.setText("Refresh Smart & Exact")
+        self.rebuild_button.setAccessibleName("Refresh Smart and Exact search data")
+        self.rebuild_button.setAccessibleDescription(
+            "Refresh Smart and Exact search data. Semantic refreshes separately."
+        )
+        self.rebuild_button.clicked.connect(self.rebuildRequested)
+        bottom.addWidget(self.rebuild_button)
+        root.addLayout(bottom)
+
+        self.search.installEventFilter(self)
+        self.results.installEventFilter(self)
+
+    def _install_shortcuts(self) -> None:
+        def sc(sequence: str, handler) -> None:
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(handler)
+
+        sc("Ctrl+1", lambda: self.set_mode(SearchMode.SMART))
+        sc("Ctrl+2", lambda: self.set_mode(SearchMode.EXACT))
+        sc("Ctrl+3", lambda: self.set_mode(SearchMode.SEMANTIC))
+        sc("Ctrl+L", self.focus_query)
+        sc("Ctrl+Return", self._open_all_results)
+        if sys.platform == "darwin":
+            sc("Meta+1", lambda: self.set_mode(SearchMode.SMART))
+            sc("Meta+2", lambda: self.set_mode(SearchMode.EXACT))
+            sc("Meta+3", lambda: self.set_mode(SearchMode.SEMANTIC))
+            sc("Meta+L", self.focus_query)
+            sc("Meta+Return", self._open_all_results)
+
+    # ------------------------------------------------------------- accessors
+
+    def query(self) -> str:
+        return self.search.text()
+
+    def mode(self) -> SearchMode:
+        return self.segmented.mode()
+
+    def set_mode(self, mode: SearchMode) -> None:
+        self.segmented.setMode(mode)
+
+    def focus_query(self) -> None:
+        self.search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search.selectAll()
+
+    # --------------------------------------------------------- bulk actions
+
+    def _update_batch_bar(self) -> None:
+        model = self.results.results_model()
+        selected_results = model.checked_results()
+        selected_rows = len(selected_results)
+        total_rows = model.count()
+        note_count, card_count = model.checked_counts()
+
+        if not selected_rows:
+            state = Qt.CheckState.Unchecked
+        elif selected_rows == total_rows:
+            state = Qt.CheckState.Checked
+        else:
+            state = Qt.CheckState.PartiallyChecked
+        self.master_check.setCheckState(state)
+
+        note_word = "note" if note_count == 1 else "notes"
+        card_word = "card" if card_count == 1 else "cards"
+        text = (
+            f"{note_count} {note_word} · {card_count} {card_word} selected"
+        )
+        self.selection_summary.setText(text)
+        self.selection_summary.setAccessibleDescription(text)
+        self.select_all_action.setText(f"All {total_rows} shown")
+
+        available = total_rows > 0 and not self._batch_busy
+        has_selection = selected_rows > 0 and not self._batch_busy
+        self.master_check.setEnabled(available)
+        self.select_button.setEnabled(available)
+        self.open_selected_button.setEnabled(has_selection and card_count > 0)
+        self.flag_button.setEnabled(has_selection and card_count > 0)
+        self.suspend_button.setEnabled(has_selection and card_count > 0)
+        self.tags_button.setEnabled(has_selection and note_count > 0)
+        self.batch_bar.setVisible(
+            self._batch_results_available
+            and self.stack.currentIndex() == _PAGE_RESULTS
+            and total_rows > 0
+        )
+
+    def _toggle_all_results(self, _checked: bool = False) -> None:
+        model = self.results.results_model()
+        all_selected = (
+            model.count() > 0
+            and len(model.checked_results()) == model.count()
+        )
+        model.set_all_checked(not all_selected)
+
+    def _selected_results(self):
+        return self.results.results_model().checked_results()
+
+    def _prepare_result_context_selection(self, row: int):
+        """Resolve the stable bulk-action target for a right-clicked row.
+
+        A checked row belongs to the current bulk selection, so right-clicking
+        it preserves every checked result.  An unchecked row becomes the sole
+        target.  This mirrors native list context-menu behavior while keeping
+        the UI's checkboxes as the single source of truth for bulk actions.
+        """
+
+        model = self.results.results_model()
+        result = model.result_at(row)
+        if result is None or self._batch_busy:
+            return ()
+        if not model.is_checked(row):
+            model.set_all_checked(False)
+            model.set_checked(row, True)
+        self.results.select_row(row)
+        return model.checked_results()
+
+    @staticmethod
+    def _context_suspension_actions(results) -> tuple[bool, bool]:
+        """Return whether Suspend and Unsuspend should be offered."""
+
+        card_ids = {
+            int(card_id)
+            for result in results
+            for card_id in result.card_ids
+            if int(card_id) > 0
+        }
+        states = {
+            int(state.card_id): bool(state.suspended)
+            for result in results
+            for state in result.card_states
+            if int(state.card_id) > 0
+        }
+        if not card_ids:
+            return False, False
+        # Older/stale results may not yet have live state for every card.  In
+        # that case both idempotent operations are safe and avoid guessing.
+        if not card_ids.issubset(states):
+            return True, True
+        values = {states[card_id] for card_id in card_ids}
+        return False in values, True in values
+
+    def _build_result_context_menu(self, results) -> QMenu:
+        """Build the selection-aware result menu using existing batch intents."""
+
+        menu = QMenu(self.results)
+        note_ids = {
+            int(result.note_id)
+            for result in results
+            if int(result.note_id) > 0
+        }
+        card_ids = {
+            int(card_id)
+            for result in results
+            for card_id in result.card_ids
+            if int(card_id) > 0
+        }
+
+        open_action = menu.addAction("Open in Browser")
+        open_action.setEnabled(bool(card_ids))
+        open_action.triggered.connect(
+            lambda _checked=False: self._open_selected_results()
+        )
+        menu.addSeparator()
+
+        flag_menu = menu.addMenu("Flag")
+        flag_menu.setEnabled(bool(card_ids))
+        for flag, label in (
+            (0, "Clear Flag"),
+            (1, "Red"),
+            (2, "Orange"),
+            (3, "Green"),
+            (4, "Blue"),
+            (5, "Pink"),
+            (6, "Turquoise"),
+            (7, "Purple"),
+        ):
+            action = flag_menu.addAction(label)
+            action.triggered.connect(
+                lambda _checked=False, value=flag: self._emit_flag(value)
+            )
+
+        offer_suspend, offer_unsuspend = self._context_suspension_actions(
+            results
+        )
+        if offer_suspend:
+            suspend_action = menu.addAction("Suspend")
+            suspend_action.triggered.connect(
+                lambda _checked=False: self._emit_suspension(True)
+            )
+        if offer_unsuspend:
+            unsuspend_action = menu.addAction("Unsuspend")
+            unsuspend_action.triggered.connect(
+                lambda _checked=False: self._emit_suspension(False)
+            )
+
+        tags_menu = menu.addMenu("Tags")
+        tags_menu.setEnabled(bool(note_ids))
+        add_tag_action = tags_menu.addAction("Add Tag…")
+        add_tag_action.triggered.connect(
+            lambda _checked=False: self._emit_tag_action(True)
+        )
+        remove_tag_action = tags_menu.addAction("Remove Tag…")
+        remove_tag_action.triggered.connect(
+            lambda _checked=False: self._emit_tag_action(False)
+        )
+        return menu
+
+    def _show_result_context_menu(self, row: int, global_position) -> None:
+        results = self._prepare_result_context_selection(row)
+        if not results:
+            return
+        menu = self._build_result_context_menu(results)
+        menu.exec(global_position)
+        menu.deleteLater()
+
+    def _open_selected_results(self) -> None:
+        results = self._selected_results()
+        if results and self.stack.currentIndex() == _PAGE_RESULTS:
+            self.openAllRequested.emit(results)
+
+    def _confirm_large_batch(self, action: str, count: int, target: str) -> bool:
+        if count <= BATCH_CONFIRM_THRESHOLD:
+            return True
+        response = QMessageBox.question(
+            self,
+            "Confirm bulk action",
+            f"{action} {count:,} selected {target}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        return response == QMessageBox.StandardButton.Yes
+
+    def _emit_flag(self, flag: int) -> None:
+        results = self._selected_results()
+        _notes, cards = self.results.results_model().checked_counts()
+        label = "Clear flags from" if flag == 0 else "Flag"
+        if results and cards and self._confirm_large_batch(label, cards, "cards"):
+            self.flagRequested.emit(results, flag)
+
+    def _emit_suspension(self, suspend: bool) -> None:
+        results = self._selected_results()
+        _notes, cards = self.results.results_model().checked_counts()
+        label = "Suspend" if suspend else "Unsuspend"
+        if results and cards and self._confirm_large_batch(label, cards, "cards"):
+            self.suspensionRequested.emit(results, suspend)
+
+    def _emit_tag_action(self, add: bool) -> None:
+        results = self._selected_results()
+        notes, _cards = self.results.results_model().checked_counts()
+        label = "Add tags to" if add else "Remove tags from"
+        if results and notes and self._confirm_large_batch(label, notes, "notes"):
+            self.tagActionRequested.emit(results, add)
+
+    def set_batch_action_busy(self, busy: bool, message: str = "") -> None:
+        busy = bool(busy)
+        if busy and not self._batch_busy:
+            controls = (
+                self.search,
+                self.segmented,
+                self.results,
+                self.settings_button,
+                self.rebuild_button,
+                self.semantic_action,
+                self.message_action,
+                self.retry_button,
+            )
+            self._batch_control_states = [
+                (control, control.isEnabled()) for control in controls
+            ]
+            for control, _enabled in self._batch_control_states:
+                control.setEnabled(False)
+        elif not busy and self._batch_busy:
+            for control, enabled in self._batch_control_states:
+                control.setEnabled(enabled)
+            self._batch_control_states.clear()
+        self._batch_busy = busy
+        if message:
+            self.set_summary(message)
+        self._update_batch_bar()
+
+    def apply_card_state_change(
+        self,
+        card_ids: Sequence[int],
+        *,
+        flag: Optional[int] = None,
+        suspended: Optional[bool] = None,
+    ) -> None:
+        """Refresh wordless row indicators after a successful card operation."""
+
+        self.results.results_model().apply_card_state_change(
+            card_ids,
+            flag=flag,
+            suspended=suspended,
+        )
+
+    def refresh_card_states(self, results: Sequence) -> bool:
+        """Apply a live metadata refresh while preserving checked rows."""
+
+        return self.results.results_model().refresh_results(results)
+
+    def finish_batch_action(self, success: bool, message: str) -> None:
+        self.set_batch_action_busy(False)
+        if success:
+            self.results.results_model().set_all_checked(False)
+        self.set_summary(message)
+        self._update_batch_bar()
+
+    # ------------------------------------------------------------ state API
+
+    def show_help(self) -> None:
+        if self._last_status is not None:
+            if self._last_status.state is not IndexState.READY:
+                self.show_index_blocked(self._last_status)
+                return
+            semantic = self._last_status.semantic
+            if (
+                self.mode() is SearchMode.SEMANTIC
+                and (semantic is None or not semantic.ready)
+            ):
+                self.show_semantic_needed(semantic)
+                return
+        self._message_kind = ""
+        self._batch_results_available = False
+        self.results.setEnabled(True)
+        self.stack.setCurrentIndex(_PAGE_HELP)
+        self.summary.setText("")
+        self.summary.setAccessibleDescription("")
+        self._update_batch_bar()
+
+    def show_debouncing(self) -> None:
+        """Render an edited query that has not been dispatched yet."""
+
+        self._message_kind = ""
+        self._last_response = None
+        self._batch_results_available = False
+        self.results.setEnabled(False)
+        # Keep the prior list in place until replacement work actually starts.
+        # Avoiding a model reset and stacked-page resize on every keystroke
+        # keeps rapid edits and mode changes visually calm.
+        if not self.results.results_model().count():
+            self.stack.setCurrentIndex(_PAGE_HELP)
+        self.message_action.setVisible(False)
+        self.retry_button.setVisible(False)
+        self.summary.setText("")
+        self.summary.setAccessibleDescription("")
+        self._update_batch_bar()
+
+    def show_searching(self) -> None:
+        self._message_kind = ""
+        self._last_response = None
+        self._batch_results_available = False
+        self.results.setEnabled(False)
+        # Leave prior results visible but non-actionable while the worker finds
+        # their replacement.  Clearing and rebuilding the view twice per
+        # request caused unnecessary Qt layout/paint churn during tab changes.
+        if not self.results.results_model().count():
+            self.stack.setCurrentIndex(_PAGE_HELP)
+        self.message_action.setVisible(False)
+        self.summary.setText("Searching…")
+        self.summary.setAccessibleDescription("Search in progress")
+        self.retry_button.setVisible(False)
+        self._update_batch_bar()
+
+    def show_response(
+        self,
+        response: SearchResponse,
+        corrections: Sequence[Correction],
+    ) -> None:
+        self._last_response = response
+        self._message_kind = ""
+        self.results.setEnabled(True)
+        self.message_action.setVisible(False)
+        self.chip_bar.set_chips(response.active_filters, corrections)
+        model = self.results.results_model()
+        model.set_results(response.results)
+        self._batch_results_available = bool(response.results)
+
+        if response.results:
+            self.stack.setCurrentIndex(_PAGE_RESULTS)
+            self.results.select_row(0)
+        else:
+            self._message_kind = "no_results"
+            self.message_label.setTextFormat(Qt.TextFormat.PlainText)
+            self.message_label.setText(
+                f"No results for “{response.query}”.\n"
+                "Try Smart mode, fewer filters, or a broader term."
+            )
+            self.retry_button.setVisible(False)
+            self.stack.setCurrentIndex(_PAGE_MESSAGE)
+
+        if response.truncated:
+            shown = len(response.results)
+            text = (
+                f"Showing the most relevant {shown} "
+                f"result{'s' if shown != 1 else ''}"
+            )
+        else:
+            text = (
+                f"{response.total_results} "
+                f"result{'s' if response.total_results != 1 else ''}"
+            )
+        if response.warnings:
+            count = len(response.warnings)
+            text += f" · {count} notice{'s' if count != 1 else ''}"
+            self.summary.setToolTip("\n".join(response.warnings))
+        else:
+            self.summary.setToolTip("")
+        self.summary.setText(text)
+        self.summary.setAccessibleDescription(text)
+        self._update_batch_bar()
+
+    def show_error(self, message: str) -> None:
+        self.results.setEnabled(True)
+        self.results.results_model().clear()
+        self._batch_results_available = False
+        self._message_kind = "search_error"
+        self.message_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.message_label.setText(f"Search failed:\n{message}")
+        self.message_action.setVisible(False)
+        self.retry_button.setVisible(True)
+        self.retry_button.setFocus()
+        self.stack.setCurrentIndex(_PAGE_MESSAGE)
+        self.summary.setText("Error")
+        self.summary.setAccessibleDescription(f"Search failed: {message}")
+        self._update_batch_bar()
+
+    def show_status(self, status: IndexStatus) -> None:
+        self._last_status = status
+        self.status.set_status(status)
+        self._show_semantic_status(status.semantic)
+        building = status.state is IndexState.BUILDING
+        text_ready = status.state is IndexState.READY
+        if status.semantic is not None and not text_ready:
+            wait_text = (
+                "Semantic controls will be available after Smart & Exact setup "
+                "is ready."
+            )
+            self.semantic_status.setText(
+                f"{status.semantic.summary} · waiting for Smart & Exact"
+            )
+            self.semantic_status.setToolTip(wait_text)
+            self.semantic_action.setEnabled(False)
+            self.semantic_action.setToolTip(wait_text)
+            self.semantic_action.setAccessibleDescription(wait_text)
+        interactive = text_ready and not self._batch_busy
+        self.search.setEnabled(interactive)
+        self.segmented.setEnabled(interactive)
+        if text_ready:
+            self.search.setPlaceholderText("Search notes, tags, decks…")
+        else:
+            self.search.setPlaceholderText("Waiting for initial search setup…")
+        self.rebuild_button.setEnabled(not building and not self._batch_busy)
+        if not building:
+            self.progress.setVisible(False)
+        if not text_ready:
+            self.show_index_blocked(status)
+            return
+
+        semantic = status.semantic
+        if semantic is not None and semantic.state is SemanticState.INDEXING:
+            pct = (
+                f" ({round(semantic.progress * 100)}%)"
+                if semantic.progress is not None
+                else ""
+            )
+            self.index_notice.setText(
+                "<b>Semantic search is being prepared"
+                f"{pct}.</b> It has a separate preparation step. "
+                "<b>Smart and Exact search remain available now.</b>"
+            )
+            self.index_notice.setVisible(True)
+        elif (
+            self.mode() is SearchMode.SEMANTIC
+            and (semantic is None or not semantic.ready)
+        ):
+            self.index_notice.setVisible(False)
+        else:
+            self.index_notice.setVisible(False)
+
+        if (
+            self.mode() is SearchMode.SEMANTIC
+            and (semantic is None or not semantic.ready)
+            and not self.query().strip()
+        ):
+            self.show_semantic_needed(semantic)
+        elif (
+            semantic is not None
+            and semantic.ready
+            and self._message_kind == "semantic"
+        ):
+            # A semantic setup/build message may be occupying the center page
+            # when the periodic status refresh reports completion. Clear it
+            # immediately and retry a pending query exactly once.
+            query = self.query().strip()
+            if query:
+                self._debounce.stop()
+                self.show_debouncing()
+                self.stack.setCurrentIndex(_PAGE_HELP)
+                self._emit_search()
+            else:
+                self.show_help()
+        elif self._message_kind == "text_index":
+            self.show_help()
+
+    def show_index_blocked(self, status: IndexStatus) -> None:
+        self._message_kind = "text_index"
+        self._batch_results_available = False
+        self.index_notice.setVisible(False)
+        self.retry_button.setVisible(False)
+        detail = status.detail or "Preparing your notes for fast local search."
+        if status.state is IndexState.BUILDING:
+            pct = (
+                f" — {round(status.progress * 100)}%"
+                if status.progress is not None
+                else ""
+            )
+            heading = f"Preparing Smart & Exact Search{pct}"
+            hint = (
+                "Initial setup must finish before Smart and Exact searches can run."
+            )
+            self.message_action.setVisible(False)
+            self.progress.setVisible(True)
+            if status.progress is None:
+                self.progress.setRange(0, 0)
+            else:
+                self.progress.setRange(0, 100)
+                self.progress.setValue(round(status.progress * 100))
+        else:
+            heading = "Smart & Exact Search Need Setup"
+            hint = (
+                "Prepare Smart and Exact before searching. Semantic can be "
+                "prepared afterward."
+            )
+            self.message_action.setText(
+                "Retry Smart & Exact"
+                if status.state is IndexState.ERROR
+                else "Prepare Smart & Exact"
+            )
+            self.message_action.setAccessibleName(self.message_action.text())
+            self.message_action.setProperty("action", "text_index")
+            self.message_action.setVisible(True)
+        self.message_label.setText(
+            f"<b>{escape(heading)}</b><br><br>"
+            f"{escape(hint)}<br>{escape(detail)}"
+        )
+        self.message_label.setTextFormat(Qt.TextFormat.RichText)
+        self.stack.setCurrentIndex(_PAGE_MESSAGE)
+        self.summary.setText(status.summary)
+        self._update_batch_bar()
+
+    def last_response(self) -> Optional[SearchResponse]:
+        return self._last_response
+
+    def set_summary(self, text: str) -> None:
+        self.summary.setText(text)
+        self.summary.setAccessibleDescription(text)
+
+    def set_result_limit(self, value: int) -> None:
+        self._result_limit = min(200, max(10, int(value)))
+
+    def show_semantic_needed(self, status: Optional[SemanticStatus]) -> None:
+        self._message_kind = "semantic"
+        self._batch_results_available = False
+        self.retry_button.setVisible(False)
+        self.message_action.setProperty("action", "semantic")
+        if status is None:
+            heading = "Semantic Search Is Not Available Yet"
+            detail = "Semantic status is unavailable."
+            action = ""
+        elif status.state is SemanticState.MODEL_READY:
+            heading = "Semantic Search Needs Preparation"
+            automatic = (
+                " It will start automatically after startup checks; choose "
+                "Prepare Now to begin immediately."
+                if status.auto_start
+                else ""
+            )
+            detail = (
+                "Semantic has a separate one-time preparation and may take "
+                "several minutes. You can keep using Smart or Exact while it "
+                f"finishes.{automatic}"
+            )
+            action = (
+                "Prepare Semantic Search Now"
+                if status.auto_start
+                else "Prepare / Resume Semantic Search"
+            )
+        elif status.state is SemanticState.INDEXING:
+            pct = (
+                f" — {round(status.progress * 100)}%"
+                if status.progress is not None
+                else ""
+            )
+            heading = f"Preparing Semantic Search{pct}"
+            detail = (
+                "This preparation is separate. Switch to Smart or Exact to "
+                "keep searching while it finishes."
+            )
+            action = ""
+        elif status.state is SemanticState.NOT_INSTALLED:
+            heading = "Set Up Semantic Search"
+            detail = (
+                "Complete a one-time private setup on this computer. Smart and "
+                "Exact search are already available."
+            )
+            action = "Set Up Semantic Search"
+        elif status.state is SemanticState.ERROR:
+            heading = "Semantic Search Needs Attention"
+            if status.recovery is SemanticRecovery.MODEL:
+                detail = (
+                    "Semantic search needs repair. Smart and Exact search "
+                    "remain available."
+                )
+                action = "Repair Semantic Search"
+            else:
+                detail = (
+                    "Semantic preparation did not finish. Smart and Exact "
+                    "search remain available."
+                )
+                action = "Try Again"
+        else:
+            heading = status.summary
+            detail = status.detail
+            action = ""
+
+        self.message_label.setText(
+            f"<b>{escape(heading)}</b><br><br>{escape(detail)}"
+        )
+        self.message_label.setTextFormat(Qt.TextFormat.RichText)
+        self.message_action.setText(action)
+        self.message_action.setAccessibleName(action or "Semantic search action")
+        self.message_action.setVisible(bool(action))
+        self.stack.setCurrentIndex(_PAGE_MESSAGE)
+        self.summary.setText("Semantic search is not ready")
+        self._update_batch_bar()
+
+    def _show_semantic_status(self, status: Optional[SemanticStatus]) -> None:
+        if status is None:
+            self.semantic_status.setVisible(False)
+            self.semantic_action.setVisible(False)
+            self.semantic_progress.setVisible(False)
+            return
+        self.semantic_status.setText(status.summary)
+        self.semantic_status.setToolTip(
+            "Semantic search runs privately on this computer."
+        )
+        self.semantic_status.setVisible(True)
+        self.semantic_action.setToolTip("")
+        self.semantic_action.setAccessibleDescription("")
+        self.semantic_progress.setVisible(False)
+        if status.state is SemanticState.NOT_INSTALLED:
+            self.semantic_action.setText("Set Up Semantic")
+            self.semantic_action.setEnabled(True)
+            self.semantic_action.setVisible(True)
+        elif status.state is SemanticState.ERROR:
+            self.semantic_action.setText(
+                "Repair Semantic"
+                if status.recovery is SemanticRecovery.MODEL
+                else "Try Again"
+            )
+            self.semantic_action.setEnabled(True)
+            self.semantic_action.setVisible(True)
+        elif status.state is SemanticState.MODEL_READY:
+            self.semantic_action.setText(
+                "Prepare Now" if status.auto_start else "Prepare Semantic"
+            )
+            self.semantic_action.setEnabled(True)
+            self.semantic_action.setVisible(True)
+        elif status.state is SemanticState.INDEXING:
+            self.semantic_action.setText("Preparing…")
+            self.semantic_action.setEnabled(False)
+            self.semantic_action.setVisible(True)
+            self.semantic_progress.setVisible(True)
+            if status.progress is None:
+                self.semantic_progress.setRange(0, 0)
+                progress_text = "Preparing semantic search"
+            else:
+                self.semantic_progress.setRange(0, 100)
+                self.semantic_progress.setValue(round(status.progress * 100))
+                progress_text = (
+                    f"Preparing semantic search {round(status.progress * 100)}%"
+                )
+            self.semantic_progress.setAccessibleDescription(progress_text)
+            self.semantic_progress.setToolTip(
+                progress_text
+                + ". Smart and Exact search remain available."
+            )
+        else:
+            self.semantic_action.setVisible(False)
+        if self._batch_busy:
+            self.semantic_action.setEnabled(False)
+
+    def _run_semantic_action(self) -> None:
+        semantic = self._last_status.semantic if self._last_status else None
+        if semantic is None:
+            return
+        if semantic.state is SemanticState.MODEL_READY:
+            self.semanticIndexRequested.emit()
+        elif semantic.state is SemanticState.ERROR:
+            if semantic.recovery is SemanticRecovery.MODEL:
+                self.semanticInstallRequested.emit()
+            else:
+                self.semanticIndexRequested.emit()
+        elif semantic.state is SemanticState.NOT_INSTALLED:
+            self.semanticInstallRequested.emit()
+
+    def _run_message_action(self) -> None:
+        action = self.message_action.property("action")
+        if action == "text_index":
+            self.rebuildRequested.emit()
+        elif action == "semantic":
+            self._run_semantic_action()
+
+    def show_rebuild_progress(self, fraction: float, detail: str) -> None:
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(round(fraction * 100))
+        pct = round(fraction * 100)
+        text = (
+            f"Refreshing Smart & Exact {pct}%"
+            + (f" — {detail}" if detail else "")
+        )
+        self.summary.setText(text)
+        self.summary.setAccessibleDescription(text)
+
+    def clear_chips(self) -> None:
+        self.chip_bar.set_chips([], [])
+
+    def set_query(self, text: str) -> None:
+        self.search.setText(text)
+        self.focus_query()
+        self._emit_search()
+
+    # ------------------------------------------------------------- behavior
+
+    def _on_text_edited(self, text: str) -> None:
+        query = str(text).strip()
+        self.queryEdited.emit(query)
+        if not query:
+            self._debounce.stop()
+            self.results.results_model().clear()
+            self.clear_chips()
+            self.show_help()
+            return
+        if self._last_status is not None:
+            if self._last_status.state is not IndexState.READY:
+                self._debounce.stop()
+                self.show_index_blocked(self._last_status)
+                return
+            semantic = self._last_status.semantic
+            if (
+                self.mode() is SearchMode.SEMANTIC
+                and (semantic is None or not semantic.ready)
+            ):
+                self._debounce.stop()
+                self.show_semantic_needed(semantic)
+                return
+        self.show_debouncing()
+        self._debounce.start()
+
+    def _emit_search(self) -> None:
+        query = self.query().strip()
+        if not query:
+            self._debounce.stop()
+            self.results.results_model().clear()
+            self.clear_chips()
+            self.show_help()
+            return
+        self.searchRequested.emit(query)
+
+    def _on_mode_changed(self, mode: SearchMode) -> None:
+        # A mode change dispatches immediately through the controller.  Do
+        # not let a pending text-edit debounce submit the same query again.
+        self._debounce.stop()
+        if self._last_status is not None:
+            semantic = self._last_status.semantic
+            if mode is SearchMode.SEMANTIC and (
+                semantic is None or not semantic.ready
+            ):
+                self.show_semantic_needed(semantic)
+            elif self._message_kind == "semantic" and not self.query().strip():
+                self.show_help()
+        self.modeSelected.emit(mode)
+
+    def _on_search_return(self) -> None:
+        """Return in the field opens the first result, if any."""
+        result = self.results.results_model().result_at(0)
+        if result is not None and self.stack.currentIndex() == _PAGE_RESULTS:
+            self.openRequested.emit(result)
+
+    def _on_index_activated(self, index) -> None:
+        result = self.results.results_model().result_at(index.row())
+        if result is not None:
+            self.openRequested.emit(result)
+
+    def _open_all_results(self) -> None:
+        model = self.results.results_model()
+        results = model.checked_results() or model.results()
+        if results and self.stack.currentIndex() == _PAGE_RESULTS:
+            self.openAllRequested.emit(results)
+
+    def _open_settings(self) -> None:
+        semantic = self._last_status.semantic if self._last_status else None
+        text_index_ready = (
+            self._last_status is not None
+            and self._last_status.state is IndexState.READY
+            and not self.progress.isVisible()
+        )
+        dialog = _SettingsDialog(
+            self.mode(),
+            self._result_limit,
+            semantic,
+            self,
+            text_index_ready=text_index_ready,
+            about=self._about,
+        )
+        dialog.semanticInstallRequested.connect(self.semanticInstallRequested)
+        dialog.semanticIndexRequested.connect(self.semanticIndexRequested)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            mode, limit = dialog.values()
+            self.settingsChanged.emit(mode, limit)
+        self.focus_query()
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if obj is self.search:
+                if key == Qt.Key.Key_Down:
+                    if self.results.results_model().count():
+                        self.stack.setCurrentIndex(_PAGE_RESULTS)
+                        self.results.setFocus(Qt.FocusReason.ShortcutFocusReason)
+                        self.results.select_row(0)
+                    return True
+            elif obj is self.results:
+                if key == Qt.Key.Key_Up and self.results.currentIndex().row() <= 0:
+                    self.focus_query()
+                    return True
+        return super().eventFilter(obj, event)
+
+    def reject(self) -> None:
+        """Esc clears a nonempty query first, then closes."""
+        if self.query():
+            self.search.clear()
+            self._emit_search()
+            self.focus_query()
+        else:
+            self._close()
+
+    def closeEvent(self, event) -> None:
+        self._close()
+        event.accept()
+
+    def _close(self) -> None:
+        self._debounce.stop()
+        self.dialogClosed.emit()
+        super().reject()
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self.search.setFocus(Qt.FocusReason.ActiveWindowFocusReason)

@@ -1,0 +1,46 @@
+# Local Anki data and generated semantic assets
+user_files/*
+!user_files/README.txt
+
+# Release artifacts and historical local backups
+dist/
+*.ankiaddon
+*.ankiaddon.sha256
+*.apkg
+*.colpkg
+
+# Python and test output
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+
+# Credentials and local configuration
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+credentials.json
+secrets.json
+token.json
+
+# Collection and index databases must never be committed
+*.anki2
+*.anki21
+*.db
+*.sqlite
+*.sqlite3
+*.faiss
+*.npy
+*.npz
+*.log

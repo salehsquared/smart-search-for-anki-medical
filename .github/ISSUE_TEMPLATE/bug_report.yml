@@ -1,0 +1,141 @@
+name: Bug report
+description: Report a reproducible problem with Smart Search for Anki — Medical
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for helping improve Smart Search. Please use synthetic or fully redacted examples. **Do not upload an Anki collection, profile folder, index database, patient information, credentials, or identifiable card content.**
+
+  - type: input
+    id: addon_version
+    attributes:
+      label: Smart Search version
+      description: Find this in Settings → About.
+      placeholder: "1.0.10"
+    validations:
+      required: true
+
+  - type: input
+    id: anki_version
+    attributes:
+      label: Anki version
+      placeholder: "26.05"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: operating_system
+    attributes:
+      label: Operating system
+      options:
+        - macOS — Apple silicon
+        - macOS — Intel
+        - Windows
+        - Linux
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os_version
+    attributes:
+      label: Operating-system version
+      placeholder: "macOS 14.7"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Search mode
+      options:
+        - Smart
+        - Exact
+        - Semantic
+        - All modes
+        - Not search-related
+    validations:
+      required: true
+
+  - type: dropdown
+    id: semantic_state
+    attributes:
+      label: Semantic state
+      description: Semantic currently supports macOS 14+ on Apple-silicon Macs only.
+      options:
+        - Not enabled
+        - Needs setup
+        - Preparing
+        - Ready
+        - Needs attention
+        - Unsupported on this computer
+        - Not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Give exact, numbered steps using synthetic or redacted content.
+      placeholder: |
+        1. Open Smart Search with Command-K.
+        2. Select Smart mode.
+        3. Search for the synthetic term …
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      description: Paste error text as text when possible.
+    validations:
+      required: true
+
+  - type: input
+    id: collection_size
+    attributes:
+      label: Approximate collection size
+      description: A rough note/card count is enough. Do not attach the collection.
+      placeholder: "About 40,000 notes"
+
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: How often does it happen?
+      options:
+        - Every time
+        - Often
+        - Once
+        - Unsure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I removed personal, patient, profile, deck, tag, and card information from this report.
+          required: true
+        - label: I did not attach a collection, profile folder, search database, vector index, credential, or API token.
+          required: true
+        - label: I understand that Semantic Search currently supports macOS 14+ on Apple-silicon Macs only.
+          required: true
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional context
+      description: Include other add-ons involved or safe, redacted screenshots if relevant.
