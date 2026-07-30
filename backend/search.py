@@ -173,7 +173,10 @@ class SearchEngine:
                 )
             return self._response(parsed, started, warnings=warnings)
 
+        positive_terms = parsed.positive_terms
         corrections: list[Correction] = []
+        automatic: dict[str, str] = {}
+        effective_terms = positive_terms
         alias_expansions: list[AliasExpansion] = []
         if normalized_mode in {"smart", "semantic"}:
             vocabulary = self._ensure_vocabulary()
@@ -183,14 +186,20 @@ class SearchEngine:
                 vocabulary,
                 cancel_check=checkpoint,
             )
+            automatic = {
+                normalize_text(correction.original): correction.corrected
+                for correction in corrections
+                if correction.automatic
+            }
+            if automatic:
+                effective_terms = _replace_terms(positive_terms, automatic)
             if normalized_mode == "smart":
-                alias_expansions = self._aliases(parsed, vocabulary)
+                alias_expansions = self._aliases(effective_terms, vocabulary)
             checkpoint()
 
         ranked: dict[int, RankedCandidate] = {}
         documents: dict[int, IndexedDocument] = {}
         source_hits: list[tuple[str, Sequence[FTSDocumentHit], float, MatchReason]] = []
-        positive_terms = parsed.positive_terms
 
         if normalized_mode != "semantic":
             literal_strict = _fts_expression(positive_terms, joiner="AND")
@@ -234,14 +243,8 @@ class SearchEngine:
                     )
                 )
 
-            automatic = {
-                normalize_text(correction.original): correction.corrected
-                for correction in corrections
-                if correction.automatic
-            }
             if automatic:
-                corrected_terms = _replace_terms(positive_terms, automatic)
-                corrected_expression = _fts_expression(corrected_terms, joiner="AND")
+                corrected_expression = _fts_expression(effective_terms, joiner="AND")
                 source_hits.append(
                     (
                         "corrected",
@@ -267,7 +270,7 @@ class SearchEngine:
 
             if alias_expansions:
                 alias_expression = _alias_fts_expression(
-                    positive_terms, alias_expansions
+                    effective_terms, alias_expansions
                 )
                 source_hits.append(
                     (
@@ -306,17 +309,7 @@ class SearchEngine:
                 candidate.source_ranks[source_name] = hit.rank
                 _add_reason(candidate, reason)
 
-        automatic = {
-            normalize_text(correction.original): correction.corrected
-            for correction in corrections
-            if correction.automatic
-        }
-        semantic_terms = (
-            _replace_terms(positive_terms, automatic)
-            if automatic
-            else positive_terms
-        )
-        semantic_query = " ".join(term.text for term in semantic_terms)
+        semantic_query = " ".join(term.text for term in effective_terms)
         if normalized_mode == "semantic" and self.semantic_provider is not None:
             checkpoint()
             try:
@@ -370,7 +363,13 @@ class SearchEngine:
             if index % 32 == 0:
                 checkpoint()
             document = documents[candidate.note_id]
-            _apply_explainable_boosts(candidate, document, parsed)
+            _apply_explainable_boosts(
+                candidate,
+                document,
+                parsed,
+                coverage_terms=effective_terms,
+                alias_expansions=alias_expansions,
+            )
 
         checkpoint()
         ordered = sorted(
@@ -462,11 +461,11 @@ class SearchEngine:
 
     @staticmethod
     def _aliases(
-        parsed: ParsedQuery, vocabulary: Vocabulary
+        terms: Sequence, vocabulary: Vocabulary
     ) -> list[AliasExpansion]:
         expansions: list[AliasExpansion] = []
         seen: set[tuple[str, str]] = set()
-        for term in parsed.positive_terms:
+        for term in terms:
             values = (term.normalized,) + tokenize(term.normalized)
             for value in values:
                 for expansion in vocabulary.expand_aliases(value):
@@ -552,19 +551,25 @@ def _apply_explainable_boosts(
     candidate: RankedCandidate,
     document: IndexedDocument,
     parsed: ParsedQuery,
+    *,
+    coverage_terms: Sequence,
+    alias_expansions: Sequence[AliasExpansion],
 ) -> None:
     positive = parsed.positive_terms
     document_tokens = tokenize(document.normalized_text, already_normalized=True)
     token_set = set(document_tokens)
-    concepts = _query_concepts(positive)
+    concepts = _query_concept_groups(coverage_terms, alias_expansions)
     candidate.total_concepts = len(concepts)
     candidate.matched_concepts = sum(
         1
-        for concept, phrase in concepts
-        if (
-            concept in document.normalized_text
-            if phrase
-            else all(token in token_set for token in tokenize(concept))
+        for alternatives in concepts
+        if any(
+            (
+                concept in document.normalized_text
+                if phrase
+                else all(token in token_set for token in tokenize(concept))
+            )
+            for concept, phrase in alternatives
         )
     )
     exact_phrases = [
@@ -617,16 +622,32 @@ def _apply_explainable_boosts(
         candidate.score += 0.02
 
 
-def _query_concepts(terms: Sequence) -> tuple[tuple[str, bool], ...]:
-    concepts: list[tuple[str, bool]] = []
+def _query_concept_groups(
+    terms: Sequence,
+    alias_expansions: Sequence[AliasExpansion],
+) -> tuple[tuple[tuple[str, bool], ...], ...]:
+    aliases_by_original: dict[str, set[str]] = defaultdict(set)
+    for expansion in alias_expansions:
+        aliases_by_original[normalize_text(expansion.original)].add(
+            normalize_text(expansion.expanded)
+        )
+
+    concepts: list[tuple[tuple[str, bool], ...]] = []
     for term in terms:
         tokens = tokenize(term.normalized)
         if not tokens:
             continue
-        if term.quoted or len(tokens) > 1:
-            concepts.append((" ".join(tokens), True))
-        else:
-            concepts.append((tokens[0], False))
+        normalized = " ".join(tokens)
+        alternatives: list[tuple[str, bool]] = [
+            (normalized, bool(term.quoted or len(tokens) > 1))
+        ]
+        for alias in sorted(aliases_by_original.get(term.normalized, ())):
+            alias_tokens = tokenize(alias)
+            if alias_tokens:
+                alternatives.append(
+                    (" ".join(alias_tokens), len(alias_tokens) > 1)
+                )
+        concepts.append(tuple(dict.fromkeys(alternatives)))
     return tuple(concepts)
 
 
@@ -714,12 +735,24 @@ def _minimum_cover_span(
 
 
 def _add_reason(candidate: RankedCandidate, reason: MatchReason) -> None:
-    if reason.kind in {MatchKind.TYPO, MatchKind.ALIAS} and any(
-        existing.kind in {MatchKind.LEXICAL, MatchKind.EXACT_TERM, MatchKind.EXACT_PHRASE}
-        for existing in candidate.reasons
+    expansion_reason = reason.kind in {MatchKind.TYPO, MatchKind.ALIAS}
+    if expansion_reason and (
+        "literal_strict" in candidate.source_ranks
+        or any(
+            existing.kind in {MatchKind.EXACT_TERM, MatchKind.EXACT_PHRASE}
+            for existing in candidate.reasons
+        )
     ):
         # The expansion may still improve the fused score, but an exact literal
-        # result should not be mislabeled as though it required correction.
+        # result should not be mislabeled as though it required correction. A
+        # broad OR hit may have matched only another term, so it does not count.
+        return
+    if reason.kind == MatchKind.ALIAS and any(
+        existing.kind == MatchKind.TYPO for existing in candidate.reasons
+    ):
+        # Alias FTS includes the corrected term as well as its expansions. A
+        # card that matched that corrected term needed spelling recovery, but
+        # did not need a medical alias.
         return
     if all(existing.kind != reason.kind for existing in candidate.reasons):
         candidate.reasons.append(reason)

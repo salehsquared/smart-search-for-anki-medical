@@ -137,6 +137,146 @@ class IndexSearchTests(unittest.TestCase):
             any(reason.kind == MatchKind.ALIAS for reason in response.results[0].reasons)
         )
 
+    def test_automatic_typo_correction_then_expands_drug_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            index = SmartSearchIndex(Path(directory) / "index.sqlite3")
+            index.rebuild(
+                [
+                    IndexedNote(
+                        1,
+                        {"Text": "Bupropion is an aminoketone antidepressant."},
+                    ),
+                    IndexedNote(
+                        2,
+                        {"Text": "Wellbutrin can lower the seizure threshold."},
+                    ),
+                ]
+            )
+            index.set_aliases({"wellbutrin": ("bupropion",)}, source="test")
+            try:
+                response = SearchEngine(index).search("buproprion")
+                generic_result = next(
+                    result for result in response.results if result.note_id == 1
+                )
+                brand_result = next(
+                    result for result in response.results if result.note_id == 2
+                )
+                self.assertEqual(response.corrections[0].corrected, "bupropion")
+                self.assertTrue(response.corrections[0].automatic)
+                self.assertIn(
+                    ("bupropion", "wellbutrin"),
+                    {
+                        (expansion.original, expansion.expanded)
+                        for expansion in response.alias_expansions
+                    },
+                )
+                self.assertTrue(
+                    any(
+                        reason.kind == MatchKind.ALIAS
+                        for reason in brand_result.reasons
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        reason.kind == MatchKind.TYPO
+                        for reason in generic_result.reasons
+                    )
+                )
+                self.assertFalse(
+                    any(
+                        reason.kind == MatchKind.ALIAS
+                        for reason in generic_result.reasons
+                    )
+                )
+            finally:
+                index.close()
+
+    def test_corrected_alias_keeps_other_query_terms_required(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            index = SmartSearchIndex(Path(directory) / "index.sqlite3")
+            index.rebuild(
+                [
+                    IndexedNote(
+                        1,
+                        {"Text": "Wellbutrin supports smoking cessation."},
+                    ),
+                    IndexedNote(
+                        2,
+                        {"Text": "Wellbutrin can lower the seizure threshold."},
+                    ),
+                    IndexedNote(
+                        3,
+                        {"Text": "Bupropion supports smoking cessation."},
+                    ),
+                    IndexedNote(
+                        4,
+                        {"Text": "Varenicline supports smoking cessation."},
+                    ),
+                ]
+            )
+            index.set_aliases({"wellbutrin": ("bupropion",)}, source="test")
+            try:
+                response = SearchEngine(index).search("buproprion smoking")
+                self.assertEqual(
+                    {result.note_id for result in response.results},
+                    {1, 3},
+                )
+                pairs = [
+                    (expansion.original, expansion.expanded)
+                    for expansion in response.alias_expansions
+                ]
+                self.assertEqual(pairs.count(("bupropion", "wellbutrin")), 1)
+                result_by_id = {
+                    result.note_id: result for result in response.results
+                }
+                self.assertTrue(
+                    any(
+                        reason.kind == MatchKind.ALIAS
+                        for reason in result_by_id[1].reasons
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        reason.kind == MatchKind.TYPO
+                        for reason in result_by_id[3].reasons
+                    )
+                )
+            finally:
+                index.close()
+
+    def test_automatic_brand_typo_then_expands_to_generic_name(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            index = SmartSearchIndex(Path(directory) / "index.sqlite3")
+            index.rebuild(
+                [
+                    IndexedNote(
+                        1,
+                        {"Text": "Bupropion is an aminoketone antidepressant."},
+                    ),
+                ]
+            )
+            index.set_aliases({"wellbutrin": ("bupropion",)}, source="test")
+            try:
+                response = SearchEngine(index).search("welbutrin")
+                self.assertEqual(response.results[0].note_id, 1)
+                self.assertEqual(response.corrections[0].corrected, "wellbutrin")
+                self.assertTrue(response.corrections[0].automatic)
+                self.assertIn(
+                    ("wellbutrin", "bupropion"),
+                    {
+                        (expansion.original, expansion.expanded)
+                        for expansion in response.alias_expansions
+                    },
+                )
+                self.assertTrue(
+                    any(
+                        reason.kind == MatchKind.ALIAS
+                        for reason in response.results[0].reasons
+                    )
+                )
+            finally:
+                index.close()
+
     def test_structured_filters_are_never_ignored(self) -> None:
         unresolved = self.engine.search("deck:AnKing bupropion")
         self.assertFalse(unresolved.filters_applied)

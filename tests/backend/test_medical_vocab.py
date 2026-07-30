@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tempfile
 import unittest
 
 from backend.medical_vocab import load_alias_resource
-from backend import SmartSearchIndex
-import tempfile
+from backend import SmartSearchIndex, Vocabulary
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +17,23 @@ class MedicalVocabularyTests(unittest.TestCase):
         aliases = load_alias_resource(resource)
         self.assertGreater(len(aliases), 5_000)
         self.assertIn("fluorouracil", aliases["5-fu"])
+
+    def test_bundled_reverse_drug_names_are_concise_but_full_names_still_work(
+        self,
+    ) -> None:
+        resource = PROJECT_ROOT / "resources" / "medical_vocab" / "rxterms_202607.json.gz"
+        vocabulary = Vocabulary(aliases=load_alias_resource(resource))
+        self.assertEqual(
+            [
+                expansion.expanded
+                for expansion in vocabulary.expand_aliases("bupropion")
+            ],
+            ["aplenzin", "forfivo", "wellbutrin"],
+        )
+        self.assertEqual(
+            vocabulary.expand_aliases("wellbutrin xr")[0].expanded,
+            "bupropion",
+        )
 
     def test_index_resource_load_is_idempotent(self) -> None:
         resource = PROJECT_ROOT / "resources" / "medical_vocab" / "rxterms_202607.json.gz"

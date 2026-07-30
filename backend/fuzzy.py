@@ -292,6 +292,13 @@ class Vocabulary:
                 )
             )
         for alias in sorted(self.reverse_aliases.get(normalized, ())):
+            alias_tokens = tokenize(alias)
+            if len(alias_tokens) > 1:
+                # Reverse suggestions stay concise and never invent a broad
+                # first-word alias such as "plan" from "Plan B". Full product
+                # names remain in the forward map, so entering one still finds
+                # its ingredient.
+                continue
             expansions.append(
                 AliasExpansion(
                     original=value,

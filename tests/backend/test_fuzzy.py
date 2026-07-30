@@ -77,6 +77,37 @@ class FuzzyTests(unittest.TestCase):
         self.assertEqual(forward[0].expanded, "bupropion")
         self.assertEqual(reverse[0].expanded, "wellbutrin")
 
+    def test_reverse_aliases_collapse_confirmed_product_variants(self) -> None:
+        vocabulary = Vocabulary(
+            aliases={
+                "wellbutrin": ("bupropion",),
+                "wellbutrin xr": ("bupropion",),
+                "wellbutrin sr": ("bupropion",),
+                "bupropion xr": ("bupropion",),
+            }
+        )
+        self.assertEqual(
+            [item.expanded for item in vocabulary.expand_aliases("bupropion")],
+            ["wellbutrin"],
+        )
+        self.assertEqual(
+            vocabulary.expand_aliases("wellbutrin xr")[0].expanded,
+            "bupropion",
+        )
+
+    def test_reverse_aliases_do_not_invent_unconfirmed_first_words(self) -> None:
+        vocabulary = Vocabulary(
+            aliases={
+                "plan b one-step": ("levonorgestrel",),
+            }
+        )
+        self.assertFalse(vocabulary.expand_aliases("levonorgestrel"))
+        self.assertEqual(
+            vocabulary.expand_aliases("plan b one-step")[0].expanded,
+            "levonorgestrel",
+        )
+        self.assertFalse(vocabulary.expand_aliases("plan"))
+
     def test_large_candidate_scan_honors_cancellation(self) -> None:
         vocabulary = Vocabulary(
             [(f"medterm{index:04d}", 1) for index in range(1_000)]

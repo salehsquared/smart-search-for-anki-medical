@@ -31,6 +31,9 @@
 - Stale search requests are cancelled so mode switches and newer queries are
   not overwritten by older results.
 - Smart and Exact remain usable while the separate Semantic index is preparing.
+- Drug-name suggestions use concise single-word names while full product names
+  remain searchable, and automatic typo corrections now continue through
+  generic/brand alias expansion.
 - Expensive refreshes are coalesced and delayed until edit activity settles.
 - Profile-scoped search data is disposable and can be rebuilt without changing
   `collection.anki2`.
