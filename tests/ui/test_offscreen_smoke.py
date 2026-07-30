@@ -858,7 +858,13 @@ class OffscreenSmokeTests(unittest.TestCase):
             SemanticState.MODEL_READY,
             detail="Build this profile's local semantic index.",
         )
+        ready = SemanticStatus(
+            SemanticState.READY,
+            detail="40,659 notes.",
+        )
         cases = (
+            # READY is the state that exposed the live Anki/macOS clipping.
+            (ready, True),
             # Long INDEXING copy plus the waiting-for-Smart-&-Exact line.
             (long_indexing, False),
             (long_indexing, True),
@@ -898,6 +904,10 @@ class OffscreenSmokeTests(unittest.TestCase):
                         )
                         self.assertTrue(control.accessibleName())
                     self.assertTrue(dialog.semantic_status.accessibleName())
+                    self.assertGreaterEqual(
+                        dialog.semantic_status.minimumHeight(),
+                        dialog.semantic_status.fontMetrics().lineSpacing() * 6,
+                    )
                     dialog.deleteLater()
                     self.app.processEvents()
 

@@ -197,22 +197,33 @@ class _SettingsDialog(QDialog):
         # label reserves its full height-for-width (Minimum vertical policy,
         # so the layout can never squeeze it into clipping) and the button
         # sits directly below it at its natural width.
-        semantic_field = QWidget(search_page)
-        semantic_field.setObjectName("semanticSettingsField")
-        semantic_column = QVBoxLayout(semantic_field)
+        self.semantic_field = QWidget(search_page)
+        self.semantic_field.setObjectName("semanticSettingsField")
+        semantic_column = QVBoxLayout(self.semantic_field)
         semantic_column.setContentsMargins(0, 0, 0, 0)
         semantic_column.setSpacing(12)
+        semantic_column.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        self.semantic_status = QLabel(semantic_field)
+        self.semantic_status = QLabel(self.semantic_field)
         self.semantic_status.setWordWrap(True)
+        self.semantic_status.setAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+        )
         self.semantic_status.setAccessibleName("Semantic search status")
         self.semantic_status.setSizePolicy(
             QSizePolicy.Policy.Preferred,
             QSizePolicy.Policy.Minimum,
         )
+        # Anki's macOS stylesheet can report a much smaller word-wrapped
+        # minimumSizeHint than the label actually paints. Reserve six
+        # font-scaled lines plus the optional action row so neither READY nor
+        # in-progress copy can be squeezed or overlap at the minimum dialog.
+        status_height = self.semantic_status.fontMetrics().lineSpacing() * 6
+        self.semantic_status.setMinimumHeight(status_height)
+        self.semantic_field.setMinimumHeight(status_height + 52)
         semantic_column.addWidget(self.semantic_status)
 
-        self.semantic_action = QPushButton(semantic_field)
+        self.semantic_action = QPushButton(self.semantic_field)
         self.semantic_action.setObjectName("semanticSettingsAction")
         self.semantic_action.setMinimumHeight(40)
         self.semantic_action.setAccessibleName("Set up semantic search")
@@ -222,7 +233,7 @@ class _SettingsDialog(QDialog):
             Qt.AlignmentFlag.AlignLeft,
         )
         self._set_semantic_status(semantic)
-        form.addRow("Semantic search", semantic_field)
+        form.addRow("Semantic search", self.semantic_field)
 
         self.about_panel = AboutPanel(
             about if about is not None else _default_about_info(),
