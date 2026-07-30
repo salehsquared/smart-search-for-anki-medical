@@ -295,12 +295,16 @@ class ControllerTests(unittest.TestCase):
 
         settings = self.backend.load_settings()
         self.assertEqual(settings.result_limit, 70)
+        self.assertTrue(settings.preview_enabled)
         settings.mode = contracts.SearchMode.EXACT
+        settings.preview_enabled = False
         settings.width = 1234
         self.backend.save_settings(settings)
         saved = self.backend.mw.addonManager.config
         self.assertEqual(saved["shortcut"], "Meta+K")
         self.assertEqual(saved["ui"]["mode"], "exact")
+        self.assertFalse(saved["preview_enabled"])
+        self.assertFalse(saved["ui"]["preview_enabled"])
         self.assertEqual(saved["ui"]["width"], 1234)
 
     def test_async_profile_activation_opens_indexes_off_caller_thread(self) -> None:
@@ -1714,6 +1718,9 @@ class ControllerTests(unittest.TestCase):
             ),
         )
         addon._dialog = dialog
+        addon._ui_controller = types.SimpleNamespace(
+            settings=types.SimpleNamespace(preview_enabled=True)
+        )
 
         class _Preview:
             def __init__(self, closed) -> None:
@@ -1763,7 +1770,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(factory.call_args.kwargs["initial_result"], result)
         self.assertEqual(preview.open_count, 1)
         self.assertEqual(active_states, [True])
-        self.assertEqual(focus_count, [True])
+        self.assertEqual(focus_count, [])
 
         self.assertTrue(callbacks["on_previous"]())
         self.assertTrue(callbacks["on_next"]())
@@ -1789,6 +1796,76 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(preview.close_count, 1)
         self.assertIsNone(addon._previewer)
         self.assertEqual(active_states[-1], False)
+
+    def test_auto_preview_is_queued_only_while_results_are_browsed(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        result = contracts.SearchResult(
+            note_id=7,
+            card_ids=(71,),
+            title="Seven",
+        )
+        browsing = [False]
+        addon._dialog = types.SimpleNamespace(
+            results=types.SimpleNamespace(
+                hasFocus=lambda: browsing[0],
+                current_result=lambda: result,
+            ),
+            set_preview_active=lambda _active: None,
+        )
+        addon._ui_controller = types.SimpleNamespace(
+            settings=types.SimpleNamespace(preview_enabled=True)
+        )
+        timer = _FakeTimer()
+        addon._preview_open_timer = timer
+
+        addon._preview_selection_changed(result)
+        self.assertEqual(timer.starts, [])
+        self.assertIsNone(addon._pending_preview_result)
+
+        browsing[0] = True
+        addon._preview_selection_changed(result)
+        self.assertEqual(timer.starts, [25])
+        self.assertEqual(addon._pending_preview_result, result)
+
+        with patch.object(addon, "_toggle_previewer") as toggle:
+            addon._open_pending_previewer()
+        toggle.assert_called_once_with(result)
+        self.assertIsNone(addon._pending_preview_result)
+
+        addon._ui_controller.settings.preview_enabled = False
+        addon._preview_preference_changed(False)
+        self.assertGreaterEqual(timer.stop_count, 1)
+        self.assertIsNone(addon._pending_preview_result)
+
+    def test_close_dialog_disposes_controller_before_deferred_deletion(
+        self,
+    ) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        events: list[str] = []
+        dialog = types.SimpleNamespace(
+            close=lambda: events.append("close"),
+            deleteLater=lambda: events.append("delete"),
+            set_preview_active=lambda _active: None,
+        )
+        ui_controller = types.SimpleNamespace(
+            dispose=lambda: events.append("dispose")
+        )
+        addon._dialog = dialog
+        addon._ui_controller = ui_controller
+
+        addon._close_dialog()
+
+        self.assertEqual(events, ["close", "dispose", "delete"])
+        self.assertIsNone(addon._dialog)
+        self.assertIsNone(addon._ui_controller)
 
     def test_semantic_progress_updates_are_coalesced_for_the_gui(self) -> None:
         addon = controller.SmartSearchAddonController(

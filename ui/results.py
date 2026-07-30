@@ -846,6 +846,7 @@ class ResultsView(QListView):
 
     resultContextRequested = pyqtSignal(int, object)  # row, global QPoint
     currentResultChanged = pyqtSignal(object)  # SearchResult | None
+    resultBrowsed = pyqtSignal(object)  # SearchResult
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -951,6 +952,7 @@ class ResultsView(QListView):
     def mousePressEvent(self, event) -> None:
         position = event.position().toPoint()
         row_index = self.indexAt(position)
+        previous_row = self.currentIndex().row()
         checkbox_index = self._checkbox_index_at(position)
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         left_click = event.button() == Qt.MouseButton.LeftButton
@@ -979,6 +981,10 @@ class ResultsView(QListView):
         super().mousePressEvent(event)
         if left_click and row_index.isValid():
             self._range_anchor_row = row_index.row()
+            if row_index.row() == previous_row:
+                result = self._model.result_at(row_index.row())
+                if result is not None:
+                    self.resultBrowsed.emit(result)
 
     def mouseDoubleClickEvent(self, event) -> None:
         # The first press already toggled the checkbox. Swallow the second

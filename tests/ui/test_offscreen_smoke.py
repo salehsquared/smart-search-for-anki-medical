@@ -56,14 +56,17 @@ class _HeldSearchBackend:
         self.requests = []
         self.callbacks = []
         self.cancel_count = 0
+        self.status_reads = 0
+        self.saved_settings = []
 
     def load_settings(self):
         return UISettings()
 
-    def save_settings(self, _settings) -> None:
-        return None
+    def save_settings(self, settings) -> None:
+        self.saved_settings.append(settings)
 
     def get_status(self):
+        self.status_reads += 1
         return self.status
 
     def submit_search(self, request, on_success, on_error):
@@ -441,6 +444,64 @@ class OffscreenSmokeTests(unittest.TestCase):
 
         self.assertEqual(dialog.results.results_model().count(), 0)
         self.assertEqual(dialog.summary.text(), "")
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_closed_dialog_pauses_status_timer_and_dispose_is_terminal(
+        self,
+    ) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        closed: list[bool] = []
+        dialog.dialogClosed.connect(lambda: closed.append(True))
+        controller = SearchController(backend, dialog)
+        self.assertTrue(controller._status_timer.isActive())
+        initial_reads = backend.status_reads
+
+        dialog.show()
+        dialog.close()
+        self.app.processEvents()
+
+        self.assertEqual(closed, [True])
+        self.assertFalse(controller._active)
+        self.assertFalse(controller._status_timer.isActive())
+        controller.refresh_status()
+        self.assertEqual(backend.status_reads, initial_reads)
+
+        self.assertTrue(controller.resume())
+        self.assertTrue(controller._status_timer.isActive())
+        self.assertGreater(backend.status_reads, initial_reads)
+        controller.dispose()
+        self.assertFalse(controller.resume())
+        self.assertFalse(controller._status_timer.isActive())
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_disposed_controller_ignores_queued_search_success(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        controller.submit_search("queued")
+        success, _failure = backend.callbacks[-1]
+        controller.dispose()
+
+        success(
+            SearchResponse(
+                request_id=backend.requests[-1].request_id,
+                query="queued",
+                results=(
+                    SearchResult(
+                        note_id=1,
+                        card_ids=(11,),
+                        title="Should stay hidden",
+                    ),
+                ),
+                total_results=1,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(dialog.results.results_model().count(), 0)
         controller.deleteLater()
         dialog.deleteLater()
 
@@ -915,7 +976,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         values = {
             "product_name": "Smart Search for Anki — Medical",
             "creator": "Saleh Mostafa",
-            "version": "1.0.11",
+            "version": "1.0.12",
             "logo_path": str(LOGO_PATH),
             "website_url": "https://medbrevia.com/app",
             "feedback_url": "mailto:product@medbrevia.com",
@@ -938,10 +999,11 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(dialog.tabs.tabText(0), "Search")
         self.assertEqual(dialog.tabs.tabText(1), "About")
         # Existing settings behavior and values are unchanged.
-        self.assertEqual(dialog.values(), (SearchMode.EXACT, 80))
+        self.assertEqual(dialog.values(), (SearchMode.EXACT, 80, True))
         dialog.mode_combo.setCurrentIndex(0)
         dialog.limit_spin.setValue(120)
-        self.assertEqual(dialog.values(), (SearchMode.SMART, 120))
+        dialog.preview_check.setChecked(False)
+        self.assertEqual(dialog.values(), (SearchMode.SMART, 120, False))
         dialog.tabs.setCurrentIndex(1)
         self.app.processEvents()
         self.assertTrue(dialog.button_box.isVisibleTo(dialog))
@@ -965,7 +1027,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         panel = dialog.about_panel
         self.assertTrue(panel.isVisibleTo(dialog))
         self.assertEqual(panel.name_label.text(), "Smart Search for Anki — Medical")
-        self.assertIn("1.0.11", panel.version_label.text())
+        self.assertIn("1.0.12", panel.version_label.text())
         self.assertIn("Created by Saleh Mostafa", panel.attribution_label.text())
         self.assertIn("MedBrevia", panel.attribution_label.text())
         self.assertEqual(
@@ -1044,7 +1106,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.11")
+        self.assertEqual(fallback.version, "1.0.12")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())
@@ -1491,6 +1553,37 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertFalse(dialog.preview_button.isEnabled())
         dialog._toggle_preview_shortcut()
         self.assertEqual(toggled, [result, None])
+
+        dialog.set_preview_enabled(False)
+        self.assertFalse(dialog.preview_button.isEnabled())
+        dialog._toggle_preview_shortcut()
+        self.assertEqual(toggled, [result, None])
+        dialog.deleteLater()
+
+    def test_down_into_results_requests_auto_preview_for_current_row(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        result = SearchResult(note_id=7, card_ids=(71,), title="Seven")
+        browsed: list[SearchResult | None] = []
+        dialog.previewResultChanged.connect(browsed.append)
+        dialog.show_response(
+            SearchResponse(
+                request_id=16,
+                query="seven",
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        dialog.search.setFocus()
+        self.app.processEvents()
+        browsed.clear()
+
+        QTest.keyClick(dialog.search, Qt.Key.Key_Down)
+        self.app.processEvents()
+
+        self.assertTrue(dialog.results.hasFocus())
+        self.assertEqual(browsed, [result])
         dialog.deleteLater()
 
     def test_bulk_action_payloads_busy_state_and_success_clear(self) -> None:

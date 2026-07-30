@@ -41,6 +41,8 @@ usable while Semantic prepares.
 
 ## Work with results without losing context
 
+- Move into the result list and Anki's rendered card Preview opens
+  automatically; disable it at any time in **Settings → Card preview**.
 - See compact suspension and flag indicators on each result.
 - Check one result, Shift-click a range, or choose **All shown**, **None**, or
   **Invert**.

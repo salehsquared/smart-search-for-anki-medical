@@ -67,6 +67,13 @@ _PAGE_RESULTS = 1
 _PAGE_MESSAGE = 2
 
 _PRIMARY_KEY = "⌘" if sys.platform == "darwin" else "Ctrl"
+# Qt swaps the logical Ctrl/Meta roles on macOS: ``Ctrl`` in a
+# QKeySequence is the physical Command key, while ``Meta`` is the physical
+# Control key.  Keep this shortcut on the physical Control key so it does not
+# collide with Anki's Command+Shift+P "Switch Profile" action.
+_PREVIEW_SHORTCUT = (
+    "Meta+Shift+P" if sys.platform == "darwin" else "Ctrl+Shift+P"
+)
 
 
 def _semantic_availability_text() -> str:
@@ -149,6 +156,7 @@ class _SettingsDialog(QDialog):
         semantic: Optional[SemanticStatus],
         parent: Optional[QWidget] = None,
         *,
+        preview_enabled: bool = True,
         text_index_ready: bool = True,
         about: Optional[AboutInfo] = None,
     ) -> None:
@@ -193,6 +201,17 @@ class _SettingsDialog(QDialog):
         self.limit_spin.setValue(result_limit)
         self.limit_spin.setAccessibleName("Maximum results per search")
         form.addRow("Result limit", self.limit_spin)
+
+        self.preview_check = QCheckBox(
+            "Show automatically while browsing results",
+            search_page,
+        )
+        self.preview_check.setChecked(bool(preview_enabled))
+        self.preview_check.setAccessibleName("Enable card preview")
+        self.preview_check.setToolTip(
+            "Open Anki's rendered card Preview when you enter or move through results"
+        )
+        form.addRow("Card preview", self.preview_check)
 
         # The status copy and its action share one field column: the wrapping
         # label reserves its full height-for-width (Minimum vertical policy,
@@ -252,8 +271,12 @@ class _SettingsDialog(QDialog):
         root.addWidget(self.button_box)
         self._apply_theme()
 
-    def values(self) -> tuple[SearchMode, int]:
-        return self.mode_combo.currentData(), self.limit_spin.value()
+    def values(self) -> tuple[SearchMode, int, bool]:
+        return (
+            self.mode_combo.currentData(),
+            self.limit_spin.value(),
+            self.preview_check.isChecked(),
+        )
 
     def _set_semantic_status(self, status: Optional[SemanticStatus]) -> None:
         if status is None:
@@ -404,7 +427,7 @@ class SearchDialog(QDialog):
     rebuildRequested = pyqtSignal()
     semanticInstallRequested = pyqtSignal()
     semanticIndexRequested = pyqtSignal()
-    settingsChanged = pyqtSignal(object, int)  # SearchMode, result limit
+    settingsChanged = pyqtSignal(object, int, bool)  # mode, limit, preview?
     flagRequested = pyqtSignal(object, int)  # tuple[SearchResult, ...], 0..7
     suspensionRequested = pyqtSignal(object, bool)  # results, suspend?
     tagActionRequested = pyqtSignal(object, bool)  # results, add?
@@ -433,6 +456,8 @@ class SearchDialog(QDialog):
         self._last_status: Optional[IndexStatus] = None
         self._message_kind = ""
         self._result_limit = 50
+        self._preview_enabled = True
+        self._close_notified = False
         self._batch_busy = False
         self._batch_results_available = False
         self._batch_control_states: list[tuple[QWidget, bool]] = []
@@ -490,6 +515,7 @@ class SearchDialog(QDialog):
         self.results.currentResultChanged.connect(
             self._on_current_result_changed
         )
+        self.results.resultBrowsed.connect(self._on_result_browsed)
         self.stack.insertWidget(_PAGE_RESULTS, self.results)
 
         message_page = QWidget(self)
@@ -895,7 +921,7 @@ class SearchDialog(QDialog):
         sc("Ctrl+3", lambda: self.set_mode(SearchMode.SEMANTIC))
         sc("Ctrl+L", self.focus_query)
         sc("Ctrl+Return", self._open_all_results)
-        sc("Ctrl+Shift+P", self._toggle_preview_shortcut)
+        sc(_PREVIEW_SHORTCUT, self._toggle_preview_shortcut)
         if sys.platform == "darwin":
             sc("Meta+1", lambda: self.set_mode(SearchMode.SMART))
             sc("Meta+2", lambda: self.set_mode(SearchMode.EXACT))
@@ -936,6 +962,14 @@ class SearchDialog(QDialog):
 
         self.preview_button.setChecked(bool(active))
 
+    def set_preview_enabled(self, enabled: bool) -> None:
+        """Enable or disable the card Preview feature in this dialog."""
+
+        self._preview_enabled = bool(enabled)
+        if not self._preview_enabled:
+            self.preview_button.setChecked(False)
+        self._update_batch_bar()
+
     # --------------------------------------------------------- bulk actions
 
     def _update_batch_bar(self) -> None:
@@ -969,6 +1003,7 @@ class SearchDialog(QDialog):
         current_result = self.results.current_result()
         self.preview_button.setEnabled(
             available
+            and self._preview_enabled
             and current_result is not None
             and bool(current_result.card_ids)
         )
@@ -995,15 +1030,25 @@ class SearchDialog(QDialog):
 
     def _on_current_result_changed(self, result) -> None:
         self.preview_button.setEnabled(
-            result is not None
+            self._preview_enabled
+            and result is not None
             and bool(result.card_ids)
             and not self._batch_busy
         )
         self.previewResultChanged.emit(result)
 
+    def _on_result_browsed(self, result) -> None:
+        """Re-emit an already-highlighted row when the user clicks it."""
+
+        self.previewResultChanged.emit(result)
+
     def _toggle_preview(self, checked: bool = False) -> None:
         result = self.results.current_result()
-        if checked and (result is None or not result.card_ids):
+        if checked and (
+            not self._preview_enabled
+            or result is None
+            or not result.card_ids
+        ):
             self.preview_button.setChecked(False)
             return
         self.previewToggleRequested.emit(result if checked else None)
@@ -1776,14 +1821,15 @@ class SearchDialog(QDialog):
             self._result_limit,
             semantic,
             self,
+            preview_enabled=self._preview_enabled,
             text_index_ready=text_index_ready,
             about=self._about,
         )
         dialog.semanticInstallRequested.connect(self.semanticInstallRequested)
         dialog.semanticIndexRequested.connect(self.semanticIndexRequested)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            mode, limit = dialog.values()
-            self.settingsChanged.emit(mode, limit)
+            mode, limit, preview_enabled = dialog.values()
+            self.settingsChanged.emit(mode, limit, preview_enabled)
         self.focus_query()
 
     def eventFilter(self, obj, event) -> bool:
@@ -1795,6 +1841,9 @@ class SearchDialog(QDialog):
                         self.stack.setCurrentIndex(_PAGE_RESULTS)
                         self.results.setFocus(Qt.FocusReason.ShortcutFocusReason)
                         self.results.select_row(0)
+                        current = self.results.current_result()
+                        if current is not None:
+                            self.previewResultChanged.emit(current)
                     return True
             elif obj is self.results:
                 if key == Qt.Key.Key_Up and self.results.currentIndex().row() <= 0:
@@ -1812,14 +1861,21 @@ class SearchDialog(QDialog):
             self._close()
 
     def closeEvent(self, event) -> None:
-        self._close()
-        event.accept()
+        self._prepare_close()
+        super().closeEvent(event)
 
     def _close(self) -> None:
-        self._debounce.stop()
-        self.dialogClosed.emit()
+        self._prepare_close()
         super().reject()
 
+    def _prepare_close(self) -> None:
+        if self._close_notified:
+            return
+        self._close_notified = True
+        self._debounce.stop()
+        self.dialogClosed.emit()
+
     def showEvent(self, event) -> None:
+        self._close_notified = False
         super().showEvent(event)
         self.search.setFocus(Qt.FocusReason.ActiveWindowFocusReason)

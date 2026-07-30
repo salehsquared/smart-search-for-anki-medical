@@ -582,6 +582,12 @@ class AnkiSearchBackend:
                 200,
                 _DEFAULT_RESULT_LIMIT,
             ),
+            preview_enabled=bool(
+                ui.get(
+                    "preview_enabled",
+                    config.get("preview_enabled", True),
+                )
+            ),
             width=_bounded_int(ui.get("width", 1040), 760, 4000, 1040),
             height=_bounded_int(ui.get("height", 700), 520, 3000, 700),
         )
@@ -591,9 +597,11 @@ class AnkiSearchBackend:
         config["result_limit"] = _bounded_int(
             settings.result_limit, 10, 200, _DEFAULT_RESULT_LIMIT
         )
+        config["preview_enabled"] = bool(settings.preview_enabled)
         config["ui"] = {
             "mode": settings.mode.value,
             "result_limit": config["result_limit"],
+            "preview_enabled": config["preview_enabled"],
             "width": _bounded_int(settings.width, 760, 4000, 1040),
             "height": _bounded_int(settings.height, 520, 3000, 700),
             "filters": [
@@ -2437,6 +2445,8 @@ class SmartSearchAddonController:
         self._dialog: Any | None = None
         self._ui_controller: Any | None = None
         self._previewer: Any | None = None
+        self._preview_open_timer: Any | None = None
+        self._pending_preview_result: object | None = None
         self._reconcile_timer: Any | None = None
         self._reconcile_request_lock = threading.Lock()
         self._pending_reconcile_note_ids: set[int] = set()
@@ -2504,6 +2514,12 @@ class SmartSearchAddonController:
             self._flush_queued_dialog_refresh
         )
 
+        self._preview_open_timer = QTimer(self.mw)
+        self._preview_open_timer.setSingleShot(True)
+        self._preview_open_timer.timeout.connect(
+            self._open_pending_previewer
+        )
+
         self._card_state_refresh_timer = QTimer(self.mw)
         self._card_state_refresh_timer.setSingleShot(True)
         self._card_state_refresh_timer.timeout.connect(
@@ -2529,12 +2545,15 @@ class SmartSearchAddonController:
             self._semantic_autostart_timer.stop()
         if self._dialog_refresh_timer is not None:
             self._dialog_refresh_timer.stop()
+        if self._preview_open_timer is not None:
+            self._preview_open_timer.stop()
         if self._card_state_refresh_timer is not None:
             self._card_state_refresh_timer.stop()
         if self._vocabulary_refresh_timer is not None:
             self._vocabulary_refresh_timer.stop()
         with self._dialog_refresh_lock:
             self._dialog_refresh_queued = False
+        self._pending_preview_result = None
         self._clear_pending_reconciles()
         self._clear_captured_notes()
         self._semantic_autostart_token = None
@@ -2581,7 +2600,7 @@ class SmartSearchAddonController:
                 privacy_url="https://medbrevia.com/legal/smart-search-privacy",
             )
             dialog = SearchDialog(self.mw, about=about)
-            ui_controller = SearchController(self.backend, dialog, parent=self.mw)
+            ui_controller = SearchController(self.backend, dialog)
             ui_controller.set_browser_opener(
                 lambda result: _open_results_in_browser((result,))
             )
@@ -2594,11 +2613,18 @@ class SmartSearchAddonController:
                 self._set_results_suspended
             )
             ui_controller.tagActionRequested.connect(self._change_result_tags)
+            ui_controller.previewPreferenceChanged.connect(
+                self._preview_preference_changed
+            )
             dialog.previewToggleRequested.connect(self._toggle_previewer)
             dialog.previewResultChanged.connect(
                 self._preview_selection_changed
             )
             dialog.dialogClosed.connect(self._close_previewer)
+            dialog.destroyed.connect(
+                lambda _object=None, d=dialog, c=ui_controller:
+                self._search_dialog_destroyed(d, c)
+            )
 
             config = self.backend._read_config()
             debounce = _bounded_int(
@@ -2612,6 +2638,8 @@ class SmartSearchAddonController:
             self._ui_controller = ui_controller
 
         self._dialog.show()
+        if self._ui_controller is not None:
+            self._ui_controller.resume()
         self._dialog.raise_()
         self._dialog.activateWindow()
         self._dialog.focus_query()
@@ -2636,7 +2664,10 @@ class SmartSearchAddonController:
     # ---------------------------------------------------------- card preview
 
     def _toggle_previewer(self, result: object | None) -> None:
-        if not preview_card_ids(result):
+        if (
+            not self._preview_feature_enabled()
+            or not preview_card_ids(result)
+        ):
             self._close_previewer()
             return
         if self._previewer is not None:
@@ -2665,12 +2696,11 @@ class SmartSearchAddonController:
             self._previewer = previewer
             previewer.open()
             dialog.set_preview_active(True)
-            # Keep keyboard scrolling in the result list by default. Clicking
-            # the Preview window still exposes its native controls, plus its
-            # own Up/Down shortcuts.
-            dialog.raise_()
-            dialog.activateWindow()
-            dialog.results.setFocus()
+            # Leave the native Preview in front. Its own Up/Down shortcuts
+            # move the underlying result list, so restoring the search dialog
+            # here only hides the newly opened window on macOS.
+            previewer.raise_()
+            previewer.activateWindow()
         except Exception as error:
             self._previewer = None
             if previewer is not None:
@@ -2686,17 +2716,76 @@ class SmartSearchAddonController:
             self._show_error(f"Could not open card preview: {error}")
 
     def _preview_selection_changed(self, result: object | None) -> None:
-        previewer = self._previewer
-        if previewer is None:
+        if not self._preview_feature_enabled():
+            self._close_previewer()
             return
+        previewer = self._previewer
         if not preview_card_ids(result):
             self._close_previewer()
+            return
+        if previewer is None:
+            dialog = self._dialog
+            results = getattr(dialog, "results", None)
+            try:
+                browsing = bool(results is not None and results.hasFocus())
+            except RuntimeError:
+                browsing = False
+            if browsing:
+                self._schedule_auto_previewer(result)
             return
         try:
             previewer.set_result(result)
         except Exception as error:
             self._close_previewer()
             self._show_error(f"Could not update card preview: {error}")
+
+    def _preview_feature_enabled(self) -> bool:
+        ui_controller = self._ui_controller
+        return bool(
+            ui_controller is not None
+            and ui_controller.settings.preview_enabled
+        )
+
+    def _schedule_auto_previewer(self, result: object) -> None:
+        self._pending_preview_result = result
+        timer = self._preview_open_timer
+        if timer is not None:
+            timer.start(25)
+        else:
+            self._open_pending_previewer()
+
+    def _open_pending_previewer(self) -> None:
+        result = self._pending_preview_result
+        self._pending_preview_result = None
+        if result is None or not self._preview_feature_enabled():
+            return
+        dialog = self._dialog
+        if dialog is None or self._previewer is not None:
+            return
+        try:
+            if (
+                not dialog.results.hasFocus()
+                or dialog.results.current_result() != result
+            ):
+                return
+        except RuntimeError:
+            return
+        self._toggle_previewer(result)
+
+    def _preview_preference_changed(self, enabled: bool) -> None:
+        if not enabled:
+            self._close_previewer()
+            return
+        dialog = self._dialog
+        if dialog is None:
+            return
+        try:
+            if dialog.results.hasFocus():
+                result = dialog.results.current_result()
+                if preview_card_ids(result):
+                    self._schedule_auto_previewer(result)
+        except RuntimeError:
+            return
 
     def _move_preview_result(self, offset: int) -> bool:
         dialog = self._dialog
@@ -2740,6 +2829,10 @@ class SmartSearchAddonController:
                 pass
 
     def _close_previewer(self) -> None:
+        timer = self._preview_open_timer
+        if timer is not None:
+            timer.stop()
+        self._pending_preview_result = None
         previewer = self._previewer
         self._previewer = None
         if previewer is not None:
@@ -2754,6 +2847,22 @@ class SmartSearchAddonController:
                 dialog.set_preview_active(False)
             except RuntimeError:
                 pass
+
+    def _search_dialog_destroyed(
+        self,
+        dialog: object,
+        ui_controller: object,
+    ) -> None:
+        """Clear stale Python wrappers after an unexpected native deletion."""
+
+        if self._dialog is dialog:
+            self._dialog = None
+        if self._ui_controller is ui_controller:
+            self._ui_controller = None
+        try:
+            ui_controller.dispose()
+        except (AttributeError, RuntimeError):
+            pass
 
     def open_native_search(self, query: str) -> None:
         """Public escape hatch for callers that explicitly want native search."""
@@ -3484,11 +3593,21 @@ class SmartSearchAddonController:
     def _close_dialog(self) -> None:
         self._close_previewer()
         dialog = self._dialog
+        ui_controller = self._ui_controller
         self._dialog = None
         self._ui_controller = None
         if dialog is not None:
             try:
                 dialog.close()
+            except RuntimeError:
+                pass
+        if ui_controller is not None:
+            try:
+                ui_controller.dispose()
+            except (AttributeError, RuntimeError):
+                pass
+        if dialog is not None:
+            try:
                 dialog.deleteLater()
             except RuntimeError:
                 pass

@@ -164,7 +164,8 @@ class TargetedAnkiReaderTests(unittest.TestCase):
                 self.title = ""
 
             def _create_gui(self) -> None:
-                return None
+                self.close_shortcut = _Shortcut("Ctrl+Shift+P", self)
+                self.close_shortcut.activated.connect(self.close)
 
             def open(self) -> None:
                 self._create_gui()
@@ -270,6 +271,15 @@ class TargetedAnkiReaderTests(unittest.TestCase):
             preview._down_result_shortcut.activated.emit()
             self.assertEqual(previous_moves, [True])
             self.assertEqual(next_moves, [True, True])
+            expected_preview_sequence = (
+                "Meta+Shift+P"
+                if sys.platform == "darwin"
+                else "Ctrl+Shift+P"
+            )
+            self.assertEqual(
+                preview._toggle_preview_shortcut.sequence,
+                expected_preview_sequence,
+            )
 
             preview.set_result(
                 types.SimpleNamespace(note_id=2, card_ids=(21,))
@@ -285,6 +295,9 @@ class TargetedAnkiReaderTests(unittest.TestCase):
             preview._render_scheduled()
             self.assertEqual(saved, ["smartSearchPreview"])
             self.assertEqual(closed, [True])
+            preview._toggle_preview_shortcut.activated.emit()
+            self.assertEqual(saved, ["smartSearchPreview", "smartSearchPreview"])
+            self.assertEqual(closed, [True, True])
         finally:
             for name, module in original.items():
                 if module is None:

@@ -294,6 +294,7 @@ class UISettings:
     mode: SearchMode = SearchMode.SMART
     filters: tuple[FilterChip, ...] = ()
     result_limit: int = 50
+    preview_enabled: bool = True
     width: int = 1040
     height: int = 700
 

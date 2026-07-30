@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 import hashlib
 from pathlib import Path
+import sys
 from typing import Any
 
 from .backend.models import IndexedNote
@@ -169,6 +170,18 @@ def create_result_previewer(
             self._down_result_shortcut = QShortcut(QKeySequence("Down"), self)
             qconnect(self._up_result_shortcut.activated, on_previous)
             qconnect(self._down_result_shortcut.activated, on_next)
+            if sys.platform == "darwin":
+                # Anki's native Preview already owns Ctrl+Shift+P, which Qt
+                # maps to the physical Command key on macOS. Add the physical
+                # Control-key variant without duplicating the native shortcut
+                # on Windows/Linux.
+                self._toggle_preview_shortcut = QShortcut(
+                    QKeySequence("Meta+Shift+P"),
+                    self,
+                )
+                qconnect(self._toggle_preview_shortcut.activated, self.close)
+            else:
+                self._toggle_preview_shortcut = self.close_shortcut
             self._update_title()
 
         def _select_sibling(self, offset: int) -> bool:

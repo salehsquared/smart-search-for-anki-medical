@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.0.12] — 2026-07-30
+
+### Changed
+
+- Card Preview is enabled by default and opens automatically only after the
+  user enters or moves through the result list, so ordinary search typing
+  keeps its focus.
+- Added a simple **Card preview** switch in Search settings.
+- The native Preview remains in front and owns keyboard focus; Up/Down still
+  moves through Smart Search results.
+
+### Fixed
+
+- Stopped and disposed dialog-owned status work before Qt deletes its widgets,
+  preventing the stale `IndexStatusWidget has been deleted` traceback after
+  profile or dialog teardown.
+- Guarded queued search/rebuild callbacks after a dialog closes.
+- Preview creation is queued outside result-selection reentrancy and cancelled
+  safely when the dialog, profile, or preference changes.
+- On macOS, Ctrl+Shift+P now uses the physical Control key instead of
+  colliding with Anki's Command+Shift+P profile switcher.
+
 ## [1.0.11] — 2026-07-30
 
 ### Added

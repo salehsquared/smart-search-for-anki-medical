@@ -31,7 +31,7 @@ from .manifest import (
 ProgressCallback = Callable[[str, int, int], None]
 MACOS_ARM64_RUNTIME_TAG = "darwin-arm64-py313"
 MINIMUM_SEMANTIC_MACOS_MAJOR = 14
-DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.11"
+DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.12"
 
 
 class ModelInstallError(RuntimeError):

@@ -45,6 +45,7 @@ class SearchController(QObject):
     flagRequested = pyqtSignal(object, int)
     suspensionRequested = pyqtSignal(object, bool)
     tagActionRequested = pyqtSignal(object, bool)
+    previewPreferenceChanged = pyqtSignal(bool)
 
     # Internal marshalling signals (emitted from arbitrary threads).
     _sig_search_success = pyqtSignal(int, object)
@@ -72,6 +73,8 @@ class SearchController(QObject):
         self._dismissed: set[Correction] = set()
         self._force_literal = False
         self._last_query = ""
+        self._active = False
+        self._disposed = False
 
         self._settings: UISettings = backend.load_settings()
 
@@ -103,13 +106,13 @@ class SearchController(QObject):
         # Apply persisted settings.
         dialog.set_mode(self._settings.mode)
         dialog.set_result_limit(self._settings.result_limit)
+        dialog.set_preview_enabled(self._settings.preview_enabled)
         dialog.resize(self._settings.width, self._settings.height)
 
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(5000)
         self._status_timer.timeout.connect(self.refresh_status)
-        self._status_timer.start()
-        self.refresh_status()
+        self.resume()
 
     # ---------------------------------------------------------- integration
 
@@ -124,6 +127,48 @@ class SearchController(QObject):
     @property
     def settings(self) -> UISettings:
         return self._settings
+
+    def resume(self) -> bool:
+        """Resume a hidden dialog's lightweight status updates."""
+
+        if self._disposed:
+            return False
+        self._active = True
+        if not self._status_timer.isActive():
+            self._status_timer.start()
+        self.refresh_status()
+        return True
+
+    def pause(self) -> None:
+        """Stop all dialog work while its window is hidden."""
+
+        if self._disposed:
+            return
+        self._active = False
+        self._status_timer.stop()
+        self._invalidate_pending_search()
+        if self._cancel_rebuild is not None:
+            try:
+                self._cancel_rebuild()
+            except Exception:  # noqa: BLE001
+                pass
+            self._cancel_rebuild = None
+
+    def dispose(self) -> None:
+        """Permanently detach this controller before Qt deletes its dialog."""
+
+        if self._disposed:
+            return
+        self._active = False
+        self._disposed = True
+        self._status_timer.stop()
+        self._invalidate_pending_search()
+        if self._cancel_rebuild is not None:
+            try:
+                self._cancel_rebuild()
+            except Exception:  # noqa: BLE001
+                pass
+            self._cancel_rebuild = None
 
     def capture_search_generation(self) -> SearchGeneration:
         """Return an opaque snapshot for a later conditional refresh.
@@ -152,6 +197,8 @@ class SearchController(QObject):
     # --------------------------------------------------------------- search
 
     def submit_search(self, query: str) -> None:
+        if self._disposed or not self._active:
+            return
         query = query.strip()
         if query != self._last_query:
             self._dismissed.clear()
@@ -232,6 +279,8 @@ class SearchController(QObject):
             self._cancel_search = None
 
     def _on_search_success(self, request_id: int, response: SearchResponse) -> None:
+        if self._disposed or not self._active:
+            return
         if (
             request_id != self._request_counter
             or request_id != self._active_request_id
@@ -243,6 +292,8 @@ class SearchController(QObject):
         self._dialog.show_response(response, visible)
 
     def _on_search_error(self, request_id: int, message: str) -> None:
+        if self._disposed or not self._active:
+            return
         if (
             request_id != self._request_counter
             or request_id != self._active_request_id
@@ -287,11 +338,20 @@ class SearchController(QObject):
     # -------------------------------------------------------------- status
 
     def refresh_status(self) -> None:
-        self._dialog.show_status(self._backend.get_status())
+        if self._disposed or not self._active:
+            return
+        try:
+            self._dialog.show_status(self._backend.get_status())
+        except RuntimeError:
+            # A profile close can delete the native widgets before a queued
+            # timer tick arrives. Make that controller permanently inert.
+            self.dispose()
 
     # -------------------------------------------------------------- rebuild
 
     def start_rebuild(self) -> None:
+        if self._disposed or not self._active:
+            return
         if self._cancel_rebuild is not None:
             return  # already building
         self._dialog.show_rebuild_progress(0.0, "starting")
@@ -302,9 +362,13 @@ class SearchController(QObject):
         )
 
     def _on_rebuild_progress(self, fraction: float, detail: str) -> None:
+        if self._disposed or not self._active:
+            return
         self._dialog.show_rebuild_progress(fraction, detail)
 
     def _on_rebuild_success(self, status) -> None:
+        if self._disposed or not self._active:
+            return
         self._cancel_rebuild = None
         self._dialog.show_status(status)
         self._dialog.set_summary("Index rebuilt")
@@ -314,6 +378,8 @@ class SearchController(QObject):
             self.submit_search(self._dialog.query())
 
     def _on_rebuild_error(self, message: str) -> None:
+        if self._disposed or not self._active:
+            return
         self._cancel_rebuild = None
         self.refresh_status()
         self._dialog.show_error(f"Index rebuild failed:\n{message}")
@@ -325,22 +391,27 @@ class SearchController(QObject):
         if self._dialog.query().strip():
             self.submit_search(self._dialog.query())
 
-    def _on_settings_changed(self, mode, limit: int) -> None:
+    def _on_settings_changed(
+        self,
+        mode,
+        limit: int,
+        preview_enabled: bool,
+    ) -> None:
         self._settings.mode = mode
         self._settings.result_limit = limit
+        previous_preview = self._settings.preview_enabled
+        self._settings.preview_enabled = bool(preview_enabled)
         self._dialog.set_result_limit(limit)
+        self._dialog.set_preview_enabled(self._settings.preview_enabled)
         self._backend.save_settings(self._settings)
+        if previous_preview != self._settings.preview_enabled:
+            self.previewPreferenceChanged.emit(self._settings.preview_enabled)
         if mode != self._dialog.mode():
             self._dialog.set_mode(mode)  # emits modeSelected → re-search
 
     def _on_dialog_closed(self) -> None:
-        self._invalidate_pending_search()
-        if self._cancel_rebuild is not None:
-            try:
-                self._cancel_rebuild()
-            except Exception:  # noqa: BLE001
-                pass
-            self._cancel_rebuild = None
+        if self._disposed:
+            return
         size = self._dialog.size()
         self._settings.width = size.width()
         self._settings.height = size.height()
@@ -349,3 +420,4 @@ class SearchController(QObject):
             self._backend.save_settings(self._settings)
         except Exception:  # noqa: BLE001 - never block closing on persistence
             pass
+        self.pause()

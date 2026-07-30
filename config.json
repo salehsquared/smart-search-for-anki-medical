@@ -1,6 +1,7 @@
 {
   "shortcut": "Ctrl+K",
   "result_limit": 50,
+  "preview_enabled": true,
   "debounce_ms": 160,
   "auto_reconcile": true,
   "semantic_enabled": true,

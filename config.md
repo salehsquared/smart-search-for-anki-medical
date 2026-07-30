@@ -2,6 +2,7 @@
 
 - `shortcut`: global shortcut used from Anki's main window. Qt maps `Ctrl+K` to Command-K on macOS.
 - `result_limit`: maximum notes shown for one search.
+- `preview_enabled`: automatically open Anki's card Preview while browsing results.
 - `debounce_ms`: pause before a search begins.
 - `auto_reconcile`: refresh the disposable index after collection-changing operations.
 - `semantic_enabled`: make local semantic search available on supported computers.
