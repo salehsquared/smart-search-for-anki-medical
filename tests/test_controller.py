@@ -1685,7 +1685,7 @@ class ControllerTests(unittest.TestCase):
             backend._context.token,
         )
 
-    def test_native_previewer_lifecycle_and_navigation_are_dialog_scoped(
+    def test_inline_preview_lifecycle_is_dialog_scoped_and_reusable(
         self,
     ) -> None:
         addon = controller.SmartSearchAddonController(
@@ -1704,16 +1704,13 @@ class ControllerTests(unittest.TestCase):
             title="Eight",
         )
         active_states: list[bool] = []
-        moves: list[int] = []
-        focus_count: list[bool] = []
+        pane = types.SimpleNamespace(visible=True)
+        pane.isVisible = lambda: pane.visible
         dialog = types.SimpleNamespace(
             set_preview_active=active_states.append,
-            move_result=lambda offset: moves.append(offset) or True,
-            can_move_result=lambda offset: offset < 0,
-            raise_=lambda: None,
-            activateWindow=lambda: None,
+            preview_pane=pane,
             results=types.SimpleNamespace(
-                setFocus=lambda: focus_count.append(True),
+                hasFocus=lambda: True,
                 current_result=lambda: replacement,
             ),
         )
@@ -1723,60 +1720,51 @@ class ControllerTests(unittest.TestCase):
         )
 
         class _Preview:
-            def __init__(self, closed) -> None:
-                self.closed = closed
-                self.open_count = 0
-                self.cancel_count = 0
-                self.close_count = 0
+            def __init__(self) -> None:
+                self.show_count = 0
+                self.hide_count = 0
+                self.cleanup_count = 0
+                self.cleanup_after_save_count = 0
+                self.cleanup_callbacks = []
                 self.updated = []
 
-            def open(self) -> None:
-                self.open_count += 1
+            def show(self) -> None:
+                self.show_count += 1
 
             def set_result(self, current, *, force=False) -> None:
                 self.updated.append((current, force))
 
-            def cancel_timer(self) -> None:
-                self.cancel_count += 1
+            def hide(self) -> None:
+                self.hide_count += 1
 
-            def close(self) -> None:
-                self.close_count += 1
-                self.closed()
+            def cleanup(self) -> None:
+                self.cleanup_count += 1
 
-            def raise_(self) -> None:
-                return None
-
-            def activateWindow(self) -> None:
-                return None
+            def cleanup_after_save(self, callback) -> None:
+                self.cleanup_after_save_count += 1
+                self.cleanup_callbacks.append(callback)
 
         preview_holder = {}
 
         def create_preview(_mw, **kwargs):
-            preview = _Preview(kwargs["on_close"])
+            preview = _Preview()
             preview_holder["preview"] = preview
-            preview_holder["callbacks"] = kwargs
             return preview
 
         with patch.object(
             controller,
-            "create_result_previewer",
+            "create_inline_result_inspector",
             side_effect=create_preview,
         ) as factory:
             addon._toggle_previewer(result)
 
         preview = preview_holder["preview"]
-        callbacks = preview_holder["callbacks"]
         factory.assert_called_once()
         self.assertEqual(factory.call_args.kwargs["initial_result"], result)
-        self.assertEqual(preview.open_count, 1)
+        self.assertIs(factory.call_args.kwargs["pane"], pane)
+        self.assertIs(factory.call_args.kwargs["parent_window"], dialog)
+        self.assertEqual(preview.show_count, 1)
         self.assertEqual(active_states, [True])
-        self.assertEqual(focus_count, [])
-
-        self.assertTrue(callbacks["on_previous"]())
-        self.assertTrue(callbacks["on_next"]())
-        self.assertEqual(moves, [-1, 1])
-        self.assertTrue(callbacks["has_previous"]())
-        self.assertFalse(callbacks["has_next"]())
 
         addon._preview_selection_changed(replacement)
         addon._refresh_previewer()
@@ -1785,17 +1773,134 @@ class ControllerTests(unittest.TestCase):
             [(replacement, False), (replacement, True)],
         )
 
-        addon._preview_selection_changed(
-            contracts.SearchResult(
-                note_id=9,
-                card_ids=(),
-                title="No live cards",
-            )
-        )
-        self.assertEqual(preview.cancel_count, 1)
-        self.assertEqual(preview.close_count, 1)
-        self.assertIsNone(addon._previewer)
+        addon._toggle_previewer(None)
+        self.assertEqual(preview.hide_count, 1)
+        self.assertIs(addon._previewer, preview)
+        self.assertFalse(addon._preview_auto_suppressed)
         self.assertEqual(active_states[-1], False)
+
+        pane.visible = False
+        with patch.object(addon, "_schedule_auto_previewer") as schedule:
+            addon._preview_selection_changed(replacement)
+        schedule.assert_called_once_with(replacement)
+
+        addon._toggle_previewer(replacement)
+        self.assertEqual(preview.show_count, 2)
+        self.assertFalse(addon._preview_auto_suppressed)
+
+        addon._preview_preference_changed(False)
+        self.assertEqual(preview.hide_count, 2)
+        self.assertEqual(preview.cleanup_count, 0)
+        self.assertIs(addon._previewer, preview)
+
+        addon._preview_preference_changed(True)
+        self.assertEqual(preview.show_count, 3)
+
+        addon._close_previewer()
+        self.assertEqual(preview.cleanup_after_save_count, 1)
+        self.assertEqual(preview.cleanup_count, 0)
+        self.assertTrue(addon._preview_auto_suppressed)
+        preview.cleanup()
+        preview.cleanup_callbacks.pop()()
+        self.assertEqual(preview.cleanup_count, 1)
+        self.assertFalse(addon._preview_auto_suppressed)
+        self.assertIsNone(addon._previewer)
+
+    def test_dialog_close_waits_for_inline_editor_save_before_cleanup(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        events: list[str] = []
+        saved_callbacks = []
+
+        class _Preview:
+            def cleanup_after_save(self, callback) -> None:
+                events.append("save")
+                saved_callbacks.append(callback)
+
+        dialog = types.SimpleNamespace(
+            close=lambda: events.append("close"),
+            deleteLater=lambda: events.append("delete"),
+            set_managed_close_handler=lambda _handler: None,
+        )
+        ui_controller = types.SimpleNamespace(
+            dispose=lambda: events.append("dispose")
+        )
+        preview = _Preview()
+        addon._dialog = dialog
+        addon._ui_controller = ui_controller
+        addon._previewer = preview
+
+        addon._close_dialog()
+        self.assertEqual(events, ["save"])
+        self.assertIs(addon._dialog, dialog)
+        self.assertIs(addon._previewer, preview)
+
+        saved_callbacks.pop()()
+        self.assertEqual(events, ["save", "close", "dispose", "delete"])
+        self.assertIsNone(addon._dialog)
+        self.assertIsNone(addon._ui_controller)
+        self.assertIsNone(addon._previewer)
+
+    def test_browser_and_collection_actions_wait_for_editor_detach(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        events: list[str] = []
+        pending = []
+
+        class _Preview:
+            def prepare_for_external_change(self, callback) -> None:
+                events.append("save-detach")
+                pending.append(callback)
+
+        addon._previewer = _Preview()
+        result = contracts.SearchResult(note_id=7, card_ids=(71,))
+        with patch.object(
+            controller,
+            "_open_results_in_browser",
+            side_effect=lambda results: events.append(
+                f"browser:{len(tuple(results))}"
+            ),
+        ):
+            addon._open_results_in_browser_safely((result,))
+            self.assertEqual(events, ["save-detach"])
+            pending.pop()()
+        self.assertEqual(events, ["save-detach", "browser:1"])
+
+        action = controller.CollectionAction(
+            controller.ActionKind.FLAG,
+            note_ids=(7,),
+            card_ids=(71,),
+            flag=2,
+        )
+        with patch.object(
+            addon,
+            "_run_collection_action_after_save",
+            side_effect=lambda _action: events.append("mutation"),
+        ):
+            addon._run_collection_action(action)
+            self.assertEqual(events[-1], "save-detach")
+            pending.pop()()
+        self.assertEqual(events[-1], "mutation")
+
+    def test_temporary_collection_close_uses_managed_save_path(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        callbacks = []
+        addon._close_dialog_with_callback = callbacks.append
+
+        addon._on_collection_will_temporarily_close(object())
+
+        self.assertEqual(len(callbacks), 1)
+        self.assertTrue(callable(callbacks[0]))
 
     def test_auto_preview_is_queued_only_while_results_are_browsed(self) -> None:
         addon = controller.SmartSearchAddonController(

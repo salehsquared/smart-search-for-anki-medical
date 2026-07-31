@@ -14,6 +14,10 @@ Fast, typo-tolerant medical search for Anki, with native filters, local semantic
 
 product@medbrevia.com
 
+**Required support URL**
+
+https://github.com/salehsquared/smart-search-for-anki-medical/issues/new/choose
+
 **Project and issue tracker**
 
 https://github.com/salehsquared/smart-search-for-anki-medical
@@ -43,6 +47,12 @@ Smart Search for Anki — Medical is a keyboard-first search palette for large
 medical collections. Press **Command-K on macOS** or **Ctrl-K on Windows/Linux**
 from Anki and start typing.
 
+**Public beta compatibility:** this build is intentionally limited to **Anki
+Desktop 26.05**. It was integration-tested on macOS 26.3 on Apple silicon.
+Semantic Search requires **macOS 14 or later on Apple silicon**. Smart and Exact
+do not load the optional Semantic runtime, but Windows, Linux, and Intel Mac
+integration testing is not part of this release's support claim.
+
 - **Smart** search is case-insensitive, tolerates misspellings, and recognizes
   common medical and medication aliases. For example, `buproprion` can find
   `bupropion`, and a brand name can find its generic equivalent.
@@ -57,6 +67,8 @@ Card-specific filters return only the sibling cards that actually match.
 
 ### Designed for real collections
 
+- Preview and edit the selected card in a resizable pane without leaving the
+  search window. The pane can be expanded or temporarily dismissed.
 - Open the selected result—or exactly the checked results—in Anki's Browser.
 - Shift-click to select a range; use **All shown**, **None**, or **Invert** for
   quick bulk selection.
@@ -95,6 +107,7 @@ collection. You can continue using Smart and Exact while Semantic indexes.
 - **Command/Ctrl-K:** open or focus Smart Search
 - **Up/Down** or **Control-J/Control-K:** move through results
 - **Return:** open the highlighted result in Anki's Browser
+- **Control-Shift-P:** open or close the inline card preview
 - **Command/Ctrl-Return:** open checked results, or all shown results when
   nothing is checked
 - **Space:** check or uncheck the focused result
@@ -105,6 +118,7 @@ collection. You can continue using Smart and Exact while Semantic indexes.
 ### Important limitations
 
 - This is an Anki Desktop add-on. It does not run inside AnkiMobile or AnkiDroid.
+- v1.0.15 supports Anki Desktop 26.05 only.
 - Search indexes are local to each desktop profile and do not sync through
   AnkiWeb.
 - Semantic results are relevance suggestions, not clinical guidance. Always
@@ -126,6 +140,12 @@ Privacy notice: https://medbrevia.com/legal/smart-search-privacy
 Project, support, and complete source:
 https://github.com/salehsquared/smart-search-for-anki-medical
 
+### Existing manual-install users
+
+Do not load a manually installed development copy and the AnkiWeb copy at the
+same time. Remove or disable the manual copy before installing the AnkiWeb
+code. Local search indexes are disposable and can be rebuilt safely.
+
 ## Suggested screenshot order
 
 1. `assets/screenshots/01-smart-search.png` — typo recovery, filter chip, and
@@ -136,10 +156,14 @@ https://github.com/salehsquared/smart-search-for-anki-medical
    suspension, and tags
 4. `assets/screenshots/04-about-privacy.png` — creator credit, privacy promise,
    and mobile-app link
+5. `assets/screenshots/05-inline-editor.png` — real clean-profile capture of
+   the inline editor handling an incomplete native filter without losing the
+   active search
 
-The supplied screenshots are deterministic mockups made with synthetic medical
-study content. Replace them with clean-install captures before a final public
-release if the rendered application differs materially.
+All screenshots use synthetic medical study content. Screenshots 01 and 05 are
+clean-profile captures of the frozen add-on. Screenshots 02–04 are deterministic
+release compositions reviewed against that build; they are illustrative and
+contain no real collection data.
 
 ## Publication notes
 

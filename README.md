@@ -5,9 +5,9 @@ semantic search, and safe card actions.
 
 Created by **Saleh Mostafa** with [MedBrevia](https://medbrevia.com/app).
 
-> **Release status:** public-source release candidate. The AnkiWeb install code
-> will be added after the isolated install, upgrade, rollback, and compatibility
-> matrix is complete.
+> **Release status:** v1.0.15 public beta release candidate. The reviewed
+> `.ankiaddon` is distributed through GitHub Releases; the AnkiWeb install code
+> will be added after AnkiWeb assigns the public item.
 
 ![Smart Search showing typo recovery and ranked synthetic medical results](release/assets/screenshots/01-smart-search.png)
 
@@ -41,8 +41,10 @@ usable while Semantic prepares.
 
 ## Work with results without losing context
 
-- Move into the result list and Anki's rendered card Preview opens
+- Move into the result list and the rendered inline card preview opens
   automatically; disable it at any time in **Settings → Card preview**.
+- Preview and edit the selected card in a resizable pane without leaving the
+  search window; close it temporarily or expand it when more room is useful.
 - See compact suspension and flag indicators on each result.
 - Check one result, Shift-click a range, or choose **All shown**, **None**, or
   **Invert**.
@@ -57,6 +59,8 @@ one clean Undo step per action. Smart Search never writes directly to
 `collection.anki2`.
 
 ![Bulk selection and card actions using synthetic content](release/assets/screenshots/03-bulk-actions.png)
+
+![Inline card editing in the clean synthetic test profile](release/assets/screenshots/05-inline-editor.png)
 
 ## Privacy by design
 
@@ -86,9 +90,10 @@ and [third-party notices](THIRD_PARTY_NOTICES.md). The intended hosted notice is
 
 - **Host:** Anki Desktop only. Desktop add-ons do not run inside AnkiMobile or
   AnkiDroid.
-- **Smart and Exact:** designed for the Anki Desktop version range declared in
-  `manifest.json`; the final public support range will reflect the completed
-  distribution matrix.
+- **Anki:** v1.0.15 is intentionally limited to Anki Desktop **26.05**.
+- **Tested host:** macOS 26.3 on Apple silicon. Smart and Exact do not load the
+  optional platform-specific Semantic runtime, but Windows, Linux, and Intel
+  Mac integration testing is not part of this release's support claim.
 - **Semantic:** macOS 14 or later on Apple-silicon Macs only for this release.
 - On Windows, Linux, Intel Mac, or a Mac below macOS 14, Semantic is unavailable
   gracefully while Smart and Exact remain usable.
@@ -98,16 +103,21 @@ boundaries around indexes, sync, ranking, and collection operations.
 
 ## Installation
 
-### Release candidate
+### GitHub public beta
 
-1. Download the signed-off `.ankiaddon` archive from the future GitHub release
-   or AnkiWeb listing.
+1. Download the signed-off `.ankiaddon` archive from
+   [GitHub Releases](https://github.com/salehsquared/smart-search-for-anki-medical/releases).
 2. In Anki Desktop, choose **Tools → Add-ons → Install from file…**.
 3. Select the archive and restart Anki.
 4. Press **Command/Ctrl-K**.
 
-The AnkiWeb numeric code is intentionally not published until the frozen
-archive passes the release checklist's clean-install and upgrade tests.
+The AnkiWeb numeric code will be added here after the public item is created
+and its assigned-code install has passed the final smoke test.
+
+If you previously installed a manually shared development build, remove or
+disable that copy before installing the future AnkiWeb version. Loading both
+the named development folder and AnkiWeb's numeric folder would register the
+add-on twice. Local indexes are disposable and may be rebuilt safely.
 
 ### Development checkout
 
@@ -133,9 +143,9 @@ The builder:
 ## Keyboard reference
 
 - **Command/Ctrl-K:** open or focus Smart Search
-- **Up/Down** or **Control-J/Control-K:** move through results; an open Preview follows
+- **Up/Down** or **Control-J/Control-K:** move through results; the open preview follows
 - **Return:** open the highlighted result in Anki's Browser
-- **Control-Shift-P:** open or close Anki's native card Preview
+- **Control-Shift-P:** open or close the inline card preview
 - **Command/Ctrl-Return:** open checked results, or all shown when none are
   checked
 - **Space:** check or uncheck the focused result

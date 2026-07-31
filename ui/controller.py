@@ -309,13 +309,11 @@ class SearchController(QObject):
         self.resultOpenRequested.emit(result)
         if self._browser_opener is not None:
             self._browser_opener(result)
-        self._dialog.close()
 
     def open_all_results(self, results: tuple[SearchResult, ...]) -> None:
         self.openAllRequested.emit(results)
         if self._multi_browser_opener is not None:
             self._multi_browser_opener(results)
-        self._dialog.close()
 
     # ---------------------------------------------------- filters/chips
 

@@ -583,30 +583,29 @@ def about_privacy() -> str:
             text(472, 163, "About", size=15, fill="#fff", weight=700, anchor="middle"),
             f'<image href="data:image/png;base64,{logo_data}" x="644" y="219" width="152" height="152"/>',
             text(720, 409, "Smart Search for Anki — Medical", size=27, weight=740, anchor="middle"),
-            text(720, 440, "Version 1.0.13", size=14, fill=FAINT, weight=600, anchor="middle"),
+            text(720, 440, "Version 1.0.15", size=14, fill=FAINT, weight=600, anchor="middle"),
             text(720, 483, "Created by Saleh Mostafa with MedBrevia", size=17, fill=MUTED, anchor="middle"),
-            text(
-                720,
-                525,
-                "Fast, forgiving medical search—without sending card content away.",
-                size=16,
-                fill="#d7dbe2",
-                anchor="middle",
-            ),
-            rect(390, 555, 660, 88, fill="#20242b", radius=12, stroke="#363e49"),
-            circle(426, 584, 7, fill=GREEN),
-            text(446, 590, "Searches, card contents, and indexes remain on this computer.", size=14, fill=MUTED),
-            circle(426, 616, 7, fill=GREEN),
-            text(446, 622, "Networking occurs only when you explicitly set up or repair Semantic Search.", size=14, fill=MUTED),
+            rect(390, 518, 660, 88, fill="#20242b", radius=12, stroke="#363e49"),
+            circle(426, 547, 7, fill=GREEN),
+            text(446, 553, "Searches, card contents, and indexes remain on this computer.", size=14, fill=MUTED),
+            circle(426, 579, 7, fill=GREEN),
+            text(446, 585, "Networking occurs only when you explicitly set up or repair Semantic Search.", size=14, fill=MUTED),
         ]
     )
-    mobile, _ = button(562, 672, "Mobile App", width=142, primary=True)
-    feedback, _ = button(718, 672, "Feedback", width=126)
+    mobile, _ = button(562, 638, "Mobile App", width=142, primary=True)
+    feedback, _ = button(718, 638, "Feedback", width=126)
     parts.extend(
         [
             mobile,
             feedback,
-            text(720, 789, "medbrevia.com/app", size=14, fill=ACCENT_2, weight=600, anchor="middle"),
+            text(
+                720,
+                716,
+                "Independent add-on; not affiliated with or endorsed by Anki.",
+                size=13,
+                fill=FAINT,
+                anchor="middle",
+            ),
             text(1368, 830, "No real collection data shown", size=13, fill=FAINT, anchor="end"),
         ]
     )

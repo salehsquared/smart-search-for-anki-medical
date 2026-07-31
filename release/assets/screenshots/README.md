@@ -1,8 +1,15 @@
 # Screenshot assets
 
 These publication images use synthetic medical study content only. They contain
-no Anki profile name, real deck, real tag, card text, patient information, or
-local filesystem path.
+no real profile, deck, tag, card text, patient information, or local filesystem
+path.
+
+- `01-smart-search.png` and `05-inline-editor.png` are clean-profile captures
+  of the frozen v1.0.15 add-on.
+- `02-semantic-setup.png`, `03-bulk-actions.png`, and
+  `04-about-privacy.png` are deterministic release compositions reviewed
+  against the frozen interface.
+- The matching SVG files are editable source compositions, not test evidence.
 
 Render them from the repository root:
 
@@ -11,10 +18,10 @@ python3 release/render_screenshots.py --png
 ```
 
 The script always writes the same SVG markup for the same bundled MedBrevia logo
-and converts it with `rsvg-convert` when `--png` is supplied. It also writes
-`SHA256SUMS.txt`.
+and converts it with `rsvg-convert` when `--png` is supplied. Running it with
+`--png` regenerates the composed PNGs and must not be used to replace the two
+clean-profile captures. `SHA256SUMS.txt` covers every shipped SVG and PNG.
 
-The images are polished release mockups, not evidence that the distribution
-build passed clean-install testing. Before publication, compare each image to
-the frozen application and replace any materially inaccurate mockup with a
-privacy-safe capture from a synthetic test profile.
+The compositions are illustrative, not evidence that the distribution build
+passed clean-install testing. The release record separately documents the
+isolated integration tests.

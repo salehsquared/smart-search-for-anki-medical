@@ -29,6 +29,7 @@ PUBLIC_TOP_LEVEL_FILES = {
     "config.json",
     "config.md",
     "controller.py",
+    "inline_preview.py",
     "manifest.json",
 }
 PUBLIC_CODE_DIRECTORIES = {
@@ -84,10 +85,12 @@ REQUIRED = {
     "manifest.json",
     "config.json",
     "anki_actions.py",
+    "inline_preview.py",
     "backend/__init__.py",
     "resources/medbrevia-logo.png",
     "ui/__init__.py",
     "semantic/__init__.py",
+    "semantic/model_manager.py",
     "user_files/README.txt",
 } | CONTROLLED_DIRECTORY_FILES
 
@@ -359,6 +362,7 @@ def validate_sources(root: Path, files: list[Path]) -> None:
     manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
     if not manifest.get("package") or not manifest.get("name"):
         raise SystemExit("manifest.json must define package and name")
+    validate_release_versions(root, manifest)
     json.loads((root / "config.json").read_text(encoding="utf-8"))
     validate_public_text(files)
     validate_bundled_payloads(root)
@@ -370,6 +374,58 @@ def validate_sources(root: Path, files: list[Path]) -> None:
                 destination = compile_root / (path.relative_to(root).as_posix() + "c")
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 py_compile.compile(str(path), cfile=str(destination), doraise=True)
+
+
+def validate_release_versions(root: Path, manifest: dict[str, object]) -> None:
+    """Keep every user-visible/package version tied to the manifest."""
+
+    version = str(manifest.get("human_version", "")).strip()
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version):
+        raise SystemExit("manifest.json must define a valid human_version")
+
+    declarations = (
+        (
+            "__init__.py",
+            re.compile(r'(?m)^__version__\s*=\s*"([^"]+)"'),
+        ),
+        (
+            "ui/__init__.py",
+            re.compile(r'(?m)^__version__\s*=\s*"([^"]+)"'),
+        ),
+        (
+            "semantic/model_manager.py",
+            re.compile(
+                r'(?m)^DOWNLOAD_USER_AGENT\s*=\s*'
+                r'"Smart-Search-for-Anki/([^"]+)"'
+            ),
+        ),
+    )
+    for relative_name, pattern in declarations:
+        text = (root / relative_name).read_text(encoding="utf-8")
+        match = pattern.search(text)
+        declared = match.group(1) if match else None
+        if declared != version:
+            raise SystemExit(
+                f"Release version mismatch in {relative_name}: "
+                f"expected {version}, got {declared or 'missing'}"
+            )
+
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    if not re.search(
+        rf"(?m)^## \[{re.escape(version)}\](?:\s|$)",
+        changelog,
+    ):
+        raise SystemExit(
+            f"CHANGELOG.md has no release heading for version {version}"
+        )
+
+
+def default_output_path(root: Path) -> Path:
+    manifest = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+    version = str(manifest.get("human_version", "")).strip()
+    if not version:
+        raise SystemExit("manifest.json must define human_version")
+    return root / "dist" / f"Smart_Search_Medical_{version}.ankiaddon"
 
 
 def validate_public_text(files: list[Path]) -> None:
@@ -460,14 +516,18 @@ def main() -> None:
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path(__file__).resolve().parent.parent
-        / "dist"
-        / "Smart_Search_Medical_1.0.13.ankiaddon",
+        default=None,
     )
     arguments = parser.parse_args()
+    root = arguments.root.resolve()
+    output = (
+        arguments.output.resolve()
+        if arguments.output is not None
+        else default_output_path(root)
+    )
     print(
         json.dumps(
-            build(arguments.root.resolve(), arguments.output.resolve()),
+            build(root, output),
             indent=2,
             sort_keys=True,
         )

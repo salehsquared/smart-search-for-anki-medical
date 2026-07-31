@@ -479,6 +479,46 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller.deleteLater()
         dialog.deleteLater()
 
+    def test_managed_close_delegates_before_dialog_manager_continues(
+        self,
+    ) -> None:
+        dialog = SearchDialog()
+        pending = []
+        completed: list[bool] = []
+        dialog.set_managed_close_handler(pending.append)
+
+        dialog.closeWithCallback(lambda: completed.append(True))
+
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(completed, [])
+        pending.pop()()
+        self.assertEqual(completed, [True])
+        dialog.deleteLater()
+
+    def test_normal_window_close_waits_for_managed_cleanup(self) -> None:
+        dialog = SearchDialog()
+        pending = []
+        closed: list[bool] = []
+        dialog.dialogClosed.connect(lambda: closed.append(True))
+        dialog.set_managed_close_handler(pending.append)
+        dialog.show()
+        self.app.processEvents()
+
+        dialog.close()
+        self.app.processEvents()
+
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(closed, [])
+        self.assertTrue(dialog.isVisible())
+
+        dialog.set_managed_close_handler(None)
+        dialog.close()
+        self.app.processEvents()
+
+        self.assertEqual(closed, [True])
+        self.assertFalse(dialog.isVisible())
+        dialog.deleteLater()
+
     def test_disposed_controller_ignores_queued_search_success(self) -> None:
         backend = _HeldSearchBackend()
         dialog = SearchDialog()
@@ -578,6 +618,59 @@ class OffscreenSmokeTests(unittest.TestCase):
         QTest.keyClick(dialog.results, Qt.Key.Key_Enter)
 
         self.assertEqual(opened, [result, result])
+        dialog.deleteLater()
+
+    def test_double_click_browser_open_preserves_search_results_and_checks(
+        self,
+    ) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        result = SearchResult(
+            note_id=42,
+            card_ids=(4201,),
+            title="Hypertension",
+        )
+        dialog.search.setText("hypertension is:suspended")
+        dialog.show_response(
+            SearchResponse(
+                request_id=1,
+                query=dialog.query(),
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        dialog.results.results_model().set_checked(0, True)
+        opened: list[SearchResult] = []
+        controller.set_browser_opener(opened.append)
+        dialog.show()
+        self.app.processEvents()
+
+        index = dialog.results.results_model().index(0, 0)
+        point = dialog.results.visualRect(index).center()
+        QTest.mouseClick(
+            dialog.results.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=point,
+        )
+        QTest.mouseDClick(
+            dialog.results.viewport(),
+            Qt.MouseButton.LeftButton,
+            pos=point,
+        )
+        self.app.processEvents()
+
+        self.assertEqual(opened, [result])
+        self.assertEqual(dialog.query(), "hypertension is:suspended")
+        self.assertEqual(dialog.results.results_model().count(), 1)
+        self.assertEqual(
+            dialog.results.results_model().checked_results(),
+            (result,),
+        )
+        self.assertTrue(dialog.isVisible())
+        self.assertTrue(controller._active)
+        controller.deleteLater()
         dialog.deleteLater()
 
     def test_search_error_keeps_query_field_editable_and_focused(self) -> None:
@@ -923,7 +1016,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         )
         ready = SemanticStatus(
             SemanticState.READY,
-            detail="40,659 notes.",
+            indexed_notes=40_659,
         )
         cases = (
             # READY is the state that exposed the live Anki/macOS clipping.
@@ -967,10 +1060,19 @@ class OffscreenSmokeTests(unittest.TestCase):
                         )
                         self.assertTrue(control.accessibleName())
                     self.assertTrue(dialog.semantic_status.accessibleName())
-                    self.assertGreaterEqual(
-                        dialog.semantic_status.minimumHeight(),
-                        dialog.semantic_status.fontMetrics().lineSpacing() * 6,
+                    self.assertEqual(
+                        dialog.mode_combo.width(),
+                        dialog.limit_spin.width(),
                     )
+                    self.assertNotIn(
+                        "searchSettingsPage QComboBox",
+                        dialog.styleSheet(),
+                    )
+                    if status.state is SemanticState.READY:
+                        self.assertIn(
+                            "40,659 notes",
+                            dialog.semantic_status.text(),
+                        )
                     dialog.deleteLater()
                     self.app.processEvents()
 
@@ -978,7 +1080,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         values = {
             "product_name": "Smart Search for Anki — Medical",
             "creator": "Saleh Mostafa",
-            "version": "1.0.13",
+            "version": "1.0.15",
             "logo_path": str(LOGO_PATH),
             "website_url": "https://medbrevia.com/app",
             "feedback_url": "mailto:product@medbrevia.com",
@@ -1029,7 +1131,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         panel = dialog.about_panel
         self.assertTrue(panel.isVisibleTo(dialog))
         self.assertEqual(panel.name_label.text(), "Smart Search for Anki — Medical")
-        self.assertIn("1.0.13", panel.version_label.text())
+        self.assertIn("1.0.15", panel.version_label.text())
         self.assertIn("Created by Saleh Mostafa", panel.attribution_label.text())
         self.assertIn("MedBrevia", panel.attribution_label.text())
         self.assertEqual(
@@ -1108,7 +1210,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.13")
+        self.assertEqual(fallback.version, "1.0.15")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())
@@ -1288,7 +1390,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             layout.indexOf(dialog.batch_bar) + 1,
-            layout.indexOf(dialog.stack),
+            layout.indexOf(dialog.content_splitter),
         )
         dialog.deleteLater()
 
@@ -1570,6 +1672,70 @@ class OffscreenSmokeTests(unittest.TestCase):
 
         dialog.set_preview_active(False)
         self.assertFalse(dialog.preview_button.isChecked())
+        dialog.deleteLater()
+
+    def test_inline_preview_pane_opens_edits_expands_and_closes_in_place(
+        self,
+    ) -> None:
+        dialog = SearchDialog()
+        result = SearchResult(
+            note_id=7,
+            card_ids=(71, 72),
+            title="Seven",
+        )
+        dialog.search.setText("seven is:suspended")
+        dialog.show_response(
+            SearchResponse(
+                request_id=14,
+                query=dialog.query(),
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        dialog.results.results_model().set_checked(0, True)
+        modes: list[str] = []
+        toggled: list[SearchResult | None] = []
+        dialog.previewModeChanged.connect(modes.append)
+        dialog.previewToggleRequested.connect(toggled.append)
+        dialog.show()
+        dialog.set_preview_target_title("Seven")
+        dialog.set_preview_active(True)
+        self.app.processEvents()
+
+        self.assertEqual(dialog.content_splitter.indexOf(dialog.stack), 0)
+        self.assertEqual(dialog.content_splitter.indexOf(dialog.preview_pane), 1)
+        self.assertTrue(dialog.preview_pane.isVisibleTo(dialog))
+        self.assertTrue(all(size > 0 for size in dialog.content_splitter.sizes()))
+        self.assertEqual(dialog.preview_pane.target_title(), "Seven")
+        self.assertEqual(dialog.preview_pane.sibling_label.text(), "0/0")
+        self.assertFalse(dialog.preview_pane.previous_button.isVisible())
+        self.assertTrue(dialog.preview_pane.replay_button.isVisibleTo(dialog))
+
+        dialog.preview_pane.edit_button.click()
+        self.assertEqual(dialog.preview_pane.mode(), "edit")
+        self.assertEqual(modes, ["edit"])
+        self.assertFalse(dialog.preview_pane.replay_button.isVisible())
+
+        dialog.preview_pane.expand_button.click()
+        self.app.processEvents()
+        self.assertTrue(dialog.preview_pane.is_expanded())
+        self.assertFalse(dialog.stack.isVisible())
+        dialog.preview_pane.expand_button.click()
+        self.app.processEvents()
+        self.assertFalse(dialog.preview_pane.is_expanded())
+        self.assertTrue(dialog.stack.isVisibleTo(dialog))
+
+        dialog.preview_pane.close_button.click()
+        self.assertEqual(toggled, [None])
+        dialog.set_preview_active(False)
+        self.assertFalse(dialog.preview_pane.isVisible())
+        self.assertEqual(dialog.query(), "seven is:suspended")
+        self.assertEqual(dialog.results.results_model().results(), (result,))
+        self.assertEqual(
+            dialog.results.results_model().checked_results(),
+            (result,),
+        )
         dialog.deleteLater()
 
     def test_preview_shortcut_toggles_only_when_a_result_is_available(self) -> None:

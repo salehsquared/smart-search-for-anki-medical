@@ -42,13 +42,13 @@ from .anki_actions import (
 )
 from .anki_adapter import (
     AnkiCollectionReader,
-    create_result_previewer,
     open_card_ids_in_browser,
     open_native_query_in_browser,
     open_note_ids_in_browser,
     preview_card_ids,
     profile_key,
 )
+from .inline_preview import create_inline_result_inspector
 from .backend.anki_reader import iter_collection_notes
 from .backend.index import (
     FTS5Unavailable,
@@ -98,6 +98,7 @@ _DEFAULT_DEBOUNCE_MS = 1200
 _DEFAULT_SEMANTIC_AUTOSTART_DELAY_MS = 20_000
 _SEMANTIC_AUTOSTART_RETRY_MS = 2_000
 _RXTERMS_RESOURCE = Path("resources") / "medical_vocab" / "rxterms_202607.json.gz"
+_DIALOG_MANAGER_NAME = "SmartSearchMedical"
 _NOTETYPE_FILTER = re.compile(
     r"(?<![\w\"])(?P<neg>-?)notetype:(?P<value>\"(?:\\.|[^\"])*\"|\S+)",
     flags=re.IGNORECASE,
@@ -2447,6 +2448,9 @@ class SmartSearchAddonController:
         self._previewer: Any | None = None
         self._preview_open_timer: Any | None = None
         self._pending_preview_result: object | None = None
+        self._preview_auto_suppressed = False
+        self._dialog_close_in_progress = False
+        self._dialog_close_callbacks: list[Callable[[], None]] = []
         self._reconcile_timer: Any | None = None
         self._reconcile_request_lock = threading.Lock()
         self._pending_reconcile_note_ids: set[int] = set()
@@ -2488,6 +2492,10 @@ class SmartSearchAddonController:
             self._capture_added_note,
         )
         self._append_hook(gui_hooks.sync_did_finish, self._on_sync_finished)
+        self._append_hook(
+            gui_hooks.collection_will_temporarily_close,
+            self._on_collection_will_temporarily_close,
+        )
         self._append_hook(
             gui_hooks.collection_did_temporarily_close,
             self._on_collection_reopened,
@@ -2571,6 +2579,11 @@ class SmartSearchAddonController:
     def show_search(self) -> None:
         """Open or focus the keyboard-first Smart Search palette."""
 
+        if self._dialog_close_in_progress:
+            self._show_message(
+                "Smart Search is finishing a save. Try again in a moment."
+            )
+            return
         if not self.backend.active:
             if self.backend.get_status().state is not IndexState.BUILDING:
                 self.backend.activate_profile_async(
@@ -2602,9 +2615,11 @@ class SmartSearchAddonController:
             dialog = SearchDialog(self.mw, about=about)
             ui_controller = SearchController(self.backend, dialog)
             ui_controller.set_browser_opener(
-                lambda result: _open_results_in_browser((result,))
+                lambda result: self._open_results_in_browser_safely((result,))
             )
-            ui_controller.set_multi_browser_opener(_open_results_in_browser)
+            ui_controller.set_multi_browser_opener(
+                self._open_results_in_browser_safely
+            )
             ui_controller.semanticInstallRequested.connect(self._install_semantic)
             ui_controller.semanticIndexRequested.connect(self._index_semantic)
             ui_controller.textIndexRebuilt.connect(self._text_index_rebuilt)
@@ -2620,7 +2635,12 @@ class SmartSearchAddonController:
             dialog.previewResultChanged.connect(
                 self._preview_selection_changed
             )
-            dialog.dialogClosed.connect(self._close_previewer)
+            dialog.set_managed_close_handler(
+                self._close_dialog_with_callback
+            )
+            dialog.dialogClosed.connect(
+                lambda d=dialog: self._search_dialog_closed(d)
+            )
             dialog.destroyed.connect(
                 lambda _object=None, d=dialog, c=ui_controller:
                 self._search_dialog_destroyed(d, c)
@@ -2637,6 +2657,7 @@ class SmartSearchAddonController:
             self._dialog = dialog
             self._ui_controller = ui_controller
 
+        self._register_managed_dialog(self._dialog)
         self._dialog.show()
         if self._ui_controller is not None:
             self._ui_controller.resume()
@@ -2661,69 +2682,84 @@ class SmartSearchAddonController:
         package = sys.modules.get(self.backend.addon_module)
         return str(getattr(package, "__version__", "") or "")
 
+    def _open_results_in_browser_safely(
+        self,
+        results: Sequence[object],
+    ) -> None:
+        """Prevent two live Anki editors from racing on the same note."""
+
+        self._with_preview_saved(
+            lambda: _open_results_in_browser(results),
+            detach_editor=True,
+        )
+
+    def _with_preview_saved(
+        self,
+        callback: Callable[[], None],
+        *,
+        detach_editor: bool,
+    ) -> None:
+        previewer = self._previewer
+        if previewer is None:
+            callback()
+            return
+        try:
+            if detach_editor:
+                previewer.prepare_for_external_change(callback)
+            else:
+                previewer.flush(callback)
+        except (AttributeError, RuntimeError):
+            callback()
+
     # ---------------------------------------------------------- card preview
 
     def _toggle_previewer(self, result: object | None) -> None:
-        if (
-            not self._preview_feature_enabled()
-            or not preview_card_ids(result)
-        ):
-            self._close_previewer()
+        if result is None:
+            # X is a temporary dismissal. Selecting another result (or
+            # clicking the current one again) reopens the pane; Settings is
+            # the persistent way to disable automatic previews.
+            self._hide_previewer(suppress=False)
             return
-        if self._previewer is not None:
-            try:
-                self._previewer.raise_()
-                self._previewer.activateWindow()
-            except Exception:
-                self._close_previewer()
-            else:
-                return
+        if not self._preview_feature_enabled() or not preview_card_ids(result):
+            self._hide_previewer()
+            return
 
         dialog = self._dialog
         if dialog is None or getattr(self.mw, "col", None) is None:
             return
-        previewer = None
+        self._preview_auto_suppressed = False
         try:
-            previewer = create_result_previewer(
-                self.mw,
-                initial_result=result,
-                on_close=self._previewer_closed,
-                on_previous=lambda: self._move_preview_result(-1),
-                on_next=lambda: self._move_preview_result(1),
-                has_previous=lambda: self._can_move_preview_result(-1),
-                has_next=lambda: self._can_move_preview_result(1),
-            )
-            self._previewer = previewer
-            previewer.open()
+            if self._previewer is None:
+                self._previewer = create_inline_result_inspector(
+                    self.mw,
+                    pane=dialog.preview_pane,
+                    parent_window=dialog,
+                    initial_result=result,
+                    on_error=self._show_error,
+                )
+            else:
+                self._previewer.set_result(result)
             dialog.set_preview_active(True)
-            # Leave the native Preview in front. Its own Up/Down shortcuts
-            # move the underlying result list, so restoring the search dialog
-            # here only hides the newly opened window on macOS.
-            previewer.raise_()
-            previewer.activateWindow()
+            self._previewer.show()
         except Exception as error:
-            self._previewer = None
-            if previewer is not None:
-                try:
-                    previewer.cancel_timer()
-                    previewer.close()
-                except Exception:
-                    pass
+            self._close_previewer()
             try:
                 dialog.set_preview_active(False)
             except RuntimeError:
                 pass
-            self._show_error(f"Could not open card preview: {error}")
+            self._show_error(f"Could not open the inline card preview: {error}")
 
     def _preview_selection_changed(self, result: object | None) -> None:
         if not self._preview_feature_enabled():
-            self._close_previewer()
+            self._hide_previewer()
             return
         previewer = self._previewer
         if not preview_card_ids(result):
-            self._close_previewer()
+            self._hide_previewer()
             return
         if previewer is None:
+            if self._preview_auto_suppressed:
+                return
             dialog = self._dialog
             results = getattr(dialog, "results", None)
             try:
@@ -2735,9 +2771,17 @@ class SmartSearchAddonController:
             return
         try:
             previewer.set_result(result)
+            dialog = self._dialog
+            if (
+                dialog is not None
+                and not self._preview_auto_suppressed
+                and not dialog.preview_pane.isVisible()
+                and dialog.results.hasFocus()
+            ):
+                self._schedule_auto_previewer(result)
         except Exception as error:
             self._close_previewer()
-            self._show_error(f"Could not update card preview: {error}")
+            self._show_error(f"Could not update the inline preview: {error}")
 
     def _preview_feature_enabled(self) -> bool:
         ui_controller = self._ui_controller
@@ -2760,7 +2804,7 @@ class SmartSearchAddonController:
         if result is None or not self._preview_feature_enabled():
             return
         dialog = self._dialog
-        if dialog is None or self._previewer is not None:
+        if dialog is None or self._preview_auto_suppressed:
             return
         try:
             if (
@@ -2774,8 +2818,12 @@ class SmartSearchAddonController:
 
     def _preview_preference_changed(self, enabled: bool) -> None:
         if not enabled:
-            self._close_previewer()
+            # Keep the already-created native widgets available for reuse.
+            # Recreating them on the same host is both expensive and prone to
+            # stale Qt-layout ownership; full cleanup happens with the dialog.
+            self._hide_previewer(suppress=True)
             return
+        self._preview_auto_suppressed = False
         dialog = self._dialog
         if dialog is None:
             return
@@ -2817,10 +2865,21 @@ class SmartSearchAddonController:
             )
         except Exception as error:
             self._close_previewer()
-            self._show_error(f"Could not refresh card preview: {error}")
+            self._show_error(f"Could not refresh the inline preview: {error}")
 
-    def _previewer_closed(self) -> None:
-        self._previewer = None
+    def _hide_previewer(self, *, suppress: bool = False) -> None:
+        timer = self._preview_open_timer
+        if timer is not None:
+            timer.stop()
+        self._pending_preview_result = None
+        if suppress:
+            self._preview_auto_suppressed = True
+        previewer = self._previewer
+        if previewer is not None:
+            try:
+                previewer.hide()
+            except RuntimeError:
+                pass
         dialog = self._dialog
         if dialog is not None:
             try:
@@ -2828,19 +2887,37 @@ class SmartSearchAddonController:
             except RuntimeError:
                 pass
 
-    def _close_previewer(self) -> None:
+    def _close_previewer(self, *, save: bool = True) -> None:
         timer = self._preview_open_timer
         if timer is not None:
             timer.stop()
         self._pending_preview_result = None
         previewer = self._previewer
         self._previewer = None
+        self._preview_auto_suppressed = bool(previewer is not None and save)
+
+        def cleaned() -> None:
+            if self._previewer is None:
+                self._preview_auto_suppressed = False
+
         if previewer is not None:
-            try:
-                previewer.cancel_timer()
-                previewer.close()
-            except Exception:
-                pass
+            if save:
+                try:
+                    previewer.cleanup_after_save(cleaned)
+                except (AttributeError, RuntimeError):
+                    try:
+                        previewer.cleanup()
+                    except (AttributeError, RuntimeError):
+                        pass
+                    cleaned()
+            else:
+                try:
+                    previewer.cleanup()
+                except (AttributeError, RuntimeError):
+                    pass
+                cleaned()
+        else:
+            cleaned()
         dialog = self._dialog
         if dialog is not None:
             try:
@@ -2856,7 +2933,9 @@ class SmartSearchAddonController:
         """Clear stale Python wrappers after an unexpected native deletion."""
 
         if self._dialog is dialog:
+            self._close_previewer(save=False)
             self._dialog = None
+            self._mark_managed_dialog_closed()
         if self._ui_controller is ui_controller:
             self._ui_controller = None
         try:
@@ -2935,6 +3014,15 @@ class SmartSearchAddonController:
         self._run_collection_action(action)
 
     def _run_collection_action(self, action: CollectionAction) -> None:
+        self._with_preview_saved(
+            lambda: self._run_collection_action_after_save(action),
+            detach_editor=True,
+        )
+
+    def _run_collection_action_after_save(
+        self,
+        action: CollectionAction,
+    ) -> None:
         if getattr(self.mw, "col", None) is None or not self.backend.active:
             self._show_error("Open an Anki profile before changing cards.")
             return
@@ -3459,6 +3547,14 @@ class SmartSearchAddonController:
         self.schedule_reconcile()
         self._refresh_visible_card_states()
 
+    def _on_collection_will_temporarily_close(
+        self,
+        _collection: Any,
+    ) -> None:
+        # Match Anki's Browser: a live Editor must save and close before sync
+        # temporarily swaps out the collection beneath its note/card objects.
+        self._close_dialog_with_callback(lambda: None)
+
     def _on_collection_reopened(self, _collection: Any) -> None:
         self.schedule_reconcile()
 
@@ -3590,27 +3686,107 @@ class SmartSearchAddonController:
         if callable(run_on_main):
             run_on_main(callback)
 
+    def _register_managed_dialog(self, dialog: object | None) -> None:
+        if dialog is None:
+            return
+        try:
+            import aqt
+
+            aqt.dialogs.register_dialog(
+                _DIALOG_MANAGER_NAME,
+                lambda: dialog,
+                instance=dialog,
+            )
+        except (AttributeError, ImportError, RuntimeError):
+            return
+
+    def _mark_managed_dialog_closed(self) -> None:
+        try:
+            import aqt
+
+            aqt.dialogs.markClosed(_DIALOG_MANAGER_NAME)
+        except (AttributeError, ImportError, KeyError, RuntimeError):
+            return
+
+    def _search_dialog_closed(self, dialog: object) -> None:
+        if self._dialog is not dialog:
+            return
+        self._hide_previewer()
+        self._mark_managed_dialog_closed()
+
     def _close_dialog(self) -> None:
-        self._close_previewer()
+        self._close_dialog_with_callback(lambda: None)
+
+    def _close_dialog_with_callback(
+        self,
+        callback: Callable[[], None],
+    ) -> None:
+        self._dialog_close_callbacks.append(callback)
+        if self._dialog_close_in_progress:
+            return
+
         dialog = self._dialog
         ui_controller = self._ui_controller
-        self._dialog = None
-        self._ui_controller = None
-        if dialog is not None:
+        if dialog is None:
+            self._mark_managed_dialog_closed()
+            self._run_dialog_close_callbacks()
+            return
+
+        self._dialog_close_in_progress = True
+        if self._preview_open_timer is not None:
+            self._preview_open_timer.stop()
+        self._pending_preview_result = None
+        previewer = self._previewer
+
+        def finish() -> None:
+            if self._previewer is previewer:
+                self._previewer = None
+            self._preview_auto_suppressed = False
+            if self._dialog is dialog:
+                self._dialog = None
+            if self._ui_controller is ui_controller:
+                self._ui_controller = None
+            try:
+                dialog.set_managed_close_handler(None)
+            except (AttributeError, RuntimeError):
+                pass
             try:
                 dialog.close()
             except RuntimeError:
                 pass
-        if ui_controller is not None:
-            try:
-                ui_controller.dispose()
-            except (AttributeError, RuntimeError):
-                pass
-        if dialog is not None:
+            if ui_controller is not None:
+                try:
+                    ui_controller.dispose()
+                except (AttributeError, RuntimeError):
+                    pass
+            self._mark_managed_dialog_closed()
             try:
                 dialog.deleteLater()
             except RuntimeError:
                 pass
+            self._dialog_close_in_progress = False
+            self._run_dialog_close_callbacks()
+
+        if previewer is None:
+            finish()
+            return
+        try:
+            previewer.cleanup_after_save(finish)
+        except (AttributeError, RuntimeError):
+            try:
+                previewer.cleanup()
+            except (AttributeError, RuntimeError):
+                pass
+            finish()
+
+    def _run_dialog_close_callbacks(self) -> None:
+        callbacks = self._dialog_close_callbacks
+        self._dialog_close_callbacks = []
+        for callback in callbacks:
+            try:
+                callback()
+            except Exception:
+                continue
 
     def _append_hook(self, hook: Any, callback: Callable[..., Any]) -> None:
         hook.append(callback)

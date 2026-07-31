@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.0.15] — 2026-07-30
+
+### Changed
+
+- Moved sibling position, audio replay, and answer controls into the compact
+  preview header so the card body has more room.
+- Preview X now dismisses the pane only until the next result selection or
+  same-row click; disabling Card preview in Settings remains persistent.
+- Search settings now use native macOS combo-box and stepper rendering with
+  aligned, font-aware sizing and shorter semantic-status copy.
+
+### Fixed
+
+- Removed the custom compound-control styling that could leave clipped dark
+  strips beside Default mode and Result limit on macOS.
+- Fixed a managed-close recursion that could leave the Smart Search dialog
+  visible after its editor-save cleanup completed.
+
+## [1.0.14] — 2026-07-30
+
+### Added
+
+- Replaced the separate Preview window with a resizable right-hand pane inside
+  Smart Search.
+- Added rendered **Card** and native **Edit** views, sibling-card navigation,
+  and in-window expand, restore, and close controls.
+- The native editor is created only when first used and saves through Anki's
+  supported note operation.
+
+### Fixed
+
+- Opening one or more results in Anki's Browser no longer closes Smart Search
+  or clears its query, results, highlighted row, or checked selection.
+- Window close and Escape handling are now separate: Escape still clears a
+  query first, while an actual close request closes the dialog normally.
+
 ## [1.0.13] — 2026-07-30
 
 ### Added

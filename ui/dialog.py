@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import platform
 import sys
+from collections.abc import Callable
 from typing import Optional, Sequence
 
 from .contracts import (
@@ -26,6 +27,7 @@ from .contracts import (
 )
 from .results import ResultsView
 from .theme import chrome_colors, semantic_icon_pixmap
+from .preview_pane import InlineResultPane
 from .widgets import (  # Qt shim + custom widgets
     AboutPanel,
     ChipBar,
@@ -49,6 +51,7 @@ from .widgets import (  # Qt shim + custom widgets
     QShortcut,
     QSizePolicy,
     QSpinBox,
+    QSplitter,
     QStackedWidget,
     Qt,
     QTabWidget,
@@ -94,10 +97,10 @@ Smart and Exact while Semantic is being prepared.</p>
 <p>Use structured filters such as <b>deck:AnKing</b>, <b>tag:cardio</b>, or
 <b>notetype:Cloze</b> to narrow results.</p>
 <ul>
-<li><b>Down / Up</b> — move through results; an open Preview follows</li>
+<li><b>Down / Up</b> — move through results; the preview follows</li>
 <li><b>Return in the search field</b> — run the current search immediately</li>
 <li><b>Return in the results</b> — open the highlighted note in the Browser</li>
-<li><b>Ctrl+Shift+P</b> — toggle Anki's card Preview</li>
+<li><b>Ctrl+Shift+P</b> — toggle the card preview pane</li>
 <li><b>Space</b> — check or uncheck the highlighted result for bulk actions</li>
 <li><b>Shift+click</b> — check a range of results</li>
 <li><b>Right-click</b> — open, flag, suspend, or tag the clicked/checked results</li>
@@ -182,10 +185,15 @@ class _SettingsDialog(QDialog):
         form.setContentsMargins(28, 30, 28, 24)
         form.setHorizontalSpacing(22)
         form.setVerticalSpacing(18)
+        form.setLabelAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
+        form.setFormAlignment(
+            Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        )
         self.tabs.addTab(search_page, "Search")
 
         self.mode_combo = QComboBox(search_page)
-        self.mode_combo.setMinimumHeight(40)
         for m in (SearchMode.SMART, SearchMode.EXACT, SearchMode.SEMANTIC):
             self.mode_combo.addItem(m.label, m)
         self.mode_combo.setCurrentIndex(
@@ -195,12 +203,24 @@ class _SettingsDialog(QDialog):
         form.addRow("Default mode", self.mode_combo)
 
         self.limit_spin = QSpinBox(search_page)
-        self.limit_spin.setMinimumHeight(40)
         self.limit_spin.setRange(10, 200)
         self.limit_spin.setSingleStep(10)
         self.limit_spin.setValue(result_limit)
         self.limit_spin.setAccessibleName("Maximum results per search")
         form.addRow("Result limit", self.limit_spin)
+
+        control_width = max(
+            190,
+            self.mode_combo.sizeHint().width(),
+            self.limit_spin.sizeHint().width(),
+        )
+        for control in (self.mode_combo, self.limit_spin):
+            control.setMinimumWidth(control_width)
+            control.setMaximumWidth(control_width)
+            control.setSizePolicy(
+                QSizePolicy.Policy.Fixed,
+                QSizePolicy.Policy.Preferred,
+            )
 
         self.preview_check = QCheckBox(
             "Show automatically while browsing results",
@@ -213,12 +233,15 @@ class _SettingsDialog(QDialog):
         )
         form.addRow("Card preview", self.preview_check)
 
-        # The status copy and its action share one field column: the wrapping
-        # label reserves its full height-for-width (Minimum vertical policy,
-        # so the layout can never squeeze it into clipping) and the button
-        # sits directly below it at its natural width.
+        # The status copy and action share one expanding field column. Native
+        # height-for-width sizing keeps wrapped copy readable without forcing
+        # a large fixed row in compact dialogs.
         self.semantic_field = QWidget(search_page)
         self.semantic_field.setObjectName("semanticSettingsField")
+        self.semantic_field.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Preferred,
+        )
         semantic_column = QVBoxLayout(self.semantic_field)
         semantic_column.setContentsMargins(0, 0, 0, 0)
         semantic_column.setSpacing(12)
@@ -231,16 +254,9 @@ class _SettingsDialog(QDialog):
         )
         self.semantic_status.setAccessibleName("Semantic search status")
         self.semantic_status.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
             QSizePolicy.Policy.Preferred,
-            QSizePolicy.Policy.Minimum,
         )
-        # Anki's macOS stylesheet can report a much smaller word-wrapped
-        # minimumSizeHint than the label actually paints. Reserve six
-        # font-scaled lines plus the optional action row so neither READY nor
-        # in-progress copy can be squeezed or overlap at the minimum dialog.
-        status_height = self.semantic_status.fontMetrics().lineSpacing() * 6
-        self.semantic_status.setMinimumHeight(status_height)
-        self.semantic_field.setMinimumHeight(status_height + 52)
         semantic_column.addWidget(self.semantic_status)
 
         self.semantic_action = QPushButton(self.semantic_field)
@@ -254,6 +270,11 @@ class _SettingsDialog(QDialog):
         )
         self._set_semantic_status(semantic)
         form.addRow("Semantic search", self.semantic_field)
+        semantic_label = form.labelForField(self.semantic_field)
+        if semantic_label is not None:
+            semantic_label.setAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop
+            )
 
         self.about_panel = AboutPanel(
             about if about is not None else _default_about_info(),
@@ -284,9 +305,7 @@ class _SettingsDialog(QDialog):
             self.semantic_action.setVisible(False)
             return
 
-        separation = (
-            "\nSemantic has a separate preparation step from Smart and Exact."
-        )
+        separation = "\nUses a separate index from Smart and Exact."
         if status.state is SemanticState.INDEXING:
             separation += "\nSmart and Exact remain available while this finishes."
         self.semantic_status.setText(
@@ -365,12 +384,6 @@ class _SettingsDialog(QDialog):
             "QWidget#searchSettingsPage QLabel {"
             f" color: {c['text']};"
             "}"
-            "QWidget#searchSettingsPage QComboBox,"
-            " QWidget#searchSettingsPage QSpinBox {"
-            f" background: {c['surface_high']}; color: {c['text']};"
-            f" border: 1px solid {c['border']}; border-radius: 9px;"
-            " padding: 4px 10px;"
-            "}"
             "QPushButton#semanticSettingsAction {"
             f" background: {c['accent']}; color: {c['accent_text']};"
             f" border: 1px solid {c['accent']}; border-radius: 9px;"
@@ -421,6 +434,7 @@ class SearchDialog(QDialog):
     openAllRequested = pyqtSignal(object)      # tuple[SearchResult, ...]
     previewToggleRequested = pyqtSignal(object)  # SearchResult | None
     previewResultChanged = pyqtSignal(object)  # SearchResult | None
+    previewModeChanged = pyqtSignal(str)  # "card" | "edit"
     filterRemoveRequested = pyqtSignal(object)   # FilterChip
     correctionDismissRequested = pyqtSignal(object)  # Correction
     correctionLiteralRequested = pyqtSignal(object)  # Correction
@@ -461,6 +475,11 @@ class SearchDialog(QDialog):
         self._batch_busy = False
         self._batch_results_available = False
         self._batch_control_states: list[tuple[QWidget, bool]] = []
+        self._preview_restore_sizes: list[int] = [620, 400]
+        self._managed_close_handler: (
+            Callable[[Callable[[], None]], None] | None
+        ) = None
+        self._managed_close_requested = False
         self._build_ui()
         self._install_shortcuts()
         self.show_help()
@@ -593,7 +612,28 @@ class SearchDialog(QDialog):
         message_layout.addStretch(1)
         self.stack.insertWidget(_PAGE_MESSAGE, message_page)
 
-        root.addWidget(self.stack, 1)
+        self.content_splitter = QSplitter(
+            Qt.Orientation.Horizontal,
+            self,
+        )
+        self.content_splitter.setObjectName("searchContentSplitter")
+        self.content_splitter.setChildrenCollapsible(False)
+        self.content_splitter.setOpaqueResize(False)
+        self.content_splitter.addWidget(self.stack)
+
+        self.preview_pane = InlineResultPane(self.content_splitter)
+        self.preview_pane.setVisible(False)
+        self.preview_pane.closeRequested.connect(
+            lambda: self.previewToggleRequested.emit(None)
+        )
+        self.preview_pane.expandedRequested.connect(
+            self._set_preview_expanded
+        )
+        self.preview_pane.modeChanged.connect(self.previewModeChanged)
+        self.content_splitter.addWidget(self.preview_pane)
+        self.content_splitter.setStretchFactor(0, 3)
+        self.content_splitter.setStretchFactor(1, 2)
+        root.addWidget(self.content_splitter, 1)
 
         self.batch_bar = QFrame(self)
         self.batch_bar.setObjectName("batchBar")
@@ -645,7 +685,7 @@ class SearchDialog(QDialog):
         self.preview_button.setText("Preview")
         self.preview_button.setCheckable(True)
         self.preview_button.setToolTip(
-            "Show Anki's card preview for the highlighted result"
+            "Show the card preview beside the results"
         )
         self.preview_button.setAccessibleName(
             "Toggle card preview for highlighted result"
@@ -731,7 +771,7 @@ class SearchDialog(QDialog):
         batch.addWidget(self.tags_button)
 
         self.batch_bar.setVisible(False)
-        root.insertWidget(root.indexOf(self.stack), self.batch_bar)
+        root.insertWidget(root.indexOf(self.content_splitter), self.batch_bar)
         self.results.results_model().checkedChanged.connect(
             self._update_batch_bar
         )
@@ -855,6 +895,40 @@ class SearchDialog(QDialog):
             f" color: {c['muted']}; background: {c['surface']};"
             f" border-color: {c['border']};"
             "}"
+            "QFrame#inlineResultPane {"
+            f" background: {c['surface']}; border: 1px solid {c['border']};"
+            " border-radius: 11px;"
+            "}"
+            "QFrame#inlinePreviewHeader {"
+            " background: transparent; border: none;"
+            f" border-bottom: 1px solid {c['border']};"
+            "}"
+            "QLabel#inlinePreviewSibling {"
+            f" color: {c['text']}; background: transparent; border: none;"
+            " min-width: 28px; font-weight: 700;"
+            "}"
+            "QToolButton#inlinePreviewNavigation,"
+            " QToolButton#inlinePreviewCardControl,"
+            " QToolButton#inlinePreviewMode,"
+            " QToolButton#inlinePreviewChrome {"
+            f" color: {c['text']}; background: {c['surface_high']};"
+            f" border: 1px solid {c['border']}; border-radius: 7px;"
+            " min-height: 28px; font-weight: 600;"
+            "}"
+            "QToolButton#inlinePreviewCardControl,"
+            " QToolButton#inlinePreviewMode {"
+            " padding: 0 7px;"
+            "}"
+            "QToolButton#inlinePreviewNavigation {"
+            " min-width: 26px; max-width: 26px; padding: 0;"
+            "}"
+            "QToolButton#inlinePreviewMode:checked {"
+            f" color: {c['accent_text']}; background: {c['accent']};"
+            f" border-color: {c['accent']};"
+            "}"
+            "QToolButton#inlinePreviewChrome {"
+            " min-width: 28px; padding: 0;"
+            "}"
             "QFrame#footerBar {"
             " background: transparent; border: none;"
             f" border-top: 1px solid {c['border']};"
@@ -958,17 +1032,60 @@ class SearchDialog(QDialog):
         )
 
     def set_preview_active(self, active: bool) -> None:
-        """Reflect native Preview window state without re-emitting intent."""
+        """Show or hide the inline pane without re-emitting preview intent."""
 
-        self.preview_button.setChecked(bool(active))
+        active = bool(active)
+        if active:
+            if not self.preview_pane.isVisible():
+                self.preview_pane.setVisible(True)
+                self._restore_preview_split()
+        else:
+            self._remember_preview_split()
+            if self.preview_pane.is_expanded():
+                self._set_preview_expanded(False)
+            self.preview_pane.setVisible(False)
+        self.preview_button.setChecked(active)
 
     def set_preview_enabled(self, enabled: bool) -> None:
         """Enable or disable the card Preview feature in this dialog."""
 
         self._preview_enabled = bool(enabled)
         if not self._preview_enabled:
-            self.preview_button.setChecked(False)
+            self.set_preview_active(False)
         self._update_batch_bar()
+
+    def _remember_preview_split(self) -> None:
+        if not self.preview_pane.isVisible() or self.preview_pane.is_expanded():
+            return
+        sizes = self.content_splitter.sizes()
+        if len(sizes) == 2 and sizes[0] > 0 and sizes[1] > 0:
+            self._preview_restore_sizes = [int(sizes[0]), int(sizes[1])]
+
+    def _restore_preview_split(self) -> None:
+        self.stack.setVisible(True)
+        self.preview_pane.set_expanded(False)
+        left, right = self._preview_restore_sizes
+        total = max(1, int(self.content_splitter.width()))
+        if left <= 0 or right <= 0:
+            left, right = max(420, round(total * 0.6)), max(320, round(total * 0.4))
+        self.content_splitter.setSizes([left, right])
+
+    def _set_preview_expanded(self, expanded: bool) -> None:
+        expanded = bool(expanded)
+        if expanded == self.preview_pane.is_expanded():
+            return
+        if expanded:
+            self._remember_preview_split()
+            self.stack.setVisible(False)
+            self.preview_pane.setVisible(True)
+        else:
+            self.stack.setVisible(True)
+            self.preview_pane.setVisible(True)
+            self.content_splitter.setSizes(self._preview_restore_sizes)
+        self.preview_pane.set_expanded(expanded)
+
+    def set_preview_target_title(self, title: str) -> None:
+        self.preview_pane.set_target_title(title)
 
     # --------------------------------------------------------- bulk actions
 
@@ -1851,22 +1968,58 @@ class SearchDialog(QDialog):
                     return True
         return super().eventFilter(obj, event)
 
-    def reject(self) -> None:
-        """Esc clears a nonempty query first, then closes."""
-        if self.query():
+    def keyPressEvent(self, event) -> None:
+        """Keep the two-step Escape behavior without hijacking window close."""
+
+        if event.key() == Qt.Key.Key_Escape and self.query():
             self.search.clear()
             self._emit_search()
             self.focus_query()
-        else:
-            self._close()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def reject(self) -> None:
+        self.close()
+
+    def set_managed_close_handler(
+        self,
+        handler: Callable[[Callable[[], None]], None] | None,
+    ) -> None:
+        """Install Anki's asynchronous dialog-manager close handshake."""
+
+        self._managed_close_handler = handler
+
+    def closeWithCallback(self, callback: Callable[[], None]) -> None:  # noqa: N802
+        handler = self._managed_close_handler
+        if handler is None:
+            self.close()
+            callback()
+            return
+        handler(callback)
 
     def closeEvent(self, event) -> None:
+        handler = self._managed_close_handler
+        if handler is not None:
+            event.ignore()
+            if not self._managed_close_requested:
+                self._managed_close_requested = True
+                try:
+                    handler(lambda: None)
+                except Exception:
+                    self._managed_close_requested = False
+            return
         self._prepare_close()
-        super().closeEvent(event)
+        # QDialog.closeEvent() delegates to the virtual reject() method.  Our
+        # reject() deliberately routes Escape through close() so every close
+        # path emits dialogClosed; calling the base implementation here would
+        # therefore recurse into close() while this close event is active and
+        # can leave the dialog visible.  Accepting the QWidget close event is
+        # sufficient for close() to hide the dialog.
+        event.accept()
 
     def _close(self) -> None:
-        self._prepare_close()
-        super().reject()
+        self.close()
 
     def _prepare_close(self) -> None:
         if self._close_notified:
@@ -1877,5 +2030,6 @@ class SearchDialog(QDialog):
 
     def showEvent(self, event) -> None:
         self._close_notified = False
+        self._managed_close_requested = False
         super().showEvent(event)
         self.search.setFocus(Qt.FocusReason.ActiveWindowFocusReason)

@@ -123,6 +123,36 @@ class BuildAddonTests(unittest.TestCase):
                 <= names
             )
 
+    def test_release_version_mismatch_blocks_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._copy_public_source(root)
+            ui_package = root / "ui" / "__init__.py"
+            ui_package.write_text(
+                ui_package.read_text(encoding="utf-8").replace(
+                    '__version__ = "1.0.15"',
+                    '__version__ = "9.9.9"',
+                ),
+                encoding="utf-8",
+            )
+
+            files = build_addon.included_files(root)
+            with self.assertRaisesRegex(
+                SystemExit,
+                "Release version mismatch in ui/__init__.py",
+            ):
+                build_addon.validate_sources(root, files)
+
+    def test_default_output_path_uses_manifest_version(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._copy_public_source(root)
+
+            self.assertEqual(
+                build_addon.default_output_path(root),
+                root / "dist" / "Smart_Search_Medical_1.0.15.ankiaddon",
+            )
+
     def test_unapproved_controlled_payload_blocks_build(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

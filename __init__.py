@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-__version__ = "1.0.13"
+__version__ = "1.0.15"
 
 _controller: Any | None = None
 _menu_action: Any | None = None

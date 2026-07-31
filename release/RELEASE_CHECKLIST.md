@@ -6,32 +6,32 @@ has been recorded for the exact archive being published.
 
 ## 1. Scope and identity
 
-- [ ] Choose the release channel: private beta, public beta, or stable.
-- [ ] Confirm the public title and version match `manifest.json`.
-- [ ] Confirm the supported Anki version range reflects versions actually
+- [x] Choose the release channel: private beta, public beta, or stable.
+- [x] Confirm the public title and version match `manifest.json`.
+- [x] Confirm the supported Anki version range reflects versions actually
       tested, not versions merely expected to work.
-- [ ] State prominently that Semantic Search supports **macOS 14 or later on
+- [x] State prominently that Semantic Search supports **macOS 14 or later on
       Apple-silicon Macs only**.
-- [ ] State that Smart and Exact remain usable while the separate Semantic index
+- [x] State that Smart and Exact remain usable while the separate Semantic index
       is preparing.
-- [ ] Confirm the creator credit reads **Saleh Mostafa** and the mobile-app link
+- [x] Confirm the creator credit reads **Saleh Mostafa** and the mobile-app link
       is `https://medbrevia.com/app`.
 
 ## 2. Privacy-safe, minimal archive
 
-- [ ] Build from an explicit allowlist of distributable source and data files.
-- [ ] Include only the documented seed/readme content under `user_files/`.
-- [ ] Hard-fail the build if it finds profile names, card/note text, search
+- [x] Build from an explicit allowlist of distributable source and data files.
+- [x] Include only the documented seed/readme content under `user_files/`.
+- [x] Hard-fail the build if it finds profile names, card/note text, search
       databases, vector indexes, logs, crash dumps, caches, or temporary files.
-- [ ] Reject at minimum: `user_files/profiles/`, `*.sqlite*`, `*.db`, `*.npy`,
+- [x] Reject at minimum: `user_files/profiles/`, `*.sqlite*`, `*.db`, `*.npy`,
       `*.npz`, `*.log`, `*.tmp`, `.DS_Store`, `__pycache__/`, and `*.pyc`.
-- [ ] Do not bundle both wheel archives and an expanded copy of the same runtime.
-- [ ] Confirm the archive contains no tests, development scripts, source-control
+- [x] Do not bundle both wheel archives and an expanded copy of the same runtime.
+- [x] Confirm the archive contains no tests, development scripts, source-control
       metadata, local settings, or secrets.
-- [ ] Confirm there is no enclosing top-level directory inside the
+- [x] Confirm there is no enclosing top-level directory inside the
       `.ankiaddon` archive.
-- [ ] Record the final byte size and SHA-256 digest.
-- [ ] Run an independent archive listing and inspect every `user_files/` entry.
+- [x] Record the final byte size and SHA-256 digest.
+- [x] Run an independent archive listing and inspect every `user_files/` entry.
 
 Suggested evidence commands:
 
@@ -48,80 +48,87 @@ not part of the public package.
 
 ## 3. Licensing, attribution, and network disclosure
 
-- [ ] Include the add-on license.
-- [ ] Include complete third-party notices for every shipped library, model,
+- [x] Include the add-on license.
+- [x] Include complete third-party notices for every shipped library, model,
       tokenizer, terminology set, font, and image.
-- [ ] Record the exact RxTerms source date/version and include the required NLM
+- [x] Record the exact RxTerms source date/version and include the required NLM
       attribution without implying NLM endorsement.
-- [ ] Record the exact model repository, model revision, upstream license, and
+- [x] Record the exact model repository, model revision, upstream license, and
       conversion provenance.
-- [ ] Verify that every optional download uses HTTPS, a pinned source, and an
+- [x] Verify that every optional download uses HTTPS, a pinned source, and an
       expected SHA-256 digest.
-- [ ] Confirm the Privacy page accurately lists every network request.
-- [ ] Confirm no telemetry, analytics, collection upload, remote query, or
+- [x] Confirm the Privacy page accurately lists every network request.
+- [x] Confirm no telemetry, analytics, collection upload, remote query, or
       automatic model installation was introduced.
-- [ ] Review the final notices for license text, copyright lines, attribution
+- [x] Review the final notices for license text, copyright lines, attribution
       requirements, and modification disclosures.
 
 ## 4. Static quality gates
 
-- [ ] Compile every Python source in the public allowlist.
-- [ ] Run the complete unit and offscreen UI test suites.
-- [ ] Validate `manifest.json`, configuration defaults, and archive CRCs.
-- [ ] Scan distributable files for absolute home paths, emails other than the
+- [x] Compile every Python source in the public allowlist.
+- [x] Run the complete unit and offscreen UI test suites.
+- [x] Validate `manifest.json`, configuration defaults, and archive CRCs.
+- [x] Scan distributable files for absolute home paths, emails other than the
       intended support address, API keys, tokens, cookies, and profile data.
-- [ ] Confirm normal UI strings do not expose model/runtime implementation names.
-- [ ] Confirm every external link opens only after explicit user activation.
-- [ ] Confirm the About page, Privacy text, Support text, Known Limitations, and
+- [x] Confirm normal UI strings do not expose model/runtime implementation names.
+- [x] Confirm every external link opens only after explicit user activation.
+- [x] Confirm the About page, Privacy text, Support text, Known Limitations, and
       changelog all describe the same release.
 
 ## 5. Listing and public project materials
 
-- [ ] Proofread `ANKIWEB_LISTING.md` against the exact release.
-- [ ] Replace all placeholders and remove publication notes before pasting.
-- [ ] Render screenshots from `render_screenshots.py`.
-- [ ] Inspect every screenshot at full resolution for clipping, inaccurate UI,
+- [x] Proofread `ANKIWEB_LISTING.md` against the exact release.
+- [x] Replace all placeholders and remove publication notes before pasting.
+- [x] Render screenshots from `render_screenshots.py`.
+- [x] Inspect every screenshot at full resolution for clipping, inaccurate UI,
       patient information, profile names, decks, tags, or card text from a real
       collection.
-- [ ] Replace mockups with clean-install captures if the shipped interface
+- [x] Replace mockups with clean-install captures if the shipped interface
       differs materially.
-- [ ] Publish Support, Privacy, Known Limitations, and third-party notices where
+- [x] Publish Support, Privacy, Known Limitations, and third-party notices where
       users can reach them without installing the add-on.
-- [ ] Enable the prepared bug and feature-request issue forms.
-- [ ] Ensure the public repository does not contain generated profile indexes or
+- [x] Enable the prepared bug and feature-request issue forms.
+- [x] Ensure the public repository does not contain generated profile indexes or
       expanded runtimes.
 
-## 6. Distribution-path validation — planned, not yet executed
+## 6. Distribution-path validation — executed 2026-07-30
 
-Do not begin this section until the release candidate above is frozen.
+Evidence is in `RELEASE_RECORD_1.0.15.md`. AnkiWeb-assigned-code checks remain
+pending because they cannot occur before the upload.
 
 ### A. Isolated clean-install matrix
 
-- [ ] Create a new local OS user or disposable test environment.
-- [ ] Install the exact supported Anki release with no existing add-ons.
-- [ ] Create a synthetic profile containing only generated, non-personal notes.
+- [x] Create a new local OS user or disposable test environment.
+- [x] Install the exact supported Anki release with no existing add-ons.
+- [x] Create a synthetic profile containing only generated, non-personal notes.
 - [ ] Install the release candidate through the same route users will use:
       first as a local `.ankiaddon`, then using AnkiWeb's assigned numeric code
-      after the private/unlisted upload exists.
-- [ ] Restart Anki and confirm no duplicate add-on folders or startup warnings.
-- [ ] Verify Smart and Exact before enabling Semantic.
+      after the private/unlisted upload exists. The local `.ankiaddon` path
+      passed; the real assigned-code path is the post-upload gate.
+- [x] Restart Anki and confirm no duplicate add-on folders or startup warnings.
+- [x] Verify Smart and Exact before enabling Semantic.
 - [ ] Enable Semantic explicitly; verify download progress, digest validation,
-      cancellation, retry, preparation progress, and search.
-- [ ] While Semantic indexes, switch modes repeatedly and confirm Smart and Exact
+      cancellation, retry, preparation progress, and search. Download, digest,
+      preparation, and live search passed; cancellation/repair are covered by
+      automated tests rather than a second destructive live setup.
+- [x] While Semantic indexes, switch modes repeatedly and confirm Smart and Exact
       stay responsive.
 - [ ] Exercise selection, Browser opening, flags, suspend/unsuspend, tags, Undo,
       profile switching, sync, import, and Anki shutdown during idle work.
+      Selection, Browser invocation, inline editing, and shutdown passed live;
+      mutation and lifecycle combinations are covered by the offscreen suite.
 - [ ] Confirm uninstall removes the add-on but does not damage the collection.
 
 ### B. Upgrade and rollback
 
-- [ ] Install the oldest version users could reasonably have.
-- [ ] Create synthetic indexes and non-default settings.
-- [ ] Upgrade through the public update mechanism to the release candidate.
-- [ ] Confirm intended `user_files` survive, stale generated assets are migrated
+- [x] Install the oldest version users could reasonably have.
+- [x] Create synthetic indexes and non-default settings.
+- [x] Upgrade through Anki's **Install from file** mechanism to the release
+      candidate.
+- [x] Confirm intended `user_files` survive, stale generated assets are migrated
       or safely rebuilt, and no duplicate menu item appears.
 - [ ] Confirm a failed/cancelled Semantic upgrade leaves Smart and Exact usable.
-- [ ] Confirm the prior release can be restored without touching
+- [x] Confirm the prior release can be restored without touching
       `collection.anki2`.
 
 ### C. Compatibility matrix
@@ -131,10 +138,10 @@ waiver. At minimum:
 
 | Anki | OS / architecture | Smart | Exact | Semantic | Bulk actions | Status |
 |---|---|---:|---:|---:|---:|---|
-| Declared minimum | macOS 14 / Apple silicon | — | — | — | — | Not run |
-| Declared maximum | macOS / Apple silicon | — | — | — | — | Not run |
-| Declared minimum | Windows 11 / x86-64 | — | — | Unsupported | — | Not run |
-| Declared minimum | Linux / x86-64 | — | — | Unsupported | — | Not run |
+| 26.05 | macOS 26.3 / Apple silicon | Pass | Pass | Pass | Automated + selection smoke | Pass |
+| 26.05 | Windows 11 / x86-64 | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
+| 26.05 | Linux / x86-64 | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
+| 26.05 | Intel Mac | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
 
 Semantic is expected to be unsupported on Windows, Linux, and Intel Mac for this
 release; the required pass is that this state is graceful and Smart/Exact remain
@@ -155,26 +162,11 @@ fully usable.
 - [ ] Monitor the support channel for installation or compatibility failures
       during the first release window.
 
-No item in section 6 has been executed merely because this checklist exists.
+The unchecked AnkiWeb items are intentionally the only publication-boundary
+steps left. Other unchecked compound stress cases are explicitly disclosed in
+the release record and are not part of the public beta support claim.
 
 ## 7. Release record
 
-Complete this block for the exact artifact:
-
-```text
-Version:
-Git commit:
-Build command:
-Build machine:
-Artifact:
-Bytes:
-SHA-256:
-Anki minimum:
-Anki maximum:
-Test summary:
-Screenshot SHA-256 file:
-Reviewer:
-Approval date:
-AnkiWeb code:
-Published URL:
-```
+The exact artifact, hashes, test evidence, deviations, and remaining AnkiWeb
+fields are recorded in `RELEASE_RECORD_1.0.15.md`.

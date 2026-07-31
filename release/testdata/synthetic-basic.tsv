@@ -1,0 +1,11 @@
+#separator:tab
+#html:false
+#notetype:Basic
+#deck:Smart Search Release QA
+#columns:Front	Back	Tags
+Wellbutrin adverse effect?	Lowers seizure threshold	qa::drug
+Cardiac systolic failure therapy?	ACE inhibitor and an evidence-based beta blocker	qa::cardio
+Bilateral DIP pain with nail pitting	Psoriatic arthritis	qa::rheum
+Painful first MTP monoarthritis	Gout	qa::rheum
+Episodic headache with unilateral pulsatile pain	Migraine	qa::neuro
+Creatinine-based eGFR estimates what?	Glomerular filtration from serum creatinine, age, and sex	qa::renal
