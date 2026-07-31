@@ -1,4 +1,12 @@
-# AnkiWeb listing draft
+# AnkiWeb listing record — v1.0.15
+
+## Live listing
+
+- **Status:** public
+- **Published:** 2026-07-31
+- **AnkiWeb code:** `677438639`
+- **Public URL:** https://ankiweb.net/shared/info/677438639
+- **Supported Anki version:** exactly 26.05
 
 ## Listing fields
 
@@ -39,7 +47,10 @@ https://medbrevia.com/app
 Use the license declared in `LICENSE.txt`. The add-on also contains third-party
 components and terminology covered by `THIRD_PARTY_NOTICES.md` and `licenses/`.
 
-## Ready-to-paste description
+## Canonical listing description
+
+Install from AnkiWeb with code **677438639**:
+https://ankiweb.net/shared/info/677438639
 
 ### Find the card you meant
 
@@ -165,13 +176,27 @@ clean-profile captures of the frozen add-on. Screenshots 02–04 are determinist
 release compositions reviewed against that build; they are illustrative and
 contain no real collection data.
 
-## Publication notes
+## Publication record
+
+- v1.0.15 was published on 2026-07-31 as AnkiWeb item `677438639`.
+- AnkiWeb reports `min_point_version=260500`,
+  `max_point_version=-260500`, and `human_version=1.0.15`, corresponding to
+  support for exactly Anki 26.05.
+- Installation by the numeric code passed in a fresh disposable Anki base. See
+  `release/RELEASE_RECORD_1.0.15.md` for the installed-file comparison and
+  functional smoke-test evidence.
+- `release/ANKIWEB_DESCRIPTION_1.0.15.md` is the concise canonical description
+  source for this release.
+- Future releases should update existing AnkiWeb item `677438639` rather than
+  create a second listing.
+
+## Listing maintenance notes
 
 - Do not paste internal engine names, model identifiers, filesystem paths,
   profile names, or index implementation details into the listing.
 - Do not promise support for an Anki version or operating system until it has
   passed the compatibility matrix in `RELEASE_CHECKLIST.md`.
 - Update the declared version, package size, Semantic setup size, and supported
-  Anki range immediately before publication.
+  Anki range before each future publication.
 - If AnkiWeb strips or changes Markdown formatting, preserve the headings and
   paragraph order rather than adding decorative HTML.

@@ -3,7 +3,7 @@
 ## Frozen artifact
 
 - Channel: public beta
-- Git ref: `v1.0.15` (the tag must point at the commit containing this record)
+- Git ref for the frozen code and artifact: `v1.0.15`
 - Build command: `python scripts/build_addon.py`
 - Build host: macOS 26.3 (25D125), Apple silicon (`arm64`)
 - Artifact: `dist/Smart_Search_Medical_1.0.15.ankiaddon`
@@ -93,8 +93,23 @@ used a disposable base under `/private/tmp` and synthetic notes.
 - Anki restarted with exactly one Smart entry; Smart/Exact initialized with all
   five notes.
 - Collection digest and both index integrity checks remained unchanged.
-- A real assigned-code install must still be repeated after AnkiWeb creates the
-  public item.
+
+### Real AnkiWeb numeric-code install
+
+- The add-on was installed from AnkiWeb by code `677438639` in a fresh
+  disposable Anki base; Anki created the installed folder `677438639`.
+- The installed immutable files were diff-identical to
+  `dist/Smart_Search_Medical_1.0.15.ankiaddon`. Anki-managed `meta.json` and
+  `user_files/` were excluded from the comparison.
+- The installed add-on registered exactly one toolbar entry, and **Command-K**
+  opened Smart Search.
+- Smart search corrected `buproprion` to `bupropion` and expanded its concise
+  aliases. Exact search accepted uppercase `BUPROPION`.
+- The inline preview rendered both the card front and answer.
+- Semantic Search remained opt-in, and no model was downloaded during this
+  installation or smoke test.
+- Both the text and Semantic SQLite databases returned `ok` from
+  `PRAGMA quick_check`.
 
 ## Qt accessibility control finding
 
@@ -125,9 +140,17 @@ Anki rewrote only `prefs21.db` during that open/close cycle (same file size and
 inode, different hash). This deviation is disclosed rather than represented as
 a byte-for-byte normal-profile pass.
 
-## Publication boundary
+## AnkiWeb publication
 
-Completed before AnkiWeb:
+- Status: public
+- Publication date: 2026-07-31
+- AnkiWeb code: `677438639`
+- Public URL: https://ankiweb.net/shared/info/677438639
+- Supported Anki version: exactly 26.05
+- Server metadata: `min_point_version=260500`,
+  `max_point_version=-260500`, `human_version=1.0.15`
+
+Completed for this release:
 
 - frozen deterministic archive and checksum
 - public README, privacy, support, security, limitations, attribution, and
@@ -136,16 +159,11 @@ Completed before AnkiWeb:
 - issue forms and support URL
 - publication screenshots and checksums
 - clean-install, upgrade, rollback, Semantic, and numeric-folder QA
-
-Intentionally not completed in this run:
-
-- AnkiWeb account login
-- AnkiWeb upload/submission
-- assignment of the real numeric add-on code
-- post-upload install by that real code
-- rendered public-listing review
-
-Those are the final handoff steps in `release/ANKIWEB_UPLOAD_HANDOFF.md`.
+- AnkiWeb publication and assignment of code `677438639`
+- post-publication install by the real numeric code
+- immutable-file comparison against the frozen artifact
+- installed Smart, Exact, preview, toolbar, shortcut, opt-in Semantic, and
+  SQLite integrity smoke checks
 
 Reviewer: Codex release QA
-Validation date: 2026-07-30
+Validation date: 2026-07-31

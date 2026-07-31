@@ -24,13 +24,20 @@ This is the first public beta of Smart Search for Anki — Medical.
 
 ## Installation
 
-1. Download `Smart_Search_Medical_1.0.15.ankiaddon`.
-2. In Anki Desktop, choose **Tools → Add-ons → Install from file…**.
-3. Select the downloaded file and restart Anki.
-4. Press **Command/Ctrl-K**.
+### AnkiWeb
+
+1. In Anki Desktop, choose **Tools → Add-ons → Get Add-ons…**.
+2. Enter code **`677438639`**.
+3. Restart Anki, then press **Command/Ctrl-K**.
+
+[View the public AnkiWeb listing](https://ankiweb.net/shared/info/677438639).
+
+The downloadable `.ankiaddon` below is the same frozen v1.0.15 build for manual
+installation. A fresh-profile install from AnkiWeb was verified against this
+archive byte for byte (excluding Anki-managed metadata and local indexes).
 
 If you previously installed a manually shared development build, remove or
-disable it before installing the future AnkiWeb version. Do not load the named
+disable it before installing the AnkiWeb version. Do not load the named
 development copy and AnkiWeb's numeric copy simultaneously.
 
 ## Privacy

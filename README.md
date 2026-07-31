@@ -5,9 +5,10 @@ semantic search, and safe card actions.
 
 Created by **Saleh Mostafa** with [MedBrevia](https://medbrevia.com/app).
 
-> **Release status:** v1.0.15 public beta release candidate. The reviewed
-> `.ankiaddon` is distributed through GitHub Releases; the AnkiWeb install code
-> will be added after AnkiWeb assigns the public item.
+> **Release status:** v1.0.15 is live as a public beta on
+> [AnkiWeb](https://ankiweb.net/shared/info/677438639). Install it with add-on
+> code **677438639**. The frozen release archive is also available through
+> GitHub Releases.
 
 ![Smart Search showing typo recovery and ranked synthetic medical results](release/assets/screenshots/01-smart-search.png)
 
@@ -103,21 +104,29 @@ boundaries around indexes, sync, ranking, and collection operations.
 
 ## Installation
 
-### GitHub public beta
+### AnkiWeb public beta
 
-1. Download the signed-off `.ankiaddon` archive from
-   [GitHub Releases](https://github.com/salehsquared/smart-search-for-anki-medical/releases).
-2. In Anki Desktop, choose **Tools → Add-ons → Install from file…**.
-3. Select the archive and restart Anki.
-4. Press **Command/Ctrl-K**.
+1. In Anki Desktop 26.05, choose **Tools → Add-ons → Get Add-ons…**.
+2. Enter code **677438639** and complete the installation.
+3. Restart Anki, then press **Command/Ctrl-K**.
 
-The AnkiWeb numeric code will be added here after the public item is created
-and its assigned-code install has passed the final smoke test.
+The live listing is <https://ankiweb.net/shared/info/677438639>. Installation by
+that numeric code was verified in a fresh disposable Anki base: the installed
+folder was `677438639`, Smart and Exact search worked, the inline preview
+rendered both front and answer, and Semantic remained opt-in without downloading
+a model.
+
+### Install from the frozen archive
+
+The exact signed-off `.ankiaddon` remains available from
+[GitHub Releases](https://github.com/salehsquared/smart-search-for-anki-medical/releases).
+In Anki, choose **Tools → Add-ons → Install from file…**, select the archive,
+and restart.
 
 If you previously installed a manually shared development build, remove or
-disable that copy before installing the future AnkiWeb version. Loading both
-the named development folder and AnkiWeb's numeric folder would register the
-add-on twice. Local indexes are disposable and may be rebuilt safely.
+disable that copy before installing the AnkiWeb version. Loading both the named
+development folder and AnkiWeb's numeric folder would register the add-on
+twice. Local indexes are disposable and may be rebuilt safely.
 
 ### Development checkout
 
