@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-__version__ = "1.0.17"
+__version__ = "1.0.18"
 
 _controller: Any | None = None
 _menu_action: Any | None = None
@@ -81,6 +81,7 @@ def _install() -> None:
     from aqt import gui_hooks, mw
     from aqt.qt import QAction, QKeySequence, Qt
 
+    from .backend.compat import optional_hook
     from .controller import create_controller
 
     bundle_root = Path(__file__).resolve().parent
@@ -105,7 +106,9 @@ def _install() -> None:
     mw.form.menuTools.addAction(action)
     _menu_action = action
 
-    gui_hooks.top_toolbar_did_init_links.append(_add_top_toolbar_link)
+    toolbar_hook = optional_hook(gui_hooks, "top_toolbar_did_init_links")
+    if toolbar_hook is not None:
+        toolbar_hook.append(_add_top_toolbar_link)
 
 
 _install()

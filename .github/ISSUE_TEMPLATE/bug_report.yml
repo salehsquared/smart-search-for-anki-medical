@@ -22,7 +22,7 @@ body:
     id: anki_version
     attributes:
       label: Anki version
-      placeholder: "26.05"
+      placeholder: "26.08"
     validations:
       required: true
 

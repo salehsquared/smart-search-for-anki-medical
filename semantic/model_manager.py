@@ -29,9 +29,13 @@ from .manifest import (
 
 
 ProgressCallback = Callable[[str, int, int], None]
+MACOS_ARM64_PY39_RUNTIME_TAG = "darwin-arm64-py39"
 MACOS_ARM64_RUNTIME_TAG = "darwin-arm64-py313"
+MACOS_ARM64_RUNTIME_TAGS = frozenset(
+    (MACOS_ARM64_PY39_RUNTIME_TAG, MACOS_ARM64_RUNTIME_TAG)
+)
 MINIMUM_SEMANTIC_MACOS_MAJOR = 14
-DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.17"
+DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.18"
 
 
 class ModelInstallError(RuntimeError):
@@ -57,7 +61,7 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
 def _runtime_platform_supported(tag: str) -> bool:
     """Apply OS requirements that cannot be expressed by the runtime tag."""
 
-    if tag != MACOS_ARM64_RUNTIME_TAG:
+    if tag not in MACOS_ARM64_RUNTIME_TAGS:
         return True
     version = platform.mac_ver()[0]
     try:

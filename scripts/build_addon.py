@@ -44,9 +44,15 @@ PUBLIC_RESOURCE_FILES = {
 PUBLIC_LICENSE_FILES = {
     "licenses/Apache-2.0.txt",
     "licenses/bge-small-en-v1.5-MIT.txt",
+    "licenses/flatbuffers-24.3.25-LICENSE.txt",
+    "licenses/numpy-2.0.2-LICENSE.txt",
     "licenses/numpy-LICENSE.txt",
+    "licenses/onnxruntime-1.19.2-LICENSE.txt",
+    "licenses/onnxruntime-1.19.2-ThirdPartyNotices.txt",
     "licenses/onnxruntime-LICENSE.txt",
     "licenses/onnxruntime-ThirdPartyNotices.txt",
+    "licenses/tokenizers-0.20.3-LICENSE.txt",
+    "licenses/tokenizers-0.20.3-NOTICES.txt",
     "licenses/tokenizers-0.23.1-NOTICES.txt",
     "licenses/tokenizers-0.23.1-transitive-inventory.md",
 }
@@ -54,6 +60,22 @@ PUBLIC_USER_FILES = {
     "user_files/README.txt",
 }
 BUNDLED_WHEEL_SHA256 = {
+    (
+        "vendor_wheels/darwin-arm64-py39/"
+        "flatbuffers-24.3.25-py2.py3-none-any.whl"
+    ): "8dbdec58f935f3765e4f7f3cf635ac3a77f83568138d6a2311f524ec96364812",
+    (
+        "vendor_wheels/darwin-arm64-py39/"
+        "numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl"
+    ): "2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b",
+    (
+        "vendor_wheels/darwin-arm64-py39/"
+        "onnxruntime-1.19.2-cp39-cp39-macosx_11_0_universal2.whl"
+    ): "006c8d326835c017a9e9f74c9c77ebb570a71174a1e89fe078b29a557d9c3848",
+    (
+        "vendor_wheels/darwin-arm64-py39/"
+        "tokenizers-0.20.3-cp39-cp39-macosx_11_0_arm64.whl"
+    ): "f4cb0c614b0135e781de96c2af87e73da0389ac1458e2a97562ed26e29490d8d",
     (
         "vendor_wheels/darwin-arm64-py313/"
         "flatbuffers-25.12.19-py2.py3-none-any.whl"
@@ -71,9 +93,16 @@ BUNDLED_WHEEL_SHA256 = {
         "tokenizers-0.23.1-cp310-abi3-macosx_11_0_arm64.whl"
     ): "e0948bbb1ac1d7cdfc9fb6d62c596e3b7550036ad60ecd654a66ad273326324e",
 }
-TOKENIZERS_NOTICE_BUNDLE_SHA256 = (
-    "514952837bda657205f2d31ed08dc7b4796752c6eea9abdacb9e5908dfde1116"
-)
+TOKENIZERS_NOTICE_BUNDLE_SHA256 = {
+    "licenses/tokenizers-0.20.3-NOTICES.txt": (
+        "010a9a6b3c02d5a7cc2318d65452b7bd5f9d58316206e33cc1a2f39"
+        "cbb2f8ac5"
+    ),
+    "licenses/tokenizers-0.23.1-NOTICES.txt": (
+        "514952837bda657205f2d31ed08dc7b4796752c6eea9abdacb9e5908"
+        "dfde1116"
+    ),
+}
 CONTROLLED_DIRECTORY_FILES = (
     PUBLIC_RESOURCE_FILES
     | PUBLIC_LICENSE_FILES
@@ -322,18 +351,17 @@ def validate_bundled_payloads(root: Path) -> None:
         if not (root / relative_name).read_text(encoding="utf-8").strip():
             raise SystemExit(f"Required license/notice is empty: {relative_name}")
 
-    # This is a generated, source-verified bundle for the exact 120-component
-    # SBOM embedded in the pinned tokenizers wheel.  Pinning the finished
-    # bundle makes any regenerated or hand-edited legal payload require an
+    # Both tokenizers builds have generated, source-verified legal bundles.
+    # Pinning the finished text makes any regeneration or hand edit require an
     # explicit release review.
-    tokenizers_notices = root / "licenses/tokenizers-0.23.1-NOTICES.txt"
-    actual_notice_digest = _sha256_file(tokenizers_notices)
-    if actual_notice_digest != TOKENIZERS_NOTICE_BUNDLE_SHA256:
-        raise SystemExit(
-            "Checksum mismatch for the reviewed tokenizers notice bundle: "
-            f"expected {TOKENIZERS_NOTICE_BUNDLE_SHA256}, "
-            f"got {actual_notice_digest}"
-        )
+    for relative_name, expected_digest in TOKENIZERS_NOTICE_BUNDLE_SHA256.items():
+        actual_notice_digest = _sha256_file(root / relative_name)
+        if actual_notice_digest != expected_digest:
+            raise SystemExit(
+                "Checksum mismatch for the reviewed tokenizers notice bundle "
+                f"{relative_name}: expected {expected_digest}, "
+                f"got {actual_notice_digest}"
+            )
 
 
 def validate_sources(root: Path, files: list[Path]) -> None:

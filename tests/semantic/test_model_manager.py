@@ -10,6 +10,7 @@ import zipfile
 
 from semantic.manifest import RuntimeWheel
 from semantic.model_manager import (
+    MACOS_ARM64_PY39_RUNTIME_TAG,
     MACOS_ARM64_RUNTIME_TAG,
     ModelManager,
     sha256_file,
@@ -37,6 +38,34 @@ class ModelManagerTests(unittest.TestCase):
                 patch(
                     "semantic.model_manager.runtime_tag",
                     return_value=MACOS_ARM64_RUNTIME_TAG,
+                ),
+                patch(
+                    "semantic.model_manager.platform.mac_ver",
+                    return_value=("14.0", ("", "", ""), ""),
+                ),
+            ):
+                self.assertTrue(manager.runtime_supported())
+
+    def test_python39_runtime_obeys_the_same_macos_floor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager = ModelManager(root / "data", root / "bundle")
+            with (
+                patch(
+                    "semantic.model_manager.runtime_tag",
+                    return_value=MACOS_ARM64_PY39_RUNTIME_TAG,
+                ),
+                patch(
+                    "semantic.model_manager.platform.mac_ver",
+                    return_value=("13.7.6", ("", "", ""), ""),
+                ),
+            ):
+                self.assertFalse(manager.runtime_supported())
+
+            with (
+                patch(
+                    "semantic.model_manager.runtime_tag",
+                    return_value=MACOS_ARM64_PY39_RUNTIME_TAG,
                 ),
                 patch(
                     "semantic.model_manager.platform.mac_ver",

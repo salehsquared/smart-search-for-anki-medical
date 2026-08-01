@@ -4,9 +4,10 @@
 
 - Smart Search runs in Anki Desktop only. AnkiMobile and AnkiDroid do not load
   desktop add-ons.
-- v1.0.15 is intentionally limited to Anki Desktop 26.05.
-- The release integration test was performed on macOS 26.3 on Apple silicon.
-  Windows, Linux, and Intel Mac integration are not part of the v1.0.15 support
+- v1.0.18 supports Anki Desktop 24.11 through 26.08, including the 25.02,
+  25.07, 25.09, 26.05, and 26.08 release families.
+- The supported-version matrix was exercised on macOS with Apple silicon.
+  Windows, Linux, and Intel Mac integration are not part of the v1.0.18 support
   claim.
 - Semantic Search currently supports **macOS 14 or later on Apple-silicon Macs
   only**.

@@ -1,4 +1,4 @@
-"""Keyboard-first smart-search UI for an Anki 26.5 add-on.
+"""Keyboard-first smart-search UI for supported Anki Desktop releases.
 
 Layout:
 
@@ -15,7 +15,7 @@ outside Anki; import the submodules you need directly.
 
 from __future__ import annotations
 
-__version__ = "1.0.17"
+__version__ = "1.0.18"
 
 __all__ = [
     "SearchDialog",

@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from fnmatch import fnmatchcase
 import re
 from collections.abc import Iterable
 
+from .compat import dataclass
 from .models import ParsedQuery, QueryTerm
 from .text import normalize_text
 

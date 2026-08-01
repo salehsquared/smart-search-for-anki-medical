@@ -11,8 +11,13 @@ from __future__ import annotations
 
 import enum
 import re
-from dataclasses import dataclass, field
+from dataclasses import field
 from typing import Callable, Optional, Protocol, Sequence, runtime_checkable
+
+try:  # installed add-on package
+    from ..backend.compat import dataclass
+except ImportError:  # plain-Python tests import ``ui`` as a top-level package
+    from backend.compat import dataclass
 
 __all__ = [
     "SearchMode",

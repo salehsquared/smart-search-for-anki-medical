@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import shutil
@@ -130,7 +131,7 @@ class BuildAddonTests(unittest.TestCase):
             ui_package = root / "ui" / "__init__.py"
             ui_package.write_text(
                 ui_package.read_text(encoding="utf-8").replace(
-                    '__version__ = "1.0.17"',
+                    '__version__ = "1.0.18"',
                     '__version__ = "9.9.9"',
                 ),
                 encoding="utf-8",
@@ -150,8 +151,25 @@ class BuildAddonTests(unittest.TestCase):
 
             self.assertEqual(
                 build_addon.default_output_path(root),
-                root / "dist" / "Smart_Search_Medical_1.0.17.ankiaddon",
+                root / "dist" / "Smart_Search_Medical_1.0.18.ankiaddon",
             )
+
+    def test_manifest_covers_the_reviewed_anki_release_matrix(self) -> None:
+        manifest = json.loads((PROJECT_ROOT / "manifest.json").read_text())
+
+        self.assertEqual(manifest["min_point_version"], 241100)
+        self.assertEqual(manifest["max_point_version"], 260800)
+        for point_version in (
+            241100,
+            250207,
+            250705,
+            250904,
+            250905,
+            260500,
+            260800,
+        ):
+            self.assertLessEqual(manifest["min_point_version"], point_version)
+            self.assertGreaterEqual(manifest["max_point_version"], point_version)
 
     def test_unapproved_controlled_payload_blocks_build(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -187,6 +205,20 @@ class BuildAddonTests(unittest.TestCase):
             root = Path(directory)
             self._copy_public_source(root)
             notice = root / "licenses" / "tokenizers-0.23.1-NOTICES.txt"
+            notice.write_text("incomplete notice bundle", encoding="utf-8")
+
+            files = build_addon.included_files(root)
+            with self.assertRaisesRegex(
+                SystemExit,
+                "Checksum mismatch for the reviewed tokenizers notice bundle",
+            ):
+                build_addon.validate_sources(root, files)
+
+    def test_tampered_python39_tokenizers_notices_block_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._copy_public_source(root)
+            notice = root / "licenses" / "tokenizers-0.20.3-NOTICES.txt"
             notice.write_text("incomplete notice bundle", encoding="utf-8")
 
             files = build_addon.included_files(root)

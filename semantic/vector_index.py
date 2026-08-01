@@ -328,7 +328,7 @@ class VectorIndex:
             )
             now = int(time.time())
             for row_index, (note_id, content_hash, slot) in enumerate(
-                zip(note_ids, content_hashes, assigned, strict=True)
+                zip(note_ids, content_hashes, assigned)
             ):
                 vector = matrix[row_index]
                 norm = float(np.linalg.norm(vector))

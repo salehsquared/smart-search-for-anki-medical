@@ -77,6 +77,25 @@ class RuntimeWheel:
     sha256: str
 
 
+DARWIN_ARM64_PY39 = (
+    RuntimeWheel(
+        filename="onnxruntime-1.19.2-cp39-cp39-macosx_11_0_universal2.whl",
+        sha256="006c8d326835c017a9e9f74c9c77ebb570a71174a1e89fe078b29a557d9c3848",
+    ),
+    RuntimeWheel(
+        filename="numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl",
+        sha256="2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b",
+    ),
+    RuntimeWheel(
+        filename="tokenizers-0.20.3-cp39-cp39-macosx_11_0_arm64.whl",
+        sha256="f4cb0c614b0135e781de96c2af87e73da0389ac1458e2a97562ed26e29490d8d",
+    ),
+    RuntimeWheel(
+        filename="flatbuffers-24.3.25-py2.py3-none-any.whl",
+        sha256="8dbdec58f935f3765e4f7f3cf635ac3a77f83568138d6a2311f524ec96364812",
+    ),
+)
+
 DARWIN_ARM64_PY313 = (
     RuntimeWheel(
         filename="onnxruntime-1.28.0-cp313-cp313-macosx_14_0_arm64.whl",
@@ -97,6 +116,7 @@ DARWIN_ARM64_PY313 = (
 )
 
 RUNTIME_WHEELS = {
+    "darwin-arm64-py39": DARWIN_ARM64_PY39,
     "darwin-arm64-py313": DARWIN_ARM64_PY313,
 }
 

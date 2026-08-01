@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.18] — 2026-08-01
+
+### Added
+
+- Added a tested compatibility layer for Anki Desktop 24.11 through 26.08,
+  covering the 25.02, 25.07, 25.09, 26.05, and 26.08 release families.
+- Added a pinned Python 3.9 Apple-silicon runtime so Semantic Search remains
+  available on Anki 24.11 and 25.02 rather than becoming a reduced-feature
+  fallback.
+
+### Changed
+
+- Optional Anki hooks and UI integrations are feature-detected so the core
+  search path can remain available if a nonessential host API is absent.
+- Python 3.10-only dataclass, integer, and iteration conveniences now use
+  compatible fallbacks on Anki's Python 3.9 releases.
+- The release matrix now covers Python 3.9 and 3.13, the Qt 6.6, 6.9, and 6.11
+  generations, and every supported Anki release family.
+
 ## [1.0.17] — 2026-08-01
 
 ### Added

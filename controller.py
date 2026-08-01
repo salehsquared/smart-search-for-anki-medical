@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import field, replace
 import hashlib
 import json
 import os
@@ -32,6 +32,8 @@ import sys
 import threading
 import time
 from typing import Any
+
+from .backend.compat import dataclass, optional_hook
 
 from .anki_actions import (
     ActionKind,
@@ -2531,25 +2533,41 @@ class SmartSearchAddonController:
         from aqt.qt import QTimer
 
         self._started = True
-        self._append_hook(gui_hooks.profile_did_open, self._on_profile_open)
-        self._append_hook(gui_hooks.profile_will_close, self._on_profile_will_close)
-        self._append_hook(gui_hooks.operation_did_execute, self._on_operation)
-        self._append_hook(
-            gui_hooks.add_cards_did_add_note,
+        self._append_named_hook(gui_hooks, "profile_did_open", self._on_profile_open)
+        self._append_named_hook(
+            gui_hooks,
+            "profile_will_close",
+            self._on_profile_will_close,
+        )
+        self._append_named_hook(
+            gui_hooks,
+            "operation_did_execute",
+            self._on_operation,
+        )
+        self._append_named_hook(
+            gui_hooks,
+            "add_cards_did_add_note",
             self._capture_added_note,
         )
-        self._append_hook(gui_hooks.sync_did_finish, self._on_sync_finished)
-        self._append_hook(
-            gui_hooks.collection_will_temporarily_close,
+        self._append_named_hook(gui_hooks, "sync_did_finish", self._on_sync_finished)
+        self._append_named_hook(
+            gui_hooks,
+            "collection_will_temporarily_close",
             self._on_collection_will_temporarily_close,
         )
-        self._append_hook(
-            gui_hooks.collection_did_temporarily_close,
+        self._append_named_hook(
+            gui_hooks,
+            "collection_did_temporarily_close",
             self._on_collection_reopened,
         )
-        self._append_hook(anki_hooks.note_will_flush, self._capture_note_flush)
-        self._append_hook(
-            anki_hooks.notes_will_be_deleted,
+        self._append_named_hook(
+            anki_hooks,
+            "note_will_flush",
+            self._capture_note_flush,
+        )
+        self._append_named_hook(
+            anki_hooks,
+            "notes_will_be_deleted",
             self._capture_deleted_notes,
         )
 
@@ -3838,6 +3856,18 @@ class SmartSearchAddonController:
     def _append_hook(self, hook: Any, callback: Callable[..., Any]) -> None:
         hook.append(callback)
         self._hooks.append((hook, callback))
+
+    def _append_named_hook(
+        self,
+        owner: Any,
+        name: str,
+        callback: Callable[..., Any],
+    ) -> bool:
+        hook = optional_hook(owner, name)
+        if hook is None:
+            return False
+        self._append_hook(hook, callback)
+        return True
 
     def _show_error(self, message: str) -> None:
         try:

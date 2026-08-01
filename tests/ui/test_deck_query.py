@@ -203,6 +203,18 @@ class DeckQueryTests(unittest.TestCase):
             '"animal front:a dog" deck:"Personal"',
         )
 
+    def test_quoted_field_name_keeps_managed_deck_filter_editable(self) -> None:
+        query = '"Back Extra":bupropion deck:"AnKing"'
+        analysis = analyze_deck_query(query)
+
+        self.assertIs(analysis.kind, DeckScopeKind.SELECTED)
+        self.assertEqual(analysis.names, ("AnKing",))
+        self.assertEqual(analysis.remaining_query, '"Back Extra":bupropion')
+        self.assertEqual(
+            apply_deck_selection(query, ("Personal",)),
+            '"Back Extra":bupropion deck:"Personal"',
+        )
+
     def test_quoted_non_deck_field_values_do_not_disable_picker(self) -> None:
         for query in (
             'Front:"deck:A"',

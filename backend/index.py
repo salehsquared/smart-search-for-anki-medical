@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from collections import Counter
 from contextlib import contextmanager
-from dataclasses import dataclass
 import hashlib
 import json
 import os
@@ -20,6 +19,7 @@ import zlib
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
+from .compat import dataclass
 from .medical_vocab import load_alias_resource
 from .models import IndexStats, IndexedNote
 from .text import (

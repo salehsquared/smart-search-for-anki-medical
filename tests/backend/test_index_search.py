@@ -462,9 +462,10 @@ class SemanticFusionTests(unittest.TestCase):
                 if cancel_check:
                     cancel_check()
                 scores = [0.90, 0.86, *([0.50] * 18)]
+                assert len(notes) == len(scores)
                 return [
                     SemanticHit(note.note_id, score)
-                    for note, score in zip(notes, scores, strict=True)
+                    for note, score in zip(notes, scores)
                 ]
 
         with tempfile.TemporaryDirectory() as directory:
@@ -513,9 +514,10 @@ class SemanticFusionTests(unittest.TestCase):
                 if cancel_check:
                     cancel_check()
                 scores = [0.90, 0.86, *([0.50] * 18)]
+                assert len(notes) == len(scores)
                 return [
                     SemanticHit(note.note_id, score)
-                    for note, score in zip(notes, scores, strict=True)
+                    for note, score in zip(notes, scores)
                 ]
 
         with tempfile.TemporaryDirectory() as directory:
@@ -693,7 +695,11 @@ class SchemaUpgradeTests(unittest.TestCase):
 
             index = SmartSearchIndex(path)
             try:
-                backups = list(path.parent.glob(path.name + ".schema-backup-*"))
+                backups = [
+                    candidate
+                    for candidate in path.parent.glob(path.name + ".schema-backup-*")
+                    if not candidate.name.endswith(("-wal", "-shm"))
+                ]
                 self.assertEqual(len(backups), 1)
                 self.assertEqual(index.stats().note_count, 0)
                 self.assertEqual(

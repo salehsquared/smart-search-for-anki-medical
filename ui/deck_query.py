@@ -10,10 +10,14 @@ custom syntax so the UI cannot silently reinterpret a hand-written query.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from enum import Enum
 import re
 from collections.abc import Iterable
+
+try:  # installed add-on package
+    from ..backend.compat import dataclass
+except ImportError:  # plain-Python tests import ``ui`` as a top-level package
+    from backend.compat import dataclass
 
 
 class DeckScopeKind(Enum):
@@ -537,7 +541,7 @@ def _has_quote_adjacency(query: str) -> bool:
         if (
             following
             and not _is_native_separator(following)
-            and following not in "()"
+            and following not in ":()"
         ):
             return True
     return False

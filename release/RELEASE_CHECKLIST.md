@@ -91,10 +91,11 @@ not part of the public package.
 - [x] Ensure the public repository does not contain generated profile indexes or
       expanded runtimes.
 
-## 6. Distribution-path validation — executed 2026-07-30
+## 6. Distribution-path validation — refreshed 2026-08-01
 
-Evidence is in `RELEASE_RECORD_1.0.15.md`. AnkiWeb-assigned-code checks remain
-pending because they cannot occur before the upload.
+Current compatibility evidence is in `RELEASE_RECORD_1.0.18.md`; the original
+public-listing evidence remains in `RELEASE_RECORD_1.0.15.md`. The v1.0.18
+AnkiWeb-code checks remain pending until that archive is uploaded.
 
 ### A. Isolated clean-install matrix
 
@@ -138,10 +139,16 @@ waiver. At minimum:
 
 | Anki | OS / architecture | Smart | Exact | Semantic | Bulk actions | Status |
 |---|---|---:|---:|---:|---:|---|
-| 26.05 | macOS 26.3 / Apple silicon | Pass | Pass | Pass | Automated + selection smoke | Pass |
-| 26.05 | Windows 11 / x86-64 | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
-| 26.05 | Linux / x86-64 | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
-| 26.05 | Intel Mac | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
+| 24.11 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
+| 25.02.7 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
+| 25.07.5 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
+| 25.09.4 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
+| 25.09.5 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
+| 26.05 | macOS / Apple silicon | Pass | Pass | Pass | Automated + selection smoke | Pass |
+| 26.08 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
+| 26.08 | Windows 11 / x86-64 | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
+| 26.08 | Linux / x86-64 | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
+| 26.08 | Intel Mac | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
 
 Semantic is expected to be unsupported on Windows, Linux, and Intel Mac for this
 release; the required pass is that this state is graceful and Smart/Exact remain
@@ -168,5 +175,6 @@ the release record and are not part of the public beta support claim.
 
 ## 7. Release record
 
-The exact artifact, hashes, test evidence, deviations, and remaining AnkiWeb
-fields are recorded in `RELEASE_RECORD_1.0.15.md`.
+The v1.0.18 artifact, hashes, compatibility evidence, and remaining AnkiWeb
+fields are recorded in `RELEASE_RECORD_1.0.18.md`. The original AnkiWeb
+publication remains documented in `RELEASE_RECORD_1.0.15.md`.

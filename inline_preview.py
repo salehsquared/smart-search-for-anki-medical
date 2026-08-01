@@ -1,8 +1,8 @@
 """Anki-hosted card renderer and native note editor for the inline pane.
 
-The surrounding pane is pure Qt (``ui.preview_pane``).  This adapter is kept
-behind the Anki boundary because reviewer/editor web APIs are version-specific;
-the manifest currently pins support to Anki 26.05.
+The surrounding pane is pure Qt (``ui.preview_pane``). This adapter remains
+behind the Anki boundary because reviewer/editor web APIs vary across supported
+Anki releases.
 """
 
 from __future__ import annotations

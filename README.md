@@ -5,7 +5,7 @@ semantic search, and safe card actions.
 
 Created by **Saleh Mostafa** with [MedBrevia](https://medbrevia.com/app).
 
-> **Release status:** v1.0.15 is live as a public beta on
+> **Distribution:** the public beta is available from
 > [AnkiWeb](https://ankiweb.net/shared/info/677438639). Install it with add-on
 > code **677438639**. The frozen release archive is also available through
 > GitHub Releases.
@@ -93,8 +93,10 @@ and [third-party notices](THIRD_PARTY_NOTICES.md). The intended hosted notice is
 
 - **Host:** Anki Desktop only. Desktop add-ons do not run inside AnkiMobile or
   AnkiDroid.
-- **Anki:** Current builds are intentionally limited to Anki Desktop **26.05**.
-- **Tested host:** macOS 26.3 on Apple silicon. Smart and Exact do not load the
+- **Anki:** Anki Desktop **24.11 through 26.08**, including the 25.02, 25.07,
+  25.09, 26.05, and 26.08 release families.
+- **Tested host:** The supported-version matrix is exercised on macOS with
+  Apple silicon. Smart and Exact do not load the
   optional platform-specific Semantic runtime, but Windows, Linux, and Intel
   Mac integration testing is not part of this release's support claim.
 - **Semantic:** macOS 14 or later on Apple-silicon Macs only for this release.
@@ -108,7 +110,7 @@ boundaries around indexes, sync, ranking, and collection operations.
 
 ### AnkiWeb public beta
 
-1. In Anki Desktop 26.05, choose **Tools → Add-ons → Get Add-ons…**.
+1. In a supported Anki Desktop release, choose **Tools → Add-ons → Get Add-ons…**.
 2. Enter code **677438639** and complete the installation.
 3. Restart Anki, then press **Command/Ctrl-K**.
 

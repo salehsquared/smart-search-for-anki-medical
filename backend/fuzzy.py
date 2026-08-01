@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from dataclasses import dataclass
 import math
 from collections.abc import Callable, Iterable, Mapping
 
+from .compat import dataclass, int_bit_count
 from .models import AliasExpansion, Correction
 from .text import normalize_text, tokenize
 
@@ -175,9 +175,9 @@ class Vocabulary:
                 # One substitution can add and remove one distinct character;
                 # insertion/deletion changes at most one. Modulo collisions
                 # cause only extra work, never false negatives.
-                if (
+                if int_bit_count(
                     query_mask ^ self._character_masks[candidate]
-                ).bit_count() <= maximum * 2:
+                ) <= maximum * 2:
                     candidates.append(candidate)
         suggestions: list[VocabularySuggestion] = []
         for index, candidate in enumerate(candidates, start=1):

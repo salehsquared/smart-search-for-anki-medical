@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from dataclasses import dataclass
 import math
 from statistics import median
 import time
 from collections.abc import Callable, Iterable, Sequence
 from typing import Protocol, runtime_checkable
 
+from .compat import dataclass
 from .fuzzy import Vocabulary
 from .index import FTSDocumentHit, IndexedDocument, SmartSearchIndex
 from .models import (

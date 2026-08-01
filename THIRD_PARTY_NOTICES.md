@@ -164,6 +164,86 @@ to every supplying component. The release bundle can be reproduced with:
 - Source: <https://github.com/google/flatbuffers/tree/v25.12.19>
 - License text: `licenses/Apache-2.0.txt`
 
+### Python 3.9 compatibility runtime
+
+The compatibility runtime uses older, separately pinned wheels for Anki builds
+that embed Python 3.9. They are not installed on newer Python runtimes.
+
+| Bundled wheel | SHA-256 |
+| --- | --- |
+| `onnxruntime-1.19.2-cp39-cp39-macosx_11_0_universal2.whl` | `006c8d326835c017a9e9f74c9c77ebb570a71174a1e89fe078b29a557d9c3848` |
+| `numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl` | `2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b` |
+| `tokenizers-0.20.3-cp39-cp39-macosx_11_0_arm64.whl` | `f4cb0c614b0135e781de96c2af87e73da0389ac1458e2a97562ed26e29490d8d` |
+| `flatbuffers-24.3.25-py2.py3-none-any.whl` | `8dbdec58f935f3765e4f7f3cf635ac3a77f83568138d6a2311f524ec96364812` |
+
+#### ONNX Runtime 1.19.2
+
+- Project: Microsoft ONNX Runtime
+- License: MIT
+- Source: <https://github.com/microsoft/onnxruntime/tree/v1.19.2>
+- License extracted from the exact wheel:
+  `licenses/onnxruntime-1.19.2-LICENSE.txt`
+- Required upstream component notices extracted from the exact wheel:
+  `licenses/onnxruntime-1.19.2-ThirdPartyNotices.txt`
+
+The complete third-party notice distributed inside this ONNX Runtime wheel is
+retained without localization or abridgment.
+
+#### NumPy 2.0.2
+
+- Project: NumPy
+- Project license: BSD-3-Clause
+- Source: <https://github.com/numpy/numpy/tree/v2.0.2>
+- NumPy license and the notices for software included in its exact binary
+  wheel: `licenses/numpy-2.0.2-LICENSE.txt`
+
+The retained wheel license includes the component-level terms supplied by
+NumPy for libraries incorporated into that binary distribution.
+
+#### Hugging Face tokenizers 0.20.3
+
+- Project: Hugging Face tokenizers
+- License: Apache-2.0
+- Source: <https://github.com/huggingface/tokenizers/tree/v0.20.3>
+- Version-matched PyPI source distribution:
+  <https://files.pythonhosted.org/packages/da/25/b1681c1c30ea3ea6e584ae3fffd552430b12faa599b558c4c4783f56d7ff/tokenizers-0.20.3.tar.gz>
+- Source distribution SHA-256:
+  `2278b34c5d0dd78e087e1ca7f9b1dcbf129d80211afa645f214bd6e051037539`
+- Upstream license from that source distribution:
+  `licenses/tokenizers-0.20.3-LICENSE.txt`
+
+This older wheel does not embed a software bill of materials or license file.
+The exact, version-matched PyPI source distribution and its Cargo lockfile are
+therefore used as the dependency authority for the reproducible component
+notice at `licenses/tokenizers-0.20.3-NOTICES.txt`. The bundle covers the
+reviewed non-development dependency closure: **120** packages, including
+**118** checksum-verified crates.io archives and two local tokenizers packages.
+Because a Cargo lockfile can retain target-specific packages, the bundle may
+conservatively include an attribution that was not linked into this particular
+Mac wheel; it does not silently omit such an attribution.
+
+Every license, licence, copying, copyright, notice, and unlicense file found in
+those exact sources is retained. The `number_prefix` crate intentionally
+excludes its `LICENCE` from its crates.io archive, so that one notice is fetched
+from the exact repository commit recorded in the crate's VCS metadata and is
+separately checksum-verified. The checked-in bundle can be reproduced from the
+source repository with:
+
+`python3 scripts/build_tokenizers_0203_notices.py`
+
+#### Google FlatBuffers 24.3.25
+
+- Project: Google FlatBuffers
+- License: Apache-2.0
+- Source: <https://github.com/google/flatbuffers/tree/v24.3.25>
+- License from the immutable release commit:
+  <https://github.com/google/flatbuffers/blob/595bf0007ab1929570c7671f091313c8fc20644e/LICENSE>
+- Retained license text: `licenses/flatbuffers-24.3.25-LICENSE.txt`
+
+The Python wheel declares Apache-2.0 but does not itself contain a license
+file, so the retained version-specific text comes from the corresponding
+upstream release commit.
+
 ## Host-provided software
 
 Anki, Qt/PyQt, Python's standard library, and SQLite are supplied by Anki or

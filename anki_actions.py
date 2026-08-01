@@ -7,10 +7,14 @@ uses only public collection APIs. No direct SQLite or backend calls are used.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import enum
 import re
 from typing import Any, Callable, Iterable, Sequence
+
+try:  # installed add-on package
+    from .backend.compat import dataclass
+except ImportError:  # direct module loading in the plain-Python test suite
+    from backend.compat import dataclass
 
 
 class ActionKind(enum.Enum):
