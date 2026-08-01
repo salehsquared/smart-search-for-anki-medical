@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.0.17] — 2026-08-01
+
+### Added
+
+- A selected parent deck can now keep individual child branches excluded:
+  uncheck an inherited subdeck to omit that subdeck and all of its descendants.
+
+### Changed
+
+- Included children remain interactive, selected parents show a partial state
+  when exclusions are active, and rechecking an exclusion restores its branch.
+- Deck exclusions are expressed as visible native Anki search syntax and apply
+  consistently in Smart, Exact, and Semantic modes.
+
+### Fixed
+
+- Excluded decks that are no longer available in the profile remain visible in
+  the picker so their stale exclusion can be removed safely.
+
 ## [1.0.16] — 2026-07-31
 
 ### Added

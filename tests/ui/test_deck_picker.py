@@ -178,6 +178,31 @@ class DeckPickerTests(unittest.TestCase):
         self.assertIn("No decks match", popup.no_matches_label.text())
         popup.deleteLater()
 
+    def test_unavailable_exclusion_remains_visible_and_removable(self) -> None:
+        popup = DeckPickerPopup()
+        with patch(
+            "ui.deck_picker.analyze_deck_query",
+            return_value=_analysis(
+                "selected",
+                "AnKing",
+                excluded=("AnKing::Deleted",),
+            ),
+        ):
+            popup.set_query(
+                '(deck:"AnKing" -deck:"AnKing::Deleted")'
+            )
+        popup.set_catalog(self.catalog())
+
+        missing = popup._items["AnKing::Deleted"]
+        self.assertIn("excluded", missing.text(0).casefold())
+        self.assertIn("unavailable", missing.text(0).casefold())
+        self.assertTrue(
+            bool(missing.flags() & Qt.ItemFlag.ItemIsUserCheckable)
+        )
+        missing.setCheckState(0, Qt.CheckState.Checked)
+        self.assertEqual(popup.selection, DeckScopeSelection(("AnKing",), ()))
+        popup.deleteLater()
+
     def test_filter_keyboard_and_loading_error_states(self) -> None:
         popup = DeckPickerPopup()
         with patch(

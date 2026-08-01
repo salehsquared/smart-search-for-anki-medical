@@ -616,11 +616,17 @@ class DeckPickerPopup(QDialog):
                 )
 
             catalog_names = {_name_key(name) for name in real_names}
-            missing = tuple(
+            missing_selected = tuple(
                 name
                 for name in self._selected
                 if _name_key(name) not in catalog_names
             )
+            missing_excluded = tuple(
+                name
+                for name in self._excluded
+                if _name_key(name) not in catalog_names
+            )
+            missing = _unique_names((*missing_selected, *missing_excluded))
             if missing:
                 unavailable = QTreeWidgetItem(self.tree)
                 unavailable.setText(0, "Unavailable decks")
@@ -712,13 +718,15 @@ class DeckPickerPopup(QDialog):
                     QBrush(
                         QColor(
                             colors["muted"]
-                            if inherited or missing or exclusion or blocked_by
+                            if missing or blocked_by
                             else colors["text"]
                         )
                     ),
                 )
                 leaf = name.rsplit("::", 1)[-1]
-                if missing:
+                if missing and exclusion:
+                    item.setText(0, f"{leaf} (excluded, unavailable)")
+                elif missing:
                     item.setText(0, f"{leaf} (unavailable)")
                 elif exclusion or blocked_by:
                     item.setText(0, f"{leaf}  ·  excluded")
@@ -726,16 +734,18 @@ class DeckPickerPopup(QDialog):
                     item.setText(0, f"{leaf}  ·  included")
                 else:
                     item.setText(0, leaf)
-                if blocked_by:
+                if missing and exclusion:
+                    detail = f"Deck {name}, excluded but unavailable"
+                elif missing and explicit:
+                    detail = f"Deck {name}, selected but unavailable"
+                elif missing:
+                    detail = f"Deck {name}, unavailable"
+                elif blocked_by:
                     detail = (
                         f"Deck {name}, excluded because {blocked_by} is excluded"
                     )
                 elif exclusion:
                     detail = f"Deck {name}, excluded"
-                elif missing and explicit:
-                    detail = f"Deck {name}, selected but unavailable"
-                elif missing:
-                    detail = f"Deck {name}, unavailable"
                 elif explicit and exclusions_beneath:
                     detail = f"Deck {name}, selected, some subdecks excluded"
                 elif explicit:
