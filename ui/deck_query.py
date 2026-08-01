@@ -1,9 +1,11 @@
 """Pure helpers for applying a deck picker to Anki search text.
 
 The picker deliberately owns only a narrow, unambiguous subset of Anki's
-search language: one positive exact ``deck:`` token, or one parenthesized OR
-group made entirely from such tokens. Everything else is reported as custom
-syntax so the UI cannot silently reinterpret a hand-written query.
+search language: one positive exact ``deck:`` token, one parenthesized OR
+group made entirely from such tokens, or one parenthesized exclusion group
+that combines those positive roots with negative exact ``-deck:`` tokens
+naming strict descendants of a positive root. Everything else is reported as
+custom syntax so the UI cannot silently reinterpret a hand-written query.
 """
 
 from __future__ import annotations
@@ -28,6 +30,24 @@ class DeckQueryAnalysis:
     clause_end: int | None
     remaining_query: str
     reason: str = ""
+    excluded: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class DeckScopeSelection:
+    """Immutable picker result: positive roots plus excluded subdecks."""
+
+    included: tuple[str, ...] = ()
+    excluded: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        included = _canonical_names(self.included)
+        object.__setattr__(self, "included", included)
+        object.__setattr__(
+            self,
+            "excluded",
+            _canonical_exclusions(self.excluded, included),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +64,7 @@ class _DeckToken:
     exact: bool = False
     name: str = ""
     reason: str = ""
+    negative: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +124,7 @@ def analyze_deck_query(query: str) -> DeckQueryAnalysis:
         token = tokens[index]
         if (
             candidate.exact
+            and not candidate.negative
             and token.depth == 0
             and not _preceded_by_separate_minus(tokens, index)
             and not _has_top_level_or(tokens)
@@ -127,6 +149,17 @@ def analyze_deck_query(query: str) -> DeckQueryAnalysis:
                 end,
                 _remove_recognized_clause(raw, tokens, start, end),
             )
+        scoped = _recognized_scoped_group(tokens, candidates)
+        if scoped is not None and not _has_top_level_or(tokens):
+            start, end, names, excluded = scoped
+            return DeckQueryAnalysis(
+                DeckScopeKind.SELECTED,
+                names,
+                start,
+                end,
+                _remove_recognized_clause(raw, tokens, start, end),
+                excluded=excluded,
+            )
 
     reason = next(
         (
@@ -150,24 +183,44 @@ def analyze_deck_query(query: str) -> DeckQueryAnalysis:
     )
 
 
-def build_deck_clause(names: Iterable[str]) -> str:
-    """Return a canonical, exact Anki deck clause for ``names``."""
+def build_deck_clause(
+    names: Iterable[str],
+    excluded: Iterable[str] = (),
+) -> str:
+    """Return a canonical, exact Anki deck clause for ``names``.
+
+    Exclusions must name strict descendants of a selected root.  When any are
+    present the whole scope is wrapped in one self-contained group, e.g.
+    ``(deck:"Parent" -deck:"Parent::Child")`` or
+    ``((deck:"A" OR deck:"B") -deck:"A::X")``, so replacing or removing the
+    picker scope never disturbs unrelated search text.
+    """
 
     canonical = _canonical_names(names)
+    exclusions = _canonical_exclusions(excluded, canonical)
     if not canonical:
         return ""
-    tokens = tuple(
+    positive = tuple(
         f'deck:"{_escape_name(_literal_deck_name(name))}"'
         for name in canonical
     )
-    if len(tokens) == 1:
-        return tokens[0]
-    return "(" + " OR ".join(tokens) + ")"
+    if not exclusions:
+        if len(positive) == 1:
+            return positive[0]
+        return "(" + " OR ".join(positive) + ")"
+    negative = tuple(
+        f'-deck:"{_escape_name(_literal_deck_name(name))}"'
+        for name in exclusions
+    )
+    if len(positive) == 1:
+        return "(" + " ".join(positive + negative) + ")"
+    return "((" + " OR ".join(positive) + ") " + " ".join(negative) + ")"
 
 
 def apply_deck_selection(
     query: str,
     names: Iterable[str],
+    excluded: Iterable[str] = (),
 ) -> str:
     """Apply ``names`` only when the existing deck syntax is unambiguous.
 
@@ -176,7 +229,7 @@ def apply_deck_selection(
     """
 
     raw = str(query or "")
-    clause = build_deck_clause(names)
+    clause = build_deck_clause(names, excluded)
     analysis = analyze_deck_query(raw)
 
     if analysis.kind is DeckScopeKind.CUSTOM:
@@ -224,6 +277,40 @@ def _canonical_names(names: Iterable[str]) -> tuple[str, ...]:
 
 def _is_descendant(candidate: str, parent: str) -> bool:
     return candidate.startswith(parent + "::")
+
+
+def _canonical_exclusions(
+    excluded: Iterable[str],
+    included: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Deduplicate exclusions and keep only strict descendants of roots."""
+
+    roots = tuple(_deck_identity_key(name) for name in included)
+    canonical: list[str] = []
+    keys: list[str] = []
+    for value in excluded:
+        name = str(value).strip()
+        if not name:
+            raise ValueError("Excluded deck names must not be empty.")
+        key = _deck_identity_key(name)
+        if key in keys:
+            continue
+        if any(_is_descendant(key, parent) for parent in keys):
+            continue
+        if not any(_is_descendant(key, root) for root in roots):
+            raise ValueError(
+                "Excluded decks must be strict subdecks of a selected deck."
+            )
+        retained = [
+            (existing_name, existing_key)
+            for existing_name, existing_key in zip(canonical, keys)
+            if not _is_descendant(existing_key, key)
+        ]
+        canonical = [item[0] for item in retained]
+        keys = [item[1] for item in retained]
+        canonical.append(name)
+        keys.append(key)
+    return tuple(canonical)
 
 
 def _deck_identity_key(name: str) -> str:
@@ -318,27 +405,53 @@ def _deck_token(raw: str) -> _DeckToken:
         return _DeckToken(False)
 
     if match.group("negative"):
-        return _DeckToken(True, reason="Negative deck filters are custom.")
+        negative = True
+    else:
+        negative = False
     value = match.group("value")
     if not value:
-        return _DeckToken(True, reason="Empty deck filters are custom.")
+        return _DeckToken(
+            True,
+            reason="Empty deck filters are custom.",
+            negative=negative,
+        )
 
     if value.startswith('"'):
         if len(value) < 2 or not value.endswith('"'):
-            return _DeckToken(True, reason="Incomplete deck filters are custom.")
+            return _DeckToken(
+                True,
+                reason="Incomplete deck filters are custom.",
+                negative=negative,
+            )
         encoded = value[1:-1]
     else:
         if '"' in value:
-            return _DeckToken(True, reason="Malformed deck filters are custom.")
+            return _DeckToken(
+                True,
+                reason="Malformed deck filters are custom.",
+                negative=negative,
+            )
         encoded = value
 
     if _has_invalid_escape(encoded):
-        return _DeckToken(True, reason="Invalid deck-filter escaping is custom.")
+        return _DeckToken(
+            True,
+            reason="Invalid deck-filter escaping is custom.",
+            negative=negative,
+        )
     if _contains_unescaped_wildcard(encoded):
-        return _DeckToken(True, reason="Wildcard deck filters are custom.")
+        return _DeckToken(
+            True,
+            reason="Wildcard deck filters are custom.",
+            negative=negative,
+        )
     name = _decode_escaped(encoded)
     if not name:
-        return _DeckToken(True, reason="Empty deck filters are custom.")
+        return _DeckToken(
+            True,
+            reason="Empty deck filters are custom.",
+            negative=negative,
+        )
     if name in {"current", "filtered"}:
         return _DeckToken(
             True,
@@ -346,8 +459,15 @@ def _deck_token(raw: str) -> _DeckToken:
                 "Anki reserves this lowercase deck search value for a "
                 "dynamic deck scope."
             ),
+            negative=negative,
         )
-    return _DeckToken(True, True, name)
+    return _DeckToken(
+        True,
+        True,
+        name,
+        "Negative deck filters are custom." if negative else "",
+        negative,
+    )
 
 
 def _contains_unescaped_wildcard(value: str) -> bool:
@@ -568,7 +688,7 @@ def _recognized_or_group(
                 break
             if expect_deck:
                 candidate = candidates.get(offset)
-                if candidate is None or not candidate.exact:
+                if candidate is None or not candidate.exact or candidate.negative:
                     valid = False
                     break
                 names.append(candidate.name)
@@ -578,6 +698,121 @@ def _recognized_or_group(
             expect_deck = not expect_deck
         if valid and not expect_deck:
             return opening.start, closing.end, tuple(names)
+    return None
+
+
+def _recognized_scoped_group(
+    tokens: tuple[_Token, ...],
+    candidates: dict[int, _DeckToken],
+) -> tuple[int, int, tuple[str, ...], tuple[str, ...]] | None:
+    """Match the picker's canonical exclusion group.
+
+    The managed form is one top-level parenthesized group holding either a
+    single positive exact ``deck:`` token or a nested ``(deck OR deck …)``
+    group, followed by one or more negative exact ``-deck:`` tokens naming
+    strict descendants of the positive roots.  Any other negative or mixed
+    shape is left to the custom path.
+    """
+
+    stack: list[int] = []
+    pairs: list[tuple[int, int]] = []
+    for index, token in enumerate(tokens):
+        if token.raw == "(":
+            stack.append(index)
+        elif token.raw == ")" and stack:
+            pairs.append((stack.pop(), index))
+
+    for open_index, close_index in pairs:
+        opening = tokens[open_index]
+        closing = tokens[close_index]
+        if opening.depth != 0 or closing.depth != 0:
+            continue
+        if open_index > 0 and tokens[open_index - 1].raw == "-":
+            continue
+        if any(
+            index <= open_index or index >= close_index
+            for index in candidates
+        ):
+            continue
+        cursor = open_index + 1
+        if cursor < close_index and tokens[cursor].raw == "(":
+            subgroup = _match_positive_or_subgroup(
+                tokens,
+                candidates,
+                cursor,
+                close_index,
+            )
+            if subgroup is None:
+                continue
+            names, cursor = subgroup
+        else:
+            candidate = candidates.get(cursor)
+            if (
+                candidate is None
+                or not candidate.exact
+                or candidate.negative
+                or tokens[cursor].depth != 1
+            ):
+                continue
+            names = (candidate.name,)
+            cursor += 1
+        excluded: list[str] = []
+        valid = True
+        while cursor < close_index:
+            token = tokens[cursor]
+            candidate = candidates.get(cursor)
+            if (
+                token.depth != 1
+                or candidate is None
+                or not candidate.exact
+                or not candidate.negative
+            ):
+                valid = False
+                break
+            excluded.append(candidate.name)
+            cursor += 1
+        if not valid or not excluded:
+            continue
+        try:
+            canonical = _canonical_names(names)
+            exclusions = _canonical_exclusions(excluded, canonical)
+        except ValueError:
+            continue
+        return opening.start, closing.end, canonical, exclusions
+    return None
+
+
+def _match_positive_or_subgroup(
+    tokens: tuple[_Token, ...],
+    candidates: dict[int, _DeckToken],
+    open_index: int,
+    limit: int,
+) -> tuple[tuple[str, ...], int] | None:
+    """Match a nested ``(deck OR deck …)`` group starting at ``open_index``."""
+
+    opening = tokens[open_index]
+    if opening.raw != "(" or opening.depth != 1:
+        return None
+    names: list[str] = []
+    expect_deck = True
+    cursor = open_index + 1
+    while cursor < limit:
+        token = tokens[cursor]
+        if token.raw == ")" and token.depth == 1:
+            if expect_deck or len(names) < 2:
+                return None
+            return tuple(names), cursor + 1
+        if token.depth != 2:
+            return None
+        if expect_deck:
+            candidate = candidates.get(cursor)
+            if candidate is None or not candidate.exact or candidate.negative:
+                return None
+            names.append(candidate.name)
+        elif token.raw.casefold() != "or":
+            return None
+        expect_deck = not expect_deck
+        cursor += 1
     return None
 
 

@@ -29,6 +29,7 @@ try:
         UISettings,
     )
     from ui.controller import SearchController
+    from ui.deck_query import DeckScopeSelection
     from ui.dialog import SearchDialog, _SettingsDialog
     from ui.results import ResultsView, card_state_summary, snippet_html
     from ui.widgets import (
@@ -177,6 +178,56 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertIn("2 decks", dialog.deck_scope.text())
         self.assertEqual(len(backend.requests), 1)
         self.assertEqual(backend.requests[0].query, dialog.query())
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_deck_picker_applies_exclusion_scope_to_visible_query(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("bupropion")
+        dialog.deck_scope.set_scope(dialog.query())
+
+        dialog.deck_scope.click()
+        backend.deck_callbacks[-1][0](
+            DeckCatalog(
+                decks=(
+                    DeckEntry(1, "AnKing"),
+                    DeckEntry(2, "AnKing::Step 1"),
+                    DeckEntry(3, "AnKing::Step 2"),
+                ),
+                current_deck_id=1,
+            )
+        )
+        self.app.processEvents()
+
+        dialog.deck_picker._selected = {"AnKing"}
+        dialog.deck_picker._excluded = {"AnKing::Step 1"}
+        dialog.deck_picker._refresh_checks()
+        dialog.deck_picker._apply()
+        self.app.processEvents()
+
+        self.assertEqual(
+            dialog.query(),
+            'bupropion (deck:"AnKing" -deck:"AnKing::Step 1")',
+        )
+        self.assertIn("−1", dialog.deck_scope.text())
+        self.assertIn(
+            "1 subdeck excluded",
+            dialog.deck_scope.accessibleName(),
+        )
+
+        # Reopening the picker stages the exclusions from the visible query.
+        dialog._open_deck_picker()
+        self.app.processEvents()
+        self.assertEqual(
+            dialog.deck_picker.selection,
+            DeckScopeSelection(("AnKing",), ("AnKing::Step 1",)),
+        )
+        self.assertEqual(
+            dialog.deck_picker._items["AnKing"].checkState(0),
+            Qt.CheckState.PartiallyChecked,
+        )
         controller.deleteLater()
         dialog.deleteLater()
 

@@ -4,6 +4,7 @@ import unittest
 
 from ui.deck_query import (
     DeckScopeKind,
+    DeckScopeSelection,
     analyze_deck_query,
     apply_deck_selection,
     build_deck_clause,
@@ -346,6 +347,179 @@ class DeckQueryTests(unittest.TestCase):
         self.assertIs(analysis.kind, DeckScopeKind.SELECTED)
         self.assertEqual(analysis.names, ("A",))
         self.assertEqual(analysis.remaining_query, "bupropion")
+
+    def test_builder_emits_canonical_exclusion_groups(self) -> None:
+        self.assertEqual(
+            build_deck_clause(("AnKing",), ("AnKing::Step 1",)),
+            '(deck:"AnKing" -deck:"AnKing::Step 1")',
+        )
+        self.assertEqual(
+            build_deck_clause(("A", "B"), ("A::X", "B::Y")),
+            '((deck:"A" OR deck:"B") -deck:"A::X" -deck:"B::Y")',
+        )
+        # A single exclusion over multiple roots still uses the OR subgroup.
+        self.assertEqual(
+            build_deck_clause(("A", "B"), ("A::X",)),
+            '((deck:"A" OR deck:"B") -deck:"A::X")',
+        )
+
+    def test_exclusions_are_deduplicated_and_nested_redundancy_removed(self) -> None:
+        self.assertEqual(
+            build_deck_clause(("A",), ("A::X", "a::x", "A::X::Y")),
+            '(deck:"A" -deck:"A::X")',
+        )
+        self.assertEqual(
+            build_deck_clause(("A",), ("A::X::Y", "A::X")),
+            '(deck:"A" -deck:"A::X")',
+        )
+
+    def test_exclusion_must_be_a_strict_descendant_of_a_selected_root(self) -> None:
+        for names, excluded in (
+            (("A",), ("B::X",)),
+            (("A",), ("A",)),
+            (("A",), ("",)),
+            ((), ("A::X",)),
+        ):
+            with self.subTest(names=names, excluded=excluded):
+                with self.assertRaises(ValueError):
+                    build_deck_clause(names, excluded)
+                with self.assertRaises(ValueError):
+                    DeckScopeSelection(names, excluded)
+
+    def test_analysis_round_trips_managed_exclusion_groups(self) -> None:
+        cases = (
+            (
+                '(deck:"AnKing" -deck:"AnKing::Step 1")',
+                ("AnKing",),
+                ("AnKing::Step 1",),
+            ),
+            (
+                '((deck:"A" OR deck:"B") -deck:"A::X" -deck:"B::Y")',
+                ("A", "B"),
+                ("A::X", "B::Y"),
+            ),
+        )
+        for query, names, excluded in cases:
+            with self.subTest(query=query):
+                analysis = analyze_deck_query(query)
+                self.assertIs(analysis.kind, DeckScopeKind.SELECTED)
+                self.assertEqual(analysis.names, names)
+                self.assertEqual(analysis.excluded, excluded)
+                assert analysis.clause_start is not None
+                assert analysis.clause_end is not None
+                self.assertEqual(
+                    query[analysis.clause_start : analysis.clause_end],
+                    query,
+                )
+                self.assertEqual(analysis.remaining_query, "")
+                rebuilt = build_deck_clause(names, excluded)
+                self.assertEqual(
+                    analyze_deck_query(rebuilt).excluded,
+                    excluded,
+                )
+
+    def test_analysis_reports_managed_exclusion_span_inside_other_text(self) -> None:
+        query = 'bupropion (deck:"A" -deck:"A::X") tag:pharm'
+        analysis = analyze_deck_query(query)
+
+        self.assertIs(analysis.kind, DeckScopeKind.SELECTED)
+        self.assertEqual(analysis.names, ("A",))
+        self.assertEqual(analysis.excluded, ("A::X",))
+        assert analysis.clause_start is not None
+        assert analysis.clause_end is not None
+        self.assertEqual(
+            query[analysis.clause_start : analysis.clause_end],
+            '(deck:"A" -deck:"A::X")',
+        )
+        self.assertEqual(analysis.remaining_query, "bupropion tag:pharm")
+
+    def test_analysis_canonicalizes_managed_exclusions(self) -> None:
+        analysis = analyze_deck_query(
+            '(deck:"A" -deck:"A::X::Y" -deck:"a::x" -deck:"A::X")'
+        )
+
+        self.assertIs(analysis.kind, DeckScopeKind.SELECTED)
+        self.assertEqual(analysis.excluded, ("a::x",))
+
+    def test_unmanaged_negative_shapes_remain_custom(self) -> None:
+        queries = (
+            # Unparenthesized negatives are never rewritten.
+            'deck:"A" -deck:"A::B"',
+            # Negated whole groups are not the managed form.
+            '-(deck:"A" -deck:"A::B")',
+            # Exclusions outside any selected root.
+            '(deck:"A" -deck:"B::X")',
+            '(deck:"A" -deck:"A")',
+            # Mixed Boolean shapes inside the group.
+            '(deck:"A" OR deck:"B" -deck:"A::X")',
+            '(deck:"A" AND -deck:"A::B")',
+            '((deck:"A" AND deck:"B") -deck:"A::X")',
+            # Wildcards and reserved dynamics stay custom.
+            '(deck:"A" -deck:"A*::X")',
+            '(deck:"A" -deck:"current::X")',
+            # A top-level OR makes the whole expression ambiguous.
+            '(deck:"A" -deck:"A::X") OR bupropion',
+            # Deck tokens outside the managed group.
+            '(deck:"A" -deck:"A::X") deck:"B"',
+        )
+        for query in queries:
+            with self.subTest(query=query):
+                analysis = analyze_deck_query(query)
+                self.assertIs(analysis.kind, DeckScopeKind.CUSTOM)
+                self.assertEqual(analysis.excluded, ())
+                self.assertEqual(analysis.remaining_query, query)
+                self.assertTrue(analysis.reason)
+                with self.assertRaises(ValueError):
+                    apply_deck_selection(query, ("New",))
+
+    def test_apply_replaces_managed_exclusion_group_in_place(self) -> None:
+        self.assertEqual(
+            apply_deck_selection(
+                'bupropion (deck:"A" -deck:"A::X") tag:pharm',
+                ("A",),
+                ("A::Y",),
+            ),
+            'bupropion (deck:"A" -deck:"A::Y") tag:pharm',
+        )
+        self.assertEqual(
+            apply_deck_selection(
+                '(deck:"A" -deck:"A::X")',
+                ("A", "B"),
+                ("B::Y",),
+            ),
+            '((deck:"A" OR deck:"B") -deck:"B::Y")',
+        )
+        # Dropping the exclusions leaves the plain positive clause.
+        self.assertEqual(
+            apply_deck_selection('(deck:"A" -deck:"A::X")', ("A",)),
+            'deck:"A"',
+        )
+
+    def test_all_removes_the_whole_managed_group_and_adjacent_and(self) -> None:
+        cases = {
+            '(deck:"A" -deck:"A::X")': "",
+            'bupropion (deck:"A" -deck:"A::X")': "bupropion",
+            '(deck:"A" -deck:"A::X") AND bupropion': "bupropion",
+            'tag:x AND (deck:"A" -deck:"A::X") AND bupropion': "tag:x AND bupropion",
+            'tag:x ((deck:"A" OR deck:"B") -deck:"A::X") bupropion': (
+                "tag:x bupropion"
+            ),
+        }
+        for query, expected in cases.items():
+            with self.subTest(query=query):
+                self.assertEqual(apply_deck_selection(query, ()), expected)
+
+    def test_deck_scope_selection_canonicalizes_order_independently(self) -> None:
+        selection = DeckScopeSelection(
+            ("AnKing::Step 1", "AnKing"),
+            ("anking::step 1::cardio", "AnKing::Step 1::Cardio"),
+        )
+
+        self.assertEqual(selection.included, ("AnKing",))
+        self.assertEqual(selection.excluded, ("anking::step 1::cardio",))
+
+        scoped = DeckScopeSelection(("A",), ("A::X::Y", "a::x"))
+        self.assertEqual(scoped.excluded, ("a::x",))
 
 
 if __name__ == "__main__":

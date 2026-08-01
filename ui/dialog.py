@@ -1936,12 +1936,18 @@ class SearchDialog(QDialog):
 
     def _apply_deck_selection(
         self,
-        names: tuple[str, ...],
+        selection: object,
     ) -> None:
+        included = getattr(selection, "included", None)
+        if included is None:
+            included, excluded = selection, ()
+        else:
+            excluded = getattr(selection, "excluded", ())
         try:
             query = apply_deck_selection(
                 self.query(),
-                names,
+                included,
+                excluded,
             )
         except ValueError as error:
             # Unsafe Boolean deck expressions must be edited directly; keep

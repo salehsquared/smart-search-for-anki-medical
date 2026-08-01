@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from typing import Any, Optional
 
 from .contracts import DeckCatalog, DeckEntry
-from .deck_query import analyze_deck_query
+from .deck_query import DeckScopeSelection, analyze_deck_query
 from .theme import chrome_colors
 from .widgets import (
     QApplication,
@@ -85,6 +85,13 @@ def _unique_names(values: Iterable[object]) -> tuple[str, ...]:
             output.append(name)
             seen.add(identity)
     return tuple(output)
+
+
+def _excluded_from_analysis(analysis: object | None) -> tuple[str, ...]:
+    values = _read(analysis, "excluded", "excluded_names", default=())
+    if isinstance(values, str):
+        values = (values,)
+    return _unique_names(values or ())
 
 
 def _name_key(name: str) -> str:
@@ -164,6 +171,7 @@ class DeckScopeButton(QToolButton, PaletteMixin):
         self._query = str(query or "")
         self._analysis = analyze_deck_query(self._query)
         names = _selected_from_analysis(self._analysis)
+        excluded = _excluded_from_analysis(self._analysis)
         custom = _is_custom(self._analysis)
         if custom:
             label = "Custom decks"
@@ -177,16 +185,28 @@ class DeckScopeButton(QToolButton, PaletteMixin):
         else:
             label = "All decks"
             summary = "all decks"
+        if excluded and not custom:
+            count = len(excluded)
+            label = f"{label} −{count}"
+            summary = (
+                f"{summary}, {count} "
+                f"subdeck{'s' if count != 1 else ''} excluded"
+            )
         # Keep the compound search row stable even for very long deck names.
         metrics = self.fontMetrics()
         label = metrics.elidedText(label, Qt.TextElideMode.ElideRight, 105)
         self.setText(f"{label}  ▾")
-        self.setToolTip(
-            "Choose decks" if not names else "Search " + ", ".join(names)
-        )
+        if not names:
+            tooltip = "Choose decks"
+        else:
+            tooltip = "Search " + ", ".join(names)
+            if excluded:
+                tooltip += "\nExcluding " + ", ".join(excluded)
+        self.setToolTip(tooltip)
         self.setAccessibleName(f"Deck filter, {summary}")
         self.setAccessibleDescription(
-            "Open a searchable deck picker. Selecting a parent includes its subdecks."
+            "Open a searchable deck picker. Selecting a parent includes its "
+            "subdecks; unchecking an included subdeck excludes it."
         )
         self.setProperty("customScope", custom)
         self.refresh_palette()
@@ -228,7 +248,7 @@ class DeckScopeButton(QToolButton, PaletteMixin):
 class DeckPickerPopup(QDialog):
     """Modeless searchable hierarchical deck selector anchored to a button."""
 
-    applied = pyqtSignal(object)  # tuple[str, ...]
+    applied = pyqtSignal(object)  # DeckScopeSelection
     retryRequested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -238,7 +258,8 @@ class DeckPickerPopup(QDialog):
         self.setWindowTitle("Choose decks")
         self.setAccessibleName("Choose decks")
         self.setAccessibleDescription(
-            "Search and select one or more decks. Selecting a parent includes all subdecks."
+            "Search and select one or more decks. Selecting a parent includes "
+            "all subdecks; unchecking an included subdeck excludes it."
         )
         self.setModal(False)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
@@ -249,6 +270,7 @@ class DeckPickerPopup(QDialog):
         self._analysis: object | None = None
         self._catalog: DeckCatalog | object | None = None
         self._selected: set[str] = set()
+        self._excluded: set[str] = set()
         self._items: dict[str, QTreeWidgetItem] = {}
         self._updating = False
         self._ready = False
@@ -358,7 +380,8 @@ class DeckPickerPopup(QDialog):
         self.tree.setAccessibleName("Decks")
         self.tree.setAccessibleDescription(
             "Use arrows to navigate, Space to toggle a deck, and Return to apply. "
-            "A checked parent includes every subdeck."
+            "A checked parent includes every subdeck; unchecking an included "
+            "subdeck excludes it."
         )
         self.tree.itemChanged.connect(self._item_changed)
         self.tree.installEventFilter(self)
@@ -414,10 +437,18 @@ class DeckPickerPopup(QDialog):
     def selected_names(self) -> tuple[str, ...]:
         return self._ordered_selection()
 
+    @property
+    def selection(self) -> DeckScopeSelection:
+        return DeckScopeSelection(
+            self._ordered_selection(),
+            self._ordered_exclusions(),
+        )
+
     def set_query(self, query: str) -> None:
         self._query = str(query or "")
         self._analysis = analyze_deck_query(self._query)
         self._selected = set(_selected_from_analysis(self._analysis))
+        self._excluded = set(_excluded_from_analysis(self._analysis))
         custom = _is_custom(self._analysis)
         reason = str(_read(self._analysis, "reason", default="") or "").strip()
         self.custom_frame.setVisible(custom)
@@ -622,7 +653,7 @@ class DeckPickerPopup(QDialog):
         self._filter_tree(self.filter_edit.text())
 
     def _expand_relevant_paths(self) -> None:
-        targets = set(self._selected)
+        targets = set(self._selected) | set(self._excluded)
         current = _catalog_current_name(self._catalog)
         if current:
             targets.add(current)
@@ -640,20 +671,32 @@ class DeckPickerPopup(QDialog):
         self._updating = True
         try:
             selected_folded = {_name_key(name): name for name in self._selected}
+            excluded_folded = {_name_key(name): name for name in self._excluded}
             colors = chrome_colors(self)
             for name, item in self._items.items():
                 folded = _name_key(name)
                 explicit = folded in selected_folded
+                exclusion = folded in excluded_folded
                 ancestor = self._selected_ancestor(name)
                 inherited = bool(ancestor and not explicit)
+                blocked_by = self._excluded_ancestor(name)
                 missing = bool(item.data(0, _ROLE_MISSING))
                 descendants = any(
                     _name_key(chosen).startswith(folded + "::")
                     for chosen in self._selected
                 )
+                exclusions_beneath = any(
+                    key.startswith(folded + "::") for key in excluded_folded
+                )
                 real = bool(item.data(0, _ROLE_REAL))
-                if explicit or inherited:
-                    state = Qt.CheckState.Checked
+                if exclusion or blocked_by:
+                    state = Qt.CheckState.Unchecked
+                elif explicit or inherited:
+                    state = (
+                        Qt.CheckState.PartiallyChecked
+                        if exclusions_beneath
+                        else Qt.CheckState.Checked
+                    )
                 elif descendants:
                     state = Qt.CheckState.PartiallyChecked
                 else:
@@ -661,7 +704,7 @@ class DeckPickerPopup(QDialog):
                 item.setCheckState(0, state)
                 item.setData(0, _ROLE_INHERITED, inherited)
                 flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-                if real and not inherited:
+                if real and not blocked_by:
                     flags |= Qt.ItemFlag.ItemIsUserCheckable
                 item.setFlags(flags)
                 item.setForeground(
@@ -669,7 +712,7 @@ class DeckPickerPopup(QDialog):
                     QBrush(
                         QColor(
                             colors["muted"]
-                            if inherited or missing
+                            if inherited or missing or exclusion or blocked_by
                             else colors["text"]
                         )
                     ),
@@ -677,18 +720,33 @@ class DeckPickerPopup(QDialog):
                 leaf = name.rsplit("::", 1)[-1]
                 if missing:
                     item.setText(0, f"{leaf} (unavailable)")
+                elif exclusion or blocked_by:
+                    item.setText(0, f"{leaf}  ·  excluded")
                 elif inherited:
                     item.setText(0, f"{leaf}  ·  included")
                 else:
                     item.setText(0, leaf)
-                if inherited:
-                    detail = f"Deck {name}, included by {ancestor}"
+                if blocked_by:
+                    detail = (
+                        f"Deck {name}, excluded because {blocked_by} is excluded"
+                    )
+                elif exclusion:
+                    detail = f"Deck {name}, excluded"
                 elif missing and explicit:
                     detail = f"Deck {name}, selected but unavailable"
                 elif missing:
                     detail = f"Deck {name}, unavailable"
+                elif explicit and exclusions_beneath:
+                    detail = f"Deck {name}, selected, some subdecks excluded"
                 elif explicit:
                     detail = f"Deck {name}, selected"
+                elif inherited and exclusions_beneath:
+                    detail = (
+                        f"Deck {name}, included by {ancestor}, "
+                        "some subdecks excluded"
+                    )
+                elif inherited:
+                    detail = f"Deck {name}, included by {ancestor}"
                 elif descendants:
                     detail = f"Deck {name}, some subdecks selected"
                 else:
@@ -697,14 +755,31 @@ class DeckPickerPopup(QDialog):
                 item.setData(
                     0,
                     Qt.ItemDataRole.AccessibleDescriptionRole,
-                    "Selecting this parent includes all of its subdecks."
-                    if item.childCount()
-                    else detail,
+                    (
+                        "This subdeck stays excluded while its ancestor is "
+                        "excluded. Check the excluded ancestor to restore it."
+                    )
+                    if blocked_by
+                    else (
+                        "Selecting this parent includes all of its subdecks; "
+                        "unchecking an included subdeck excludes it."
+                        if item.childCount()
+                        else detail
+                    ),
                 )
         finally:
             self._updating = False
         self._update_quick_buttons()
         self._update_summary()
+
+    def _excluded_ancestor(self, name: str) -> str:
+        folded = _name_key(name)
+        ancestors = [
+            chosen
+            for chosen in self._excluded
+            if folded.startswith(_name_key(chosen) + "::")
+        ]
+        return max(ancestors, key=len, default="")
 
     def _selected_ancestor(self, name: str) -> str:
         folded = _name_key(name)
@@ -721,26 +796,57 @@ class DeckPickerPopup(QDialog):
         name = str(item.data(0, _ROLE_NAME) or "")
         if not name or not item.data(0, _ROLE_REAL):
             return
+        folded = _name_key(name)
         if item.checkState(0) == Qt.CheckState.Checked:
-            if not self._selected_ancestor(name):
+            if any(_name_key(excluded) == folded for excluded in self._excluded):
+                # Re-checking an excluded subdeck restores the whole branch.
+                self._excluded = {
+                    excluded
+                    for excluded in self._excluded
+                    if _name_key(excluded) != folded
+                }
+            elif not self._excluded_ancestor(name):
+                # Checking an included node restores exclusions beneath it.
+                self._excluded = {
+                    excluded
+                    for excluded in self._excluded
+                    if not _name_key(excluded).startswith(folded + "::")
+                }
+                if not self._selected_ancestor(name):
+                    self._selected = {
+                        selected
+                        for selected in self._selected
+                        if not _name_key(selected).startswith(folded + "::")
+                    }
+                    self._selected.add(name)
+        else:
+            if any(_name_key(selected) == folded for selected in self._selected):
+                # Unchecking a selected root removes the whole scope.
                 self._selected = {
                     selected
                     for selected in self._selected
-                    if not _name_key(selected).startswith(_name_key(name) + "::")
+                    if _name_key(selected) != folded
                 }
-                self._selected.add(name)
-        else:
-            self._selected = {
-                selected
-                for selected in self._selected
-                if _name_key(selected) != _name_key(name)
-            }
+                self._excluded = {
+                    excluded
+                    for excluded in self._excluded
+                    if not _name_key(excluded).startswith(folded + "::")
+                }
+            elif self._selected_ancestor(name):
+                # Unchecking an inherited subdeck excludes it explicitly.
+                self._excluded = {
+                    excluded
+                    for excluded in self._excluded
+                    if not _name_key(excluded).startswith(folded + "::")
+                }
+                self._excluded.add(name)
         self._refresh_checks()
 
     def _choose_all(self, _checked: bool = False) -> None:
         if not self._selection_controls_enabled():
             return
         self._selected.clear()
+        self._excluded.clear()
         self._refresh_checks()
 
     def _choose_current(self, _checked: bool = False) -> None:
@@ -749,6 +855,7 @@ class DeckPickerPopup(QDialog):
         current = _catalog_current_name(self._catalog)
         if current:
             self._selected = {current}
+            self._excluded.clear()
         self._refresh_checks()
 
     def _update_current_button(self) -> None:
@@ -785,14 +892,14 @@ class DeckPickerPopup(QDialog):
 
     def _update_summary(self) -> None:
         count = len(self._selected)
+        excluded = len(self._excluded)
         if _is_custom(self._analysis):
             text = "Custom deck filter"
+        elif not count:
+            text = "All decks"
         else:
-            text = (
-                "All decks"
-                if not count
-                else f"{count} deck{'s' if count != 1 else ''} selected"
-            )
+            text = f"{count} deck{'s' if count != 1 else ''}"
+            text += f" · {excluded} excluded" if excluded else " selected"
         self.selection_label.setText(text)
         self.selection_label.setAccessibleDescription(text)
         self.apply_button.setEnabled(
@@ -807,6 +914,18 @@ class DeckPickerPopup(QDialog):
         return tuple(
             sorted(
                 self._selected,
+                key=lambda name: (order.get(_name_key(name), 10**9), name.casefold()),
+            )
+        )
+
+    def _ordered_exclusions(self) -> tuple[str, ...]:
+        order = {
+            _name_key(_entry_name(entry)): index
+            for index, entry in enumerate(_catalog_entries(self._catalog))
+        }
+        return tuple(
+            sorted(
+                self._excluded,
                 key=lambda name: (order.get(_name_key(name), 10**9), name.casefold()),
             )
         )
@@ -893,8 +1012,7 @@ class DeckPickerPopup(QDialog):
     def _apply(self) -> None:
         if not self.apply_button.isEnabled():
             return
-        selection = self._ordered_selection()
-        self.applied.emit(selection)
+        self.applied.emit(self.selection)
 
     def eventFilter(self, obj: object, event: QEvent) -> bool:
         if event.type() == QEvent.Type.KeyPress:
