@@ -125,6 +125,64 @@ class _Collection:
 
 
 class TargetedAnkiReaderTests(unittest.TestCase):
+    def test_deck_catalog_uses_public_api_and_marks_current_deck(self) -> None:
+        class _CatalogDecks:
+            def __init__(self) -> None:
+                self.include_filtered_calls: list[bool] = []
+
+            def all_names_and_ids(self, *, include_filtered: bool):
+                self.include_filtered_calls.append(include_filtered)
+                return (
+                    types.SimpleNamespace(id=1, name="Default"),
+                    types.SimpleNamespace(id=20, name="Medicine"),
+                    types.SimpleNamespace(id=21, name="Medicine::Cardiology"),
+                    types.SimpleNamespace(id=30, name="Filtered review"),
+                    types.SimpleNamespace(id=20, name="duplicate id"),
+                    types.SimpleNamespace(id=0, name="invalid"),
+                )
+
+            def get_current_id(self) -> int:
+                return 21
+
+        decks = _CatalogDecks()
+        collection = types.SimpleNamespace(decks=decks)
+
+        catalog = adapter.AnkiCollectionReader.deck_catalog(collection)
+
+        self.assertIsInstance(catalog.decks, tuple)
+        self.assertEqual(decks.include_filtered_calls, [True])
+        self.assertEqual(
+            tuple((deck.deck_id, deck.name) for deck in catalog.decks),
+            (
+                (1, "Default"),
+                (20, "Medicine"),
+                (21, "Medicine::Cardiology"),
+                (30, "Filtered review"),
+            ),
+        )
+        self.assertEqual(catalog.current_deck_id, 21)
+        self.assertEqual(catalog.current_deck, catalog.decks[2])
+        self.assertEqual(catalog.entries, catalog.decks)
+
+    def test_deck_catalog_falls_back_to_current_deck_object(self) -> None:
+        class _LegacyDecks:
+            def all_names_and_ids(self, *, include_filtered: bool):
+                self.include_filtered = include_filtered
+                return (types.SimpleNamespace(id=7, name="Legacy"),)
+
+            def current(self):
+                return {"id": "7", "name": "Legacy"}
+
+        decks = _LegacyDecks()
+
+        catalog = adapter.AnkiCollectionReader.deck_catalog(
+            types.SimpleNamespace(decks=decks)
+        )
+
+        self.assertTrue(decks.include_filtered)
+        self.assertEqual(catalog.current_deck_id, 7)
+        self.assertEqual(catalog.current_deck.name, "Legacy")
+
     def test_preview_card_scope_is_positive_ordered_and_deduplicated(self) -> None:
         result = types.SimpleNamespace(card_ids=(4, "5", 4, 0, -1, "bad"))
 

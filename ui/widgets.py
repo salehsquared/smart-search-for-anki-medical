@@ -14,10 +14,12 @@ from typing import Optional, Sequence
 
 try:  # Anki runtime (Anki re-exports Qt, signals, and widget classes)
     from aqt.qt import (  # type: ignore[import-not-found]  # noqa: F401
+        QAbstractItemView,
         QAbstractListModel,
         QAction,
         QApplication,
         QButtonGroup,
+        QBrush,
         QCheckBox,
         QColor,
         QComboBox,
@@ -60,6 +62,8 @@ try:  # Anki runtime (Anki re-exports Qt, signals, and widget classes)
         QTextDocument,
         QTimer,
         QToolButton,
+        QTreeWidget,
+        QTreeWidgetItem,
         Qt,
         QUrl,
         QVBoxLayout,
@@ -84,6 +88,7 @@ except ImportError:  # standalone development / testing
     )
     from PyQt6.QtGui import (  # noqa: F401
         QColor,
+        QBrush,
         QDesktopServices,
         QFont,
         QFontMetrics,
@@ -98,6 +103,7 @@ except ImportError:  # standalone development / testing
         QTextDocument,
     )
     from PyQt6.QtWidgets import (  # noqa: F401
+        QAbstractItemView,
         QApplication,
         QButtonGroup,
         QCheckBox,
@@ -125,6 +131,8 @@ except ImportError:  # standalone development / testing
         QStyleOptionViewItem,
         QTabWidget,
         QToolButton,
+        QTreeWidget,
+        QTreeWidgetItem,
         QVBoxLayout,
         QWidget,
     )
@@ -207,6 +215,7 @@ class SearchField(QLineEdit, PaletteMixin):
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
+        self._compound = False
         self.setPlaceholderText("Search notes, tags, decks…")
         self.setClearButtonEnabled(True)
         self.setMinimumHeight(48)
@@ -225,6 +234,12 @@ class SearchField(QLineEdit, PaletteMixin):
         )
         self.refresh_palette()
 
+    def set_compound(self, compound: bool = True) -> None:
+        """Render as the right segment of a compound deck/search field."""
+
+        self._compound = bool(compound)
+        self.refresh_palette()
+
     def _search_icon(self, color: str) -> QIcon:
         pixmap = QPixmap(22, 22)
         pixmap.fill(Qt.GlobalColor.transparent)
@@ -241,10 +256,16 @@ class SearchField(QLineEdit, PaletteMixin):
     def refresh_palette(self) -> None:
         c = self._palette_colors()
         self._search_action.setIcon(self._search_icon(c["muted"]))
+        corners = (
+            "border-top-left-radius: 0; border-bottom-left-radius: 0;"
+            " border-top-right-radius: 11px; border-bottom-right-radius: 11px;"
+            if self._compound
+            else "border-radius: 11px;"
+        )
         self.setStyleSheet(
             "QLineEdit {"
             f" background: {c['surface']}; color: {c['text']};"
-            f" border: 1px solid {c['chip_border']}; border-radius: 11px;"
+            f" border: 1px solid {c['chip_border']}; {corners}"
             " padding: 0 12px 0 4px;"
             " selection-background-color: "
             f"{c['accent']}; selection-color: {c['accent_text']};"

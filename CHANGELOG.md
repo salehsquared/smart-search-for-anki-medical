@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.0.16] — 2026-07-31
+
+### Added
+
+- Added a searchable, hierarchical deck picker directly inside the search
+  field, with All decks, Current deck, nested multi-selection, and keyboard
+  controls.
+- Deck choices load through Anki's background collection operation, so opening
+  the picker does not block the interface or interrupt a running search.
+
+### Changed
+
+- Picker selections are written as visible native Anki `deck:` syntax, keeping
+  deck scope identical in Smart, Exact, and Semantic modes.
+- Advanced hand-written deck expressions are labeled as custom and preserved;
+  users edit that logic directly in the visible search field.
+
 ## [1.0.15] — 2026-07-30
 
 ### Changed

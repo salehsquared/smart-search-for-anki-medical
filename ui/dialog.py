@@ -17,6 +17,7 @@ from typing import Optional, Sequence
 from .contracts import (
     AboutInfo,
     Correction,
+    DeckCatalog,
     IndexState,
     IndexStatus,
     SearchMode,
@@ -25,6 +26,8 @@ from .contracts import (
     SemanticState,
     SemanticStatus,
 )
+from .deck_picker import DeckPickerPopup, DeckScopeButton
+from .deck_query import apply_deck_selection
 from .results import ResultsView
 from .theme import chrome_colors, semantic_icon_pixmap
 from .preview_pane import InlineResultPane
@@ -445,6 +448,7 @@ class SearchDialog(QDialog):
     flagRequested = pyqtSignal(object, int)  # tuple[SearchResult, ...], 0..7
     suspensionRequested = pyqtSignal(object, bool)  # results, suspend?
     tagActionRequested = pyqtSignal(object, bool)  # results, add?
+    deckPickerRequested = pyqtSignal()
     dialogClosed = pyqtSignal()
 
     def __init__(
@@ -471,6 +475,7 @@ class SearchDialog(QDialog):
         self._message_kind = ""
         self._result_limit = 50
         self._preview_enabled = True
+        self._deck_catalog: Optional[DeckCatalog] = None
         self._close_notified = False
         self._batch_busy = False
         self._batch_results_available = False
@@ -493,10 +498,27 @@ class SearchDialog(QDialog):
 
         top = QHBoxLayout()
         top.setSpacing(10)
-        self.search = SearchField(self)
+
+        self.search_group = QFrame(self)
+        self.search_group.setObjectName("deckSearchGroup")
+        search_group_layout = QHBoxLayout(self.search_group)
+        search_group_layout.setContentsMargins(0, 0, 0, 0)
+        search_group_layout.setSpacing(0)
+
+        self.deck_scope = DeckScopeButton(self.search_group)
+        self.deck_scope.clicked.connect(self._open_deck_picker)
+        search_group_layout.addWidget(self.deck_scope)
+
+        self.search = SearchField(self.search_group)
+        self.search.set_compound(True)
         self.search.textEdited.connect(self._on_text_edited)
         self.search.returnPressed.connect(self._on_search_return)
-        top.addWidget(self.search, 1)
+        search_group_layout.addWidget(self.search, 1)
+        top.addWidget(self.search_group, 1)
+
+        self.deck_picker = DeckPickerPopup(self)
+        self.deck_picker.applied.connect(self._apply_deck_selection)
+        self.deck_picker.retryRequested.connect(self._reload_deck_picker)
 
         self.segmented = SegmentedModeControl(self)
         self.segmented.modeChanged.connect(self._on_mode_changed)
@@ -1008,6 +1030,20 @@ class SearchDialog(QDialog):
     def query(self) -> str:
         return self.search.text()
 
+    def show_deck_catalog(self, catalog: DeckCatalog) -> None:
+        """Populate the open picker and cache its profile-scoped catalog."""
+
+        self._deck_catalog = catalog
+        self.deck_picker.set_catalog(catalog)
+
+    def show_deck_picker_error(self, message: str) -> None:
+        """Show a local picker error without interrupting normal searching."""
+
+        if self._deck_catalog is None:
+            self.deck_picker.set_error(message)
+        else:
+            self.deck_picker.set_refresh_error(message)
+
     def mode(self) -> SearchMode:
         return self.segmented.mode()
 
@@ -1335,6 +1371,7 @@ class SearchDialog(QDialog):
         if busy and not self._batch_busy:
             controls = (
                 self.search,
+                self.deck_scope,
                 self.segmented,
                 self.results,
                 self.settings_button,
@@ -1850,12 +1887,14 @@ class SearchDialog(QDialog):
 
     def set_query(self, text: str) -> None:
         self.search.setText(text)
+        self.deck_scope.set_scope(text)
         self.focus_query()
         self._emit_search()
 
     # ------------------------------------------------------------- behavior
 
     def _on_text_edited(self, text: str) -> None:
+        self.deck_scope.set_scope(text)
         query = str(text).strip()
         self.queryEdited.emit(query)
         if not query:
@@ -1879,6 +1918,39 @@ class SearchDialog(QDialog):
                 return
         self.show_debouncing()
         self._debounce.start()
+
+    def _open_deck_picker(self) -> None:
+        """Open immediately, then refresh choices asynchronously."""
+
+        self.deck_picker.set_query(self.query())
+        if self._deck_catalog is None:
+            self.deck_picker.set_loading()
+        else:
+            self.deck_picker.set_catalog(self._deck_catalog)
+        self.deck_picker.open_anchored(self.deck_scope)
+        self.deckPickerRequested.emit()
+
+    def _reload_deck_picker(self) -> None:
+        self.deck_picker.set_loading()
+        self.deckPickerRequested.emit()
+
+    def _apply_deck_selection(
+        self,
+        names: tuple[str, ...],
+    ) -> None:
+        try:
+            query = apply_deck_selection(
+                self.query(),
+                names,
+            )
+        except ValueError as error:
+            # Unsafe Boolean deck expressions must be edited directly; keep
+            # the visible query intact instead of guessing at its meaning.
+            self.deck_picker.show_validation_error(str(error))
+            return
+        self.deck_picker.accept()
+        self.deck_scope.set_scope(query)
+        self.set_query(query)
 
     def _emit_search(self) -> None:
         query = self.query().strip()
@@ -2026,6 +2098,8 @@ class SearchDialog(QDialog):
             return
         self._close_notified = True
         self._debounce.stop()
+        if self.deck_picker.isVisible():
+            self.deck_picker.reject()
         self.dialogClosed.emit()
 
     def showEvent(self, event) -> None:

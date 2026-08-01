@@ -14,6 +14,8 @@ try:
         AboutInfo,
         CardState,
         Correction,
+        DeckCatalog,
+        DeckEntry,
         HighlightSpan,
         IndexState,
         IndexStatus,
@@ -57,7 +59,9 @@ class _HeldSearchBackend:
         self.submit_error = submit_error
         self.requests = []
         self.callbacks = []
+        self.deck_callbacks = []
         self.cancel_count = 0
+        self.deck_cancel_count = 0
         self.status_reads = 0
         self.saved_settings = []
 
@@ -85,6 +89,14 @@ class _HeldSearchBackend:
     def rebuild_index(self, on_progress, on_success, on_error):
         del on_progress, on_success, on_error
         return None
+
+    def load_decks(self, on_success, on_error):
+        self.deck_callbacks.append((on_success, on_error))
+
+        def cancel() -> None:
+            self.deck_cancel_count += 1
+
+        return cancel
 
 
 @unittest.skipIf(IMPORT_ERROR is not None, f"Qt runtime unavailable: {IMPORT_ERROR}")
@@ -130,6 +142,96 @@ class OffscreenSmokeTests(unittest.TestCase):
         dialog.openAllRequested.connect(opened.append)
         dialog._open_all_results()
         self.assertEqual(opened[0][0].note_id, 42)
+        dialog.deleteLater()
+
+    def test_deck_picker_applies_one_visible_query_and_search(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("bupropion")
+        dialog.deck_scope.set_scope(dialog.query())
+
+        dialog.deck_scope.click()
+        self.assertEqual(len(backend.deck_callbacks), 1)
+        backend.deck_callbacks[-1][0](
+            DeckCatalog(
+                decks=(
+                    DeckEntry(1, "AnKing"),
+                    DeckEntry(2, "AnKing::Step 2"),
+                    DeckEntry(3, "Personal"),
+                ),
+                current_deck_id=2,
+            )
+        )
+        self.app.processEvents()
+
+        dialog.deck_picker._selected = {"AnKing::Step 2", "Personal"}
+        dialog.deck_picker._refresh_checks()
+        dialog.deck_picker._apply()
+        self.app.processEvents()
+
+        self.assertEqual(
+            dialog.query(),
+            'bupropion (deck:"AnKing::Step 2" OR deck:"Personal")',
+        )
+        self.assertIn("2 decks", dialog.deck_scope.text())
+        self.assertEqual(len(backend.requests), 1)
+        self.assertEqual(backend.requests[0].query, dialog.query())
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_deck_picker_ignores_stale_catalog_completion(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+
+        dialog.deck_scope.click()
+        first_success = backend.deck_callbacks[-1][0]
+        dialog._reload_deck_picker()
+        second_success = backend.deck_callbacks[-1][0]
+        self.assertEqual(backend.deck_cancel_count, 1)
+
+        first_success(DeckCatalog((DeckEntry(1, "Stale"),), 1))
+        second_success(DeckCatalog((DeckEntry(2, "Current"),), 2))
+        self.app.processEvents()
+
+        self.assertEqual(
+            tuple(entry.name for entry in dialog._deck_catalog.decks),
+            ("Current",),
+        )
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_unsafe_custom_deck_expression_is_never_rewritten(self) -> None:
+        dialog = SearchDialog()
+        original = 'deck:"A" OR bupropion'
+        dialog.search.setText(original)
+        dialog.deck_scope.set_scope(original)
+        dialog.deck_picker.set_query(original)
+        dialog.deck_picker.set_catalog(
+            DeckCatalog((DeckEntry(1, "A"), DeckEntry(2, "New")), 1)
+        )
+        dialog.deck_picker.show()
+        dialog._apply_deck_selection(("New",))
+        self.app.processEvents()
+
+        self.assertEqual(dialog.query(), original)
+        self.assertTrue(dialog.deck_picker.isVisible())
+        self.assertIn("must be edited", dialog.deck_picker.message_label.text())
+        dialog.deleteLater()
+
+    def test_closing_search_dialog_also_closes_deck_picker(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.deck_picker.show()
+        self.app.processEvents()
+        self.assertTrue(dialog.deck_picker.isVisible())
+
+        dialog.close()
+        self.app.processEvents()
+
+        self.assertFalse(dialog.isVisible())
+        self.assertFalse(dialog.deck_picker.isVisible())
         dialog.deleteLater()
 
     def test_snippet_builder_escapes_card_text(self) -> None:
@@ -1210,7 +1312,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.15")
+        self.assertEqual(fallback.version, "1.0.16")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())

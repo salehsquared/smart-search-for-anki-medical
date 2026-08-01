@@ -22,6 +22,8 @@ __all__ = [
     "SemanticRecovery",
     "HighlightSpan",
     "FilterChip",
+    "DeckEntry",
+    "DeckCatalog",
     "Correction",
     "CardState",
     "SearchResult",
@@ -37,6 +39,7 @@ __all__ = [
     "ProgressCallback",
     "SearchSuccessCallback",
     "StatusCallback",
+    "DeckCatalogCallback",
     "clamp_spans",
     "merge_spans",
     "normalize_query",
@@ -139,6 +142,58 @@ class FilterChip:
         if re.search(r"\s", self.value):
             return f'{self.key}:"{self.value}"'
         return f"{self.key}:{self.value}"
+
+
+@dataclass(frozen=True, slots=True)
+class DeckEntry:
+    """One native Anki deck exposed to the search UI."""
+
+    deck_id: int
+    name: str
+
+    def __post_init__(self) -> None:
+        deck_id = int(self.deck_id)
+        name = str(self.name)
+        if deck_id <= 0:
+            raise ValueError("DeckEntry.deck_id must be a positive integer")
+        if not name:
+            raise ValueError("DeckEntry.name must not be empty")
+        object.__setattr__(self, "deck_id", deck_id)
+        object.__setattr__(self, "name", name)
+
+
+@dataclass(frozen=True, slots=True)
+class DeckCatalog:
+    """Immutable deck choices and the deck currently selected in Anki."""
+
+    decks: tuple[DeckEntry, ...] = ()
+    current_deck_id: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "decks", tuple(self.decks))
+        current_deck_id = self.current_deck_id
+        if current_deck_id is not None:
+            current_deck_id = int(current_deck_id)
+            if current_deck_id <= 0:
+                current_deck_id = None
+        object.__setattr__(self, "current_deck_id", current_deck_id)
+
+    @property
+    def entries(self) -> tuple[DeckEntry, ...]:
+        """Alias retained for consumers that refer to catalog entries."""
+
+        return self.decks
+
+    @property
+    def current_deck(self) -> Optional[DeckEntry]:
+        return next(
+            (
+                deck
+                for deck in self.decks
+                if deck.deck_id == self.current_deck_id
+            ),
+            None,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,6 +381,7 @@ ErrorCallback = Callable[[str], None]
 ProgressCallback = Callable[[float, str], None]  # progress 0.0–1.0, detail text
 SearchSuccessCallback = Callable[[SearchResponse], None]
 StatusCallback = Callable[[IndexStatus], None]
+DeckCatalogCallback = Callable[[DeckCatalog], None]
 
 
 @runtime_checkable
@@ -342,6 +398,12 @@ class SearchBackend(Protocol):
         self,
         request: SearchRequest,
         on_success: SearchSuccessCallback,
+        on_error: ErrorCallback,
+    ) -> Optional[CancelCallback]: ...
+
+    def load_decks(
+        self,
+        on_success: DeckCatalogCallback,
         on_error: ErrorCallback,
     ) -> Optional[CancelCallback]: ...
 

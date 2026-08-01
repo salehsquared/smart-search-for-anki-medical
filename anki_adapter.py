@@ -10,6 +10,7 @@ import sys
 from typing import Any
 
 from .backend.models import IndexedNote
+from .ui.contracts import DeckCatalog, DeckEntry
 
 CardStateSnapshot = tuple[int, int, bool]  # card_id, flag, suspended
 CardIdsByNote = dict[int, tuple[int, ...]]
@@ -256,6 +257,69 @@ class AnkiCollectionReader:
     connection inside a serialized ``QueryOp``.  The add-on never opens
     ``collection.anki2`` itself and never writes to it.
     """
+
+    @staticmethod
+    def deck_catalog(collection: Any) -> DeckCatalog:
+        """Read all native deck choices and Anki's current deck.
+
+        The caller is responsible for invoking this through a serialized
+        collection ``QueryOp``.  The public deck manager API is used instead
+        of inspecting Anki's database or legacy deck dictionary directly.
+        """
+
+        deck_manager = collection.decks
+        decks: list[DeckEntry] = []
+        seen_ids: set[int] = set()
+        for item in deck_manager.all_names_and_ids(include_filtered=True):
+            try:
+                if isinstance(item, Mapping):
+                    deck_id = int(item.get("id", 0) or 0)
+                    name = str(item.get("name", "") or "")
+                else:
+                    deck_id = int(getattr(item, "id", 0) or 0)
+                    name = str(getattr(item, "name", "") or "")
+            except (TypeError, ValueError):
+                continue
+            if deck_id <= 0 or not name or deck_id in seen_ids:
+                continue
+            decks.append(DeckEntry(deck_id=deck_id, name=name))
+            seen_ids.add(deck_id)
+
+        current_deck_id: int | None = None
+        for accessor_name in ("get_current_id", "selected"):
+            accessor = getattr(deck_manager, accessor_name, None)
+            if not callable(accessor):
+                continue
+            try:
+                candidate = int(accessor() or 0)
+            except Exception:  # noqa: BLE001 - profile transition race
+                continue
+            if candidate > 0:
+                current_deck_id = candidate
+                break
+
+        if current_deck_id is None:
+            current = getattr(deck_manager, "current", None)
+            if callable(current):
+                try:
+                    current = current()
+                except Exception:  # noqa: BLE001 - profile transition race
+                    current = None
+            if isinstance(current, Mapping):
+                current = current.get("id")
+            else:
+                current = getattr(current, "id", current)
+            try:
+                candidate = int(current or 0)
+            except (TypeError, ValueError):
+                candidate = 0
+            if candidate > 0:
+                current_deck_id = candidate
+
+        return DeckCatalog(
+            decks=tuple(decks),
+            current_deck_id=current_deck_id,
+        )
 
     def snapshot(
         self,

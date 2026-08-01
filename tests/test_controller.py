@@ -120,6 +120,22 @@ class _ConcurrentExternalBackend(_SynchronousBackend):
         worker.start()
 
 
+class _DeferredCollectionBackend(_SynchronousBackend):
+    def __init__(self, *args, **kwargs) -> None:
+        self.pending_query_ops = []
+        super().__init__(*args, **kwargs)
+
+    def _run_query_op(self, *, uses_collection, op, success, failure):
+        self.pending_query_ops.append(
+            {
+                "uses_collection": uses_collection,
+                "op": op,
+                "success": success,
+                "failure": failure,
+            }
+        )
+
+
 class _BlockingSemanticService:
     def __init__(
         self,
@@ -306,6 +322,61 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(saved["preview_enabled"])
         self.assertFalse(saved["ui"]["preview_enabled"])
         self.assertEqual(saved["ui"]["width"], 1234)
+
+    def test_load_decks_uses_serialized_collection_query(self) -> None:
+        self.backend.mw.col.decks = types.SimpleNamespace(
+            all_names_and_ids=lambda *, include_filtered: (
+                types.SimpleNamespace(id=1, name="Default"),
+                types.SimpleNamespace(id=40, name="Medicine::Cardiology"),
+            ),
+            get_current_id=lambda: 40,
+        )
+        received = []
+        errors = []
+
+        cancel = self.backend.load_decks(received.append, errors.append)
+
+        self.assertTrue(callable(cancel))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(received), 1)
+        catalog = received[0]
+        self.assertEqual(catalog.current_deck_id, 40)
+        self.assertEqual(
+            tuple(deck.name for deck in catalog.decks),
+            ("Default", "Medicine::Cardiology"),
+        )
+
+    def test_load_decks_ignores_cancelled_and_stale_callbacks(self) -> None:
+        backend = _DeferredCollectionBackend(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        backend.activate_profile(auto_rebuild=False)
+        backend.mw.col.decks = types.SimpleNamespace(
+            all_names_and_ids=lambda *, include_filtered: (
+                types.SimpleNamespace(id=1, name="Default"),
+            ),
+            get_current_id=lambda: 1,
+        )
+        received = []
+        errors = []
+
+        cancel = backend.load_decks(received.append, errors.append)
+        pending = backend.pending_query_ops.pop()
+        self.assertTrue(pending["uses_collection"])
+        catalog = pending["op"](backend.mw.col)
+        cancel()
+        pending["success"](catalog)
+        self.assertEqual(received, [])
+        self.assertEqual(errors, [])
+
+        backend.load_decks(received.append, errors.append)
+        stale = backend.pending_query_ops.pop()
+        backend.deactivate_profile()
+        stale["failure"](RuntimeError("profile closed"))
+        self.assertEqual(received, [])
+        self.assertEqual(errors, [])
 
     def test_async_profile_activation_opens_indexes_off_caller_thread(self) -> None:
         self.backend.deactivate_profile()

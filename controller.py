@@ -72,6 +72,8 @@ from .ui.contracts import (
     AboutInfo,
     CardState,
     Correction,
+    DeckCatalog,
+    DeckCatalogCallback,
     FilterChip,
     HighlightSpan,
     IndexState,
@@ -550,6 +552,51 @@ class AnkiSearchBackend:
 
     # ------------------------------------------------------------------
     # UI protocol: settings and status
+
+    def load_decks(
+        self,
+        on_success: DeckCatalogCallback,
+        on_error: ErrorCallback,
+    ) -> Callable[[], None]:
+        """Load the active profile's deck catalog on Anki's collection worker."""
+
+        event = self._new_cancellation()
+        context = self._context
+        token = context.token if context is not None else -1
+        if context is None:
+            self._forget_cancellation(event)
+            on_error("Open an Anki profile to choose a deck.")
+            return event.set
+
+        def op(collection: Any) -> DeckCatalog:
+            _raise_if_cancelled(event)
+            catalog = self.reader.deck_catalog(collection)
+            _raise_if_cancelled(event)
+            return catalog
+
+        def success(catalog: DeckCatalog) -> None:
+            self._forget_cancellation(event)
+            if self._cancelled(event, token):
+                return
+            on_success(catalog)
+
+        def failure(error: Exception) -> None:
+            self._forget_cancellation(event)
+            if isinstance(error, _CancelledOperation) or self._cancelled(event, token):
+                return
+            on_error(str(error))
+
+        try:
+            self._run_query_op(
+                uses_collection=True,
+                op=op,
+                success=success,
+                failure=failure,
+            )
+        except Exception:
+            self._forget_cancellation(event)
+            raise
+        return event.set
 
     def load_settings(self) -> UISettings:
         config = self._read_config()

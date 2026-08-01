@@ -24,6 +24,8 @@ type naturally, and press **Return** to open the result in Anki's Browser.
   `rated:`, field searches, Boolean groups, and wildcards are delegated to
   Anki.
 - Card-specific filters return only the sibling cards that actually match.
+- Choose one or several nested decks from the searchable deck picker without
+  having to remember or type their full paths.
 - Adaptive relevance cutoffs remove weak trailing results instead of filling
   the list to an arbitrary maximum.
 
@@ -91,7 +93,7 @@ and [third-party notices](THIRD_PARTY_NOTICES.md). The intended hosted notice is
 
 - **Host:** Anki Desktop only. Desktop add-ons do not run inside AnkiMobile or
   AnkiDroid.
-- **Anki:** v1.0.15 is intentionally limited to Anki Desktop **26.05**.
+- **Anki:** Current builds are intentionally limited to Anki Desktop **26.05**.
 - **Tested host:** macOS 26.3 on Apple silicon. Smart and Exact do not load the
   optional platform-specific Semantic runtime, but Windows, Linux, and Intel
   Mac integration testing is not part of this release's support claim.

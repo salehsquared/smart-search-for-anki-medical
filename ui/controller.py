@@ -53,6 +53,8 @@ class SearchController(QObject):
     _sig_rebuild_progress = pyqtSignal(float, str)
     _sig_rebuild_success = pyqtSignal(object)
     _sig_rebuild_error = pyqtSignal(str)
+    _sig_decks_success = pyqtSignal(int, object)
+    _sig_decks_error = pyqtSignal(int, str)
 
     def __init__(
         self,
@@ -70,6 +72,9 @@ class SearchController(QObject):
         self._active_request_id: Optional[int] = None
         self._cancel_search: Optional[CancelCallback] = None
         self._cancel_rebuild: Optional[CancelCallback] = None
+        self._deck_request_counter = 0
+        self._active_deck_request_id: Optional[int] = None
+        self._cancel_deck_load: Optional[CancelCallback] = None
         self._dismissed: set[Correction] = set()
         self._force_literal = False
         self._last_query = ""
@@ -84,6 +89,8 @@ class SearchController(QObject):
         self._sig_rebuild_progress.connect(self._on_rebuild_progress)
         self._sig_rebuild_success.connect(self._on_rebuild_success)
         self._sig_rebuild_error.connect(self._on_rebuild_error)
+        self._sig_decks_success.connect(self._on_decks_success)
+        self._sig_decks_error.connect(self._on_decks_error)
 
         # Dialog intents.
         dialog.queryEdited.connect(self._on_query_edited)
@@ -100,6 +107,7 @@ class SearchController(QObject):
         dialog.flagRequested.connect(self.flagRequested)
         dialog.suspensionRequested.connect(self.suspensionRequested)
         dialog.tagActionRequested.connect(self.tagActionRequested)
+        dialog.deckPickerRequested.connect(self.load_decks)
         dialog.settingsChanged.connect(self._on_settings_changed)
         dialog.dialogClosed.connect(self._on_dialog_closed)
 
@@ -153,6 +161,7 @@ class SearchController(QObject):
             except Exception:  # noqa: BLE001
                 pass
             self._cancel_rebuild = None
+        self._cancel_pending_deck_load()
 
     def dispose(self) -> None:
         """Permanently detach this controller before Qt deletes its dialog."""
@@ -169,6 +178,70 @@ class SearchController(QObject):
             except Exception:  # noqa: BLE001
                 pass
             self._cancel_rebuild = None
+        self._cancel_pending_deck_load()
+
+    # ---------------------------------------------------------- deck picker
+
+    def load_decks(self) -> None:
+        """Refresh deck choices without blocking search or the GUI thread."""
+
+        if self._disposed or not self._active:
+            return
+        self._cancel_pending_deck_load()
+        self._deck_request_counter += 1
+        request_id = self._deck_request_counter
+        self._active_deck_request_id = request_id
+        loader = getattr(self._backend, "load_decks", None)
+        if not callable(loader):
+            self._active_deck_request_id = None
+            self._dialog.show_deck_picker_error(
+                "Deck choices are unavailable in this Anki version."
+            )
+            return
+        try:
+            cancel = loader(
+                on_success=lambda catalog: self._sig_decks_success.emit(
+                    request_id, catalog
+                ),
+                on_error=lambda message: self._sig_decks_error.emit(
+                    request_id, str(message)
+                ),
+            )
+        except Exception as error:  # noqa: BLE001 - normalize host failures
+            if self._active_deck_request_id == request_id:
+                self._active_deck_request_id = None
+                self._dialog.show_deck_picker_error(str(error))
+            return
+        if self._active_deck_request_id == request_id:
+            self._cancel_deck_load = cancel
+
+    def _cancel_pending_deck_load(self) -> None:
+        self._deck_request_counter += 1
+        self._active_deck_request_id = None
+        if self._cancel_deck_load is not None:
+            try:
+                self._cancel_deck_load()
+            except Exception:  # noqa: BLE001 - cancellation is best effort
+                pass
+            self._cancel_deck_load = None
+
+    def _on_decks_success(self, request_id: int, catalog) -> None:
+        if self._disposed or not self._active:
+            return
+        if request_id != self._active_deck_request_id:
+            return
+        self._active_deck_request_id = None
+        self._cancel_deck_load = None
+        self._dialog.show_deck_catalog(catalog)
+
+    def _on_decks_error(self, request_id: int, message: str) -> None:
+        if self._disposed or not self._active:
+            return
+        if request_id != self._active_deck_request_id:
+            return
+        self._active_deck_request_id = None
+        self._cancel_deck_load = None
+        self._dialog.show_deck_picker_error(message)
 
     def capture_search_generation(self) -> SearchGeneration:
         """Return an opaque snapshot for a later conditional refresh.
