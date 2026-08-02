@@ -2,11 +2,11 @@
 
 ## Live listing
 
-- **Status:** publication candidate; existing v1.0.15 listing remains public
-- **Prepared:** 2026-08-01
+- **Status:** v1.0.19 public beta is live
+- **Published:** 2026-08-02
 - **AnkiWeb code:** `677438639`
 - **Public URL:** https://ankiweb.net/shared/info/677438639
-- **Intended supported Anki versions:** 24.11 through hard maximum 26.08
+- **Supported Anki versions:** 24.11 through hard maximum 26.08
 
 ## Listing fields
 
@@ -182,12 +182,13 @@ contain no real collection data.
 ## Publication record
 
 - v1.0.15 was published on 2026-07-31 as AnkiWeb item `677438639`; it remains
-  the live version until this candidate is uploaded.
-- v1.0.19 must update the existing item with `min_point_version=241100` and
-  hard `max_point_version=-260800`; do not create a second listing or branch.
+  the prior public release.
+- v1.0.19 updated that existing item on 2026-08-02 with
+  `min_point_version=241100` and hard `max_point_version=-260800`; no second
+  listing or branch was created.
 - `release/ANKIWEB_DESCRIPTION_1.0.19.md` is the canonical description source.
-- Final server metadata, served-archive comparison, and numeric-code QA belong
-  in `release/RELEASE_RECORD_1.0.19.md` after upload.
+- The rendered listing, server metadata, served-archive comparison, and
+  numeric-code QA are recorded in `release/RELEASE_RECORD_1.0.19.md`.
 
 ## Listing maintenance notes
 

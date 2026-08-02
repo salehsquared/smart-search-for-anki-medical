@@ -4,6 +4,7 @@
 
 - Version: `1.0.19`
 - Prepared: 2026-08-01
+- Published: 2026-08-02
 - Supported Anki range: 24.11 through 26.08
 - AnkiWeb point-version range: minimum `241100`, hard maximum `-260800`
 - Semantic Search: macOS 14 or later on Apple silicon
@@ -61,7 +62,71 @@ reopens the existing profile data.
 
 ## Publication record
 
-Publication to the existing AnkiWeb item and the GitHub v1.0.19 prerelease is
-pending. After publication, record the served metadata, artifact comparison,
-numeric-code clean installs, and real v1.0.15 → v1.0.19 button-driven upgrade
-below before declaring the release complete.
+- Status: public beta
+- AnkiWeb code: `677438639`
+- AnkiWeb listing: https://ankiweb.net/shared/info/677438639
+- GitHub prerelease:
+  https://github.com/salehsquared/smart-search-for-anki-medical/releases/tag/v1.0.19
+- Privacy notice: https://medbrevia.com/legal/smart-search-privacy
+
+The existing AnkiWeb item was updated in place; no duplicate listing or branch
+was created. The rendered listing shows **24.11–26.08**, all three publication
+images render, the support link targets the prepared issue forms, and the
+privacy page returns HTTP 200.
+
+### Served artifact and compatibility boundary
+
+- Supported requests at `p=241100` and `p=260800` each downloaded exactly
+  `52,244,211` bytes with SHA-256
+  `dd36b476b4dc3513e408f114b580c0e0db92adead7b3025496edcf8cc4852de8`.
+- Both downloads were byte-identical to the frozen release artifact.
+- AnkiWeb's redirect metadata reports `minpt=241100`,
+  `maxpt=-260800`, and `bidx=0`.
+- Requests immediately outside the range, at `p=241099` and `p=260900`, return
+  HTTP 404 with `Add-on not available for your Anki version.`
+- The served manifest reports `human_version=1.0.19`,
+  `min_point_version=241100`, and `max_point_version=260800`.
+
+The initial archive upload retained the prior listing's 26.05-only server
+range. The mandatory boundary download caught that mismatch before completion;
+the listing was corrected and the full boundary/hash validation was rerun
+successfully.
+
+### GitHub distribution
+
+The annotated `v1.0.19` tag resolves to merge commit
+`c4819569a80108c3bee3a2c905934edd4f0650db`. The public prerelease contains the
+`.ankiaddon` and checksum sidecar. A fresh unauthenticated download reproduced
+the frozen size and SHA-256 above, and the sidecar declares the same digest.
+
+### Public numeric-code upgrade
+
+An isolated Anki 26.05 environment installed the preserved public v1.0.15
+archive under numeric folder `677438639`. The test then added a `user_files`
+sentinel, a synthetic `search.sqlite3` database with a probe row, and customized
+add-on configuration before calling Anki's official
+`aqt.addons.download_and_install_addon()` path for code `677438639`.
+
+The live update returned `InstallOk` and installed v1.0.19 with branch metadata
+`min=241100`, `max=-260800`, and `bidx=0`. The sentinel and SQLite hashes were
+unchanged at
+`d6f126e9e323a8352290a39ce5c1b382522d308a3ee422493cf0eccac3e6ac44`
+and
+`5d454efc71659c92c5ccc5bfab8a6f2c3bad05ec39d1e65bc5f0b22e35ecafcf`,
+respectively. The probe row and customized configuration survived, and the
+final add-ons directory contained only `677438639`: no
+`smart_search_medical` development duplicate and no stranded `files_backup`
+directory.
+
+A second empty temporary add-ons folder then performed an independent clean
+install through the same official API. It returned `InstallOk`; the downloaded
+bytes matched the frozen archive, all 67 archive members matched the installed
+tree byte-for-byte, and the only additional file was Anki-managed `meta.json`.
+The result again contained only `677438639`, with no duplicate named folder or
+`files_backup`.
+
+No real Anki profile was opened or modified. The test changed only the
+temporary environment's trash callback so replacement of the disposable old
+install would not place test files in the user's Trash; the network download,
+compatibility decision, backup, installation, and restoration logic were
+Anki's official `AddonManager` implementation.
