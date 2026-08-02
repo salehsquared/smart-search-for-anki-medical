@@ -1,12 +1,12 @@
-# AnkiWeb listing record — v1.0.15
+# AnkiWeb listing record — v1.0.19
 
 ## Live listing
 
-- **Status:** public
-- **Published:** 2026-07-31
+- **Status:** publication candidate; existing v1.0.15 listing remains public
+- **Prepared:** 2026-08-01
 - **AnkiWeb code:** `677438639`
 - **Public URL:** https://ankiweb.net/shared/info/677438639
-- **Supported Anki version:** exactly 26.05
+- **Intended supported Anki versions:** 24.11 through hard maximum 26.08
 
 ## Listing fields
 
@@ -58,10 +58,9 @@ Smart Search for Anki — Medical is a keyboard-first search palette for large
 medical collections. Press **Command-K on macOS** or **Ctrl-K on Windows/Linux**
 from Anki and start typing.
 
-**Public beta compatibility:** this build is intentionally limited to **Anki
-Desktop 26.05**. It was integration-tested on macOS 26.3 on Apple silicon.
-Semantic Search requires **macOS 14 or later on Apple silicon**. Smart and Exact
-do not load the optional Semantic runtime, but Windows, Linux, and Intel Mac
+**Public beta compatibility:** v1.0.19 supports **Anki Desktop 24.11 through
+26.08** and was integration-tested on macOS with Apple silicon. Semantic Search
+requires **macOS 14 or later on Apple silicon**. Windows, Linux, and Intel Mac
 integration testing is not part of this release's support claim.
 
 - **Smart** search is case-insensitive, tolerates misspellings, and recognizes
@@ -78,6 +77,8 @@ Card-specific filters return only the sibling cards that actually match.
 
 ### Designed for real collections
 
+- Use the searchable hierarchical deck picker to select several decks or keep
+  specific subdeck branches excluded from a selected parent.
 - Preview and edit the selected card in a resizable pane without leaving the
   search window. The pane can be expanded or temporarily dismissed.
 - Open the selected result—or exactly the checked results—in Anki's Browser.
@@ -88,6 +89,8 @@ Card-specific filters return only the sibling cards that actually match.
 - Weak matches are removed with adaptive relevance cutoffs instead of filling
   the list to an arbitrary maximum.
 - Adds, edits, and deletes update the disposable search data in the background.
+- Public AnkiWeb copies offer **Check & Update** in About and delegate the
+  installation to Anki's native updater.
 
 Tags apply to notes. Flags and suspension apply to cards. Changes use Anki's
 supported, undoable collection operations and form one clean Undo step per
@@ -129,7 +132,7 @@ collection. You can continue using Smart and Exact while Semantic indexes.
 ### Important limitations
 
 - This is an Anki Desktop add-on. It does not run inside AnkiMobile or AnkiDroid.
-- v1.0.15 supports Anki Desktop 26.05 only.
+- v1.0.19 supports Anki Desktop 24.11 through 26.08 only.
 - Search indexes are local to each desktop profile and do not sync through
   AnkiWeb.
 - Semantic results are relevance suggestions, not clinical guidance. Always
@@ -166,7 +169,7 @@ code. Local search indexes are disposable and can be rebuilt safely.
 3. `assets/screenshots/03-bulk-actions.png` — multi-select, Browser, flags,
    suspension, and tags
 4. `assets/screenshots/04-about-privacy.png` — creator credit, privacy promise,
-   and mobile-app link
+   mobile-app link, and native update control
 5. `assets/screenshots/05-inline-editor.png` — real clean-profile capture of
    the inline editor handling an incomplete native filter without losing the
    active search
@@ -178,17 +181,13 @@ contain no real collection data.
 
 ## Publication record
 
-- v1.0.15 was published on 2026-07-31 as AnkiWeb item `677438639`.
-- AnkiWeb reports `min_point_version=260500`,
-  `max_point_version=-260500`, and `human_version=1.0.15`, corresponding to
-  support for exactly Anki 26.05.
-- Installation by the numeric code passed in a fresh disposable Anki base. See
-  `release/RELEASE_RECORD_1.0.15.md` for the installed-file comparison and
-  functional smoke-test evidence.
-- `release/ANKIWEB_DESCRIPTION_1.0.15.md` is the concise canonical description
-  source for this release.
-- Future releases should update existing AnkiWeb item `677438639` rather than
-  create a second listing.
+- v1.0.15 was published on 2026-07-31 as AnkiWeb item `677438639`; it remains
+  the live version until this candidate is uploaded.
+- v1.0.19 must update the existing item with `min_point_version=241100` and
+  hard `max_point_version=-260800`; do not create a second listing or branch.
+- `release/ANKIWEB_DESCRIPTION_1.0.19.md` is the canonical description source.
+- Final server metadata, served-archive comparison, and numeric-code QA belong
+  in `release/RELEASE_RECORD_1.0.19.md` after upload.
 
 ## Listing maintenance notes
 

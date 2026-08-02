@@ -113,6 +113,10 @@ class _CancelledOperation(RuntimeError):
     pass
 
 
+class _BundleUpdatePending(RuntimeError):
+    pass
+
+
 @dataclass(slots=True)
 class _ProfileContext:
     token: int
@@ -215,6 +219,8 @@ class AnkiSearchBackend:
         self._engine_lock = threading.RLock()
         self._search_lock = threading.Lock()
         self._active_cancellations: set[threading.Event] = set()
+        self._background_op_count = 0
+        self._bundle_update_running = False
         self._maintenance_running = False
         self._vocabulary_refresh_running = False
         self._vocabulary_refresh_token: int | None = None
@@ -238,6 +244,75 @@ class AnkiSearchBackend:
     @property
     def profile_id(self) -> str | None:
         return self._context.key if self._context else None
+
+    @property
+    def bundle_update_running(self) -> bool:
+        """Whether Anki has exclusive access to replace this add-on bundle."""
+
+        with self._state_lock:
+            return self._bundle_update_running
+
+    def begin_bundle_update(self) -> bool:
+        """Claim an exclusive, fail-closed lane for Anki's native updater.
+
+        Every QueryOp is counted until its completion callback has fully
+        returned.  Combining that count with the operation phase flags under
+        one lock prevents a writer from slipping in between the idle check and
+        the update request.
+        """
+
+        with self._state_lock:
+            if (
+                self._bundle_update_running
+                or self._background_op_count
+                or self._active_cancellations
+                or self._maintenance_running
+                or self._vocabulary_refresh_running
+                or self._semantic_phase is not None
+            ):
+                return False
+            self._bundle_update_running = True
+            return True
+
+    def finish_bundle_update(self) -> None:
+        """Release a check that did not replace the on-disk bundle."""
+
+        with self._state_lock:
+            self._bundle_update_running = False
+
+    def quiesce_for_bundle_update(
+        self,
+        *,
+        on_ready: VoidCallback,
+        on_error: ErrorCallback,
+    ) -> None:
+        """Close profile-owned files before Anki replaces the add-on folder."""
+
+        with self._state_lock:
+            if not self._bundle_update_running:
+                on_error("The Smart Search update lane is not active.")
+                return
+            if self._background_op_count or self._active_cancellations:
+                on_error("Smart Search is still finishing background work.")
+                return
+            self._profile_token += 1
+            context = self._context
+            self._context = None
+        self._set_index_state(
+            IndexState.UNAVAILABLE,
+            detail="Updating Smart Search. Restart Anki when prompted.",
+        )
+        if context is None:
+            on_ready()
+            return
+
+        self._run_query_op(
+            uses_collection=False,
+            op=lambda _collection: self._close_profile_context(context),
+            success=lambda _result: on_ready(),
+            failure=lambda error: on_error(str(error)),
+            allow_during_bundle_update=True,
+        )
 
     def activate_profile(self, *, auto_rebuild: bool = True) -> IndexStatus:
         """Open the profile's external indexes without touching collection data."""
@@ -322,6 +397,9 @@ class AnkiSearchBackend:
     def _begin_profile_activation(
         self,
     ) -> tuple[int, str, str, str] | None:
+        with self._state_lock:
+            if self._bundle_update_running:
+                return None
         if self._context is not None:
             self.deactivate_profile()
         collection = getattr(self.mw, "col", None)
@@ -462,18 +540,7 @@ class AnkiSearchBackend:
 
     def _close_context_in_background(self, context: _ProfileContext) -> None:
         def close_retired_context(_collection: Any) -> None:
-            # Semantic readers take _search_lock and lexical readers take
-            # _engine_lock. Waiting for both in the shared global order keeps
-            # profile_will_close non-blocking without closing SQLite beneath
-            # an in-flight reader.
-            with self._search_lock, self._engine_lock:
-                context.engine.semantic_provider = None
-                context.index.close()
-                semantic = context.semantic
-                vector_index = getattr(semantic, "index", None)
-                close = getattr(vector_index, "close", None)
-                if callable(close):
-                    close()
+            self._close_profile_context(context)
 
         try:
             self._run_query_op(
@@ -490,6 +557,21 @@ class AnkiSearchBackend:
                 name="smart-search-profile-cleanup",
                 daemon=True,
             ).start()
+
+    def _close_profile_context(self, context: _ProfileContext) -> None:
+        """Close every profile-owned handle under the global reader order."""
+
+        # Semantic readers take _search_lock and lexical readers take
+        # _engine_lock. Waiting for both in the shared global order avoids
+        # closing SQLite beneath an in-flight reader.
+        with self._search_lock, self._engine_lock:
+            context.engine.semantic_provider = None
+            context.index.close()
+            semantic = context.semantic
+            vector_index = getattr(semantic, "index", None)
+            close = getattr(vector_index, "close", None)
+            if callable(close):
+                close()
 
     def _open_or_recover_index(self, path: Path) -> SmartSearchIndex:
         try:
@@ -1813,7 +1895,7 @@ class AnkiSearchBackend:
     def _begin_maintenance(self, *, reconcile: bool = False) -> bool:
         del reconcile
         with self._state_lock:
-            if self._maintenance_running:
+            if self._bundle_update_running or self._maintenance_running:
                 return False
             self._maintenance_running = True
             return True
@@ -1840,6 +1922,8 @@ class AnkiSearchBackend:
         if semantic is None:
             return False
         with self._state_lock:
+            if self._bundle_update_running:
+                return False
             if self._semantic_phase is not None:
                 return False
         status = context.semantic_snapshot
@@ -1875,6 +1959,8 @@ class AnkiSearchBackend:
             context.semantic_needs_reconcile = semantic is not None
             return False
         with self._state_lock:
+            if self._bundle_update_running:
+                return False
             context.semantic_pending_note_ids.update(
                 int(note_id)
                 for note_id in changed_note_ids
@@ -1898,6 +1984,8 @@ class AnkiSearchBackend:
         if semantic is None or context is not self._context:
             return False
         with self._state_lock:
+            if self._bundle_update_running:
+                return False
             if self._semantic_phase is not None:
                 return False
             changed_ids = tuple(sorted(context.semantic_pending_note_ids))
@@ -1999,6 +2087,10 @@ class AnkiSearchBackend:
         on_success: StatusCallback = _noop,
         on_error: ErrorCallback = _noop,
     ) -> Callable[[], None] | None:
+        with self._state_lock:
+            if self._bundle_update_running:
+                on_error("Restart Anki to finish the Smart Search update.")
+                return None
         context = self._context
         if not bool(self._read_config().get("semantic_enabled", True)):
             on_error("Semantic search is disabled in the add-on configuration.")
@@ -2017,11 +2109,6 @@ class AnkiSearchBackend:
                 context.semantic_error_recovery = SemanticRecovery.REINDEX
                 on_error("Semantic search setup could not start. Try again.")
                 return None
-        if self._semantic_phase is not None:
-            on_error("Semantic setup is already running.")
-            return None
-
-        event = self._new_cancellation()
         token = context.token
         semantic_status = context.semantic_snapshot
         if semantic_status is None:
@@ -2033,12 +2120,20 @@ class AnkiSearchBackend:
             context.semantic_error_recovery is SemanticRecovery.MODEL
             or getattr(semantic_status, "error_kind", None) == "model"
         )
-        context.semantic_error = None
-        context.semantic_error_recovery = None
         with self._state_lock:
+            if self._bundle_update_running:
+                on_error("Restart Anki to finish the Smart Search update.")
+                return None
+            if self._semantic_phase is not None:
+                on_error("Semantic setup is already running.")
+                return None
             self._semantic_phase = "installing"
             self._semantic_progress = 0.0
             self._semantic_phase_detail = "Setting up semantic search."
+
+        event = self._new_cancellation()
+        context.semantic_error = None
+        context.semantic_error_recovery = None
 
         def progress(_name: str, completed: int, total: int) -> None:
             _raise_if_cancelled(event)
@@ -2082,6 +2177,10 @@ class AnkiSearchBackend:
         on_success: StatusCallback = _noop,
         on_error: ErrorCallback = _noop,
     ) -> Callable[[], None] | None:
+        with self._state_lock:
+            if self._bundle_update_running:
+                on_error("Restart Anki to finish the Smart Search update.")
+                return None
         context = self._context
         if not bool(self._read_config().get("semantic_enabled", True)):
             on_error("Semantic search is disabled in the add-on configuration.")
@@ -2102,7 +2201,8 @@ class AnkiSearchBackend:
                 return None
         with self._state_lock:
             text_index_ready = (
-                self._index_state is IndexState.READY
+                not self._bundle_update_running
+                and self._index_state is IndexState.READY
                 and not self._maintenance_running
             )
         if not text_index_ready:
@@ -2120,20 +2220,22 @@ class AnkiSearchBackend:
         if not semantic_status.runtime_ready or not semantic_status.model_ready:
             on_error("Set up Semantic search first.")
             return None
-        if self._semantic_phase is not None:
-            on_error("Semantic setup is already running.")
-            return None
+        with self._state_lock:
+            if self._bundle_update_running:
+                on_error("Restart Anki to finish the Smart Search update.")
+                return None
+            if self._semantic_phase is not None:
+                on_error("Semantic setup is already running.")
+                return None
+            self._semantic_phase = "indexing"
+            self._semantic_progress = 0.0
+            self._semantic_phase_detail = "Reading local search data."
 
         event = self._new_cancellation()
         token = context.token
         lexical_generation = context.lexical_generation
         context.semantic_error = None
         context.semantic_error_recovery = None
-        with self._state_lock:
-            self._semantic_phase = "indexing"
-            self._semantic_progress = 0.0
-            self._semantic_phase_detail = "Reading local search data."
-
         self._run_query_op(
             uses_collection=False,
             op=lambda _collection: _semantic_documents_from_lexical_index(
@@ -2332,6 +2434,7 @@ class AnkiSearchBackend:
         op: Callable[[Any], Any],
         success: Callable[[Any], None],
         failure: Callable[[Exception], None],
+        allow_during_bundle_update: bool = False,
     ) -> None:
         """Schedule one official Anki ``QueryOp``.
 
@@ -2340,17 +2443,62 @@ class AnkiSearchBackend:
         out with ``without_collection()``.
         """
 
-        from aqt.operations import QueryOp
+        with self._state_lock:
+            blocked = (
+                self._bundle_update_running
+                and not allow_during_bundle_update
+            )
+            if not blocked:
+                self._background_op_count += 1
+        if blocked:
+            failure(
+                _BundleUpdatePending(
+                    "Restart Anki to finish the Smart Search update."
+                )
+            )
+            return
 
-        operation = QueryOp(parent=self.mw, op=op, success=success).failure(failure)
-        if not uses_collection:
-            operation.without_collection()
-        operation.run_in_background()
+        def finish() -> None:
+            with self._state_lock:
+                self._background_op_count = max(
+                    0,
+                    self._background_op_count - 1,
+                )
+
+        def succeeded(result: Any) -> None:
+            try:
+                success(result)
+            finally:
+                finish()
+
+        def failed(error: Exception) -> None:
+            try:
+                failure(error)
+            finally:
+                finish()
+
+        try:
+            from aqt.operations import QueryOp
+
+            operation = QueryOp(
+                parent=self.mw,
+                op=op,
+                success=succeeded,
+            ).failure(failed)
+            if not uses_collection:
+                operation.without_collection()
+            operation.run_in_background()
+        except Exception:
+            finish()
+            raise
 
     def _new_cancellation(self) -> threading.Event:
         event = threading.Event()
         with self._state_lock:
-            self._active_cancellations.add(event)
+            if self._bundle_update_running:
+                event.set()
+            else:
+                self._active_cancellations.add(event)
         return event
 
     def _forget_cancellation(self, event: threading.Event) -> None:
@@ -2372,7 +2520,7 @@ class AnkiSearchBackend:
         if context is None:
             return False
         with self._state_lock:
-            if self._vocabulary_refresh_running:
+            if self._bundle_update_running or self._vocabulary_refresh_running:
                 return False
             self._vocabulary_refresh_running = True
             self._vocabulary_refresh_token = context.token
@@ -2523,6 +2671,8 @@ class SmartSearchAddonController:
         self._dialog_refresh_last = 0.0
         self._card_state_refresh_timer: Any | None = None
         self._vocabulary_refresh_timer: Any | None = None
+        self._update_check_running = False
+        self._update_profile_was_active = False
         self._hooks: list[tuple[Any, Callable[..., Any]]] = []
 
     def start(self) -> "SmartSearchAddonController":
@@ -2644,6 +2794,11 @@ class SmartSearchAddonController:
     def show_search(self) -> None:
         """Open or focus the keyboard-first Smart Search palette."""
 
+        if self.backend.bundle_update_running:
+            self._show_message(
+                "Restart Anki to finish the Smart Search update."
+            )
+            return
         if self._dialog_close_in_progress:
             self._show_message(
                 "Smart Search is finishing a save. Try again in a moment."
@@ -2676,6 +2831,7 @@ class SmartSearchAddonController:
                 website_url="https://medbrevia.com/app",
                 feedback_url="mailto:product@medbrevia.com",
                 privacy_url="https://medbrevia.com/legal/smart-search-privacy",
+                can_check_for_updates=self._native_update_available(),
             )
             dialog = SearchDialog(self.mw, about=about)
             ui_controller = SearchController(self.backend, dialog)
@@ -2687,6 +2843,7 @@ class SmartSearchAddonController:
             )
             ui_controller.semanticInstallRequested.connect(self._install_semantic)
             ui_controller.semanticIndexRequested.connect(self._index_semantic)
+            ui_controller.updateRequested.connect(self._check_for_updates)
             ui_controller.textIndexRebuilt.connect(self._text_index_rebuilt)
             ui_controller.flagRequested.connect(self._flag_results)
             ui_controller.suspensionRequested.connect(
@@ -2746,6 +2903,141 @@ class SmartSearchAddonController:
             pass
         package = sys.modules.get(self.backend.addon_module)
         return str(getattr(package, "__version__", "") or "")
+
+    def _native_update_available(self) -> bool:
+        """Expose updates only for this running public AnkiWeb copy."""
+
+        try:
+            from .updater import native_update_available
+
+            return native_update_available(
+                self.mw,
+                self.backend.addon_module,
+            )
+        except Exception:
+            return False
+
+    def _check_for_updates(self) -> None:
+        """Quiesce local files, then run Anki's targeted native updater."""
+
+        if self._update_check_running or self.backend.bundle_update_running:
+            self._show_message("Smart Search is already checking for updates.")
+            return
+        profile_was_active = self.backend.active
+        if not self.backend.begin_bundle_update():
+            self._show_info(
+                "Please wait for the current Smart Search task to finish, "
+                "then choose Check & Update again."
+            )
+            return
+        self._update_profile_was_active = profile_was_active
+        self._update_check_running = True
+        self._pause_background_for_update()
+        try:
+            self._close_dialog_with_callback(
+                self._quiesce_and_start_native_update
+            )
+        except Exception as error:
+            self._update_check_failed(str(error))
+
+    def _pause_background_for_update(self) -> None:
+        """Stop every deferred launcher before the update gate is quiesced."""
+
+        for timer in (
+            self._reconcile_timer,
+            self._semantic_autostart_timer,
+            self._dialog_refresh_timer,
+            self._preview_open_timer,
+            self._card_state_refresh_timer,
+            self._vocabulary_refresh_timer,
+        ):
+            if timer is not None:
+                timer.stop()
+        with self._dialog_refresh_lock:
+            self._dialog_refresh_queued = False
+        self._pending_preview_result = None
+
+    def _quiesce_and_start_native_update(self) -> None:
+        self.backend.quiesce_for_bundle_update(
+            on_ready=self._start_native_update,
+            on_error=self._update_check_failed,
+        )
+
+    def _start_native_update(self) -> None:
+        try:
+            from .updater import request_native_update
+
+            request_native_update(
+                self.mw,
+                self.mw,
+                self.backend.addon_module,
+                self._native_update_finished,
+            )
+        except Exception as error:
+            self._update_check_failed(str(error))
+
+    def _native_update_finished(self, log: list[Any]) -> None:
+        entries = list(log or [])
+        try:
+            from .updater import native_update_was_installed
+
+            installed = native_update_was_installed(entries)
+        except Exception:
+            installed = False
+
+        if not installed:
+            self._release_update_gate_and_reopen()
+        if not entries:
+            self._show_info("Smart Search is up to date.")
+            return
+        self._show_native_update_log(entries)
+
+    def _show_native_update_log(self, entries: list[Any]) -> None:
+        try:
+            native_completion = getattr(self.mw, "on_updates_installed", None)
+            if callable(native_completion):
+                native_completion(entries)
+                return
+            from aqt.addons import show_log_to_user
+
+            show_log_to_user(self.mw, entries, title="Smart Search")
+        except Exception as error:
+            self._show_error(f"The update finished with a problem: {error}")
+
+    def _update_check_failed(self, message: str) -> None:
+        self._release_update_gate_and_reopen()
+        self._show_error(str(message))
+
+    def _release_update_gate_and_reopen(self) -> None:
+        """Resume the old bundle only when no replacement was installed."""
+
+        self._update_check_running = False
+        self.backend.finish_bundle_update()
+        reopen = self._update_profile_was_active
+        self._update_profile_was_active = False
+        if not reopen or getattr(self.mw, "col", None) is None:
+            self._resume_background_after_update()
+            return
+        self.backend.activate_profile_async(
+            auto_rebuild=False,
+            on_ready=lambda _status: self._resume_background_after_update(),
+            on_error=lambda message: self._show_error(
+                f"Smart Search could not reopen after the update check: {message}"
+            ),
+        )
+
+    def _resume_background_after_update(self) -> None:
+        with self._reconcile_request_lock:
+            reconcile_pending = bool(
+                self._pending_reconcile_note_ids
+                or self._pending_reconcile_deleted_ids
+                or self._reconcile_full
+                or self._reconcile_startup_check
+            )
+        if reconcile_pending and self._reconcile_timer is not None:
+            self._reconcile_timer.start(250)
+        self._schedule_semantic_autostart()
+        self._refresh_dialog()
 
     def _open_results_in_browser_safely(
         self,
@@ -3196,7 +3488,11 @@ class SmartSearchAddonController:
         initial_check: bool = False,
         full: bool = False,
     ) -> None:
-        if not self.backend.active or self._reconcile_timer is None:
+        update_running = self.backend.bundle_update_running
+        if (
+            (not self.backend.active and not update_running)
+            or self._reconcile_timer is None
+        ):
             return
         if not self._auto_reconcile:
             return
@@ -3219,6 +3515,8 @@ class SmartSearchAddonController:
             self._reconcile_startup_check = (
                 self._reconcile_startup_check or bool(initial_check)
             )
+        if update_running:
+            return
         if initial_check:
             # Opening a healthy profile should not immediately materialize
             # 40k note snapshots.  First run a cheap aggregate fingerprint
@@ -3239,6 +3537,8 @@ class SmartSearchAddonController:
         self._reconcile_timer.start(delay)
 
     def _run_reconcile(self) -> None:
+        if self.backend.bundle_update_running:
+            return
         with self._reconcile_request_lock:
             note_ids = tuple(sorted(self._pending_reconcile_note_ids))
             deleted_ids = tuple(sorted(self._pending_reconcile_deleted_ids))
@@ -3295,6 +3595,8 @@ class SmartSearchAddonController:
             timer.start(self._vocabulary_refresh_delay_ms)
 
     def _run_vocabulary_refresh(self) -> None:
+        if self.backend.bundle_update_running:
+            return
         started = self.backend.refresh_vocabulary(
             on_success=self._vocabulary_refresh_finished,
             # Exact and lexical search remain valid if fuzzy warmup fails; a
@@ -3352,6 +3654,8 @@ class SmartSearchAddonController:
         already ready.
         """
 
+        if self.backend.bundle_update_running:
+            return
         timer = self._semantic_autostart_timer
         context = self.backend._context
         if timer is None or context is None:
@@ -3392,6 +3696,8 @@ class SmartSearchAddonController:
     def _run_semantic_autostart(self) -> None:
         """Start at most one first-time semantic build per profile opening."""
 
+        if self.backend.bundle_update_running:
+            return
         context = self.backend._context
         token = self._semantic_autostart_token
         if context is None or token is None or context.token != token:
@@ -3420,8 +3726,7 @@ class SmartSearchAddonController:
             # UNSUPPORTED, and ERROR remain explicit user-facing actions.
             return
 
-        self._semantic_autostart_attempted_token = token
-        self.backend.index_semantic(
+        started = self.backend.index_semantic(
             on_progress=lambda _fraction, _detail: self._queue_dialog_refresh(),
             on_success=lambda _status: self._run_on_main(
                 self._refresh_dialog_now
@@ -3432,9 +3737,13 @@ class SmartSearchAddonController:
                 self._refresh_dialog_now
             ),
         )
+        if started is not None:
+            self._semantic_autostart_attempted_token = token
         self._refresh_dialog()
 
     def _on_profile_open(self) -> None:
+        if self.backend.bundle_update_running:
+            return
         self._close_dialog()
         self._clear_pending_reconciles()
         self._clear_captured_notes()
@@ -3463,6 +3772,8 @@ class SmartSearchAddonController:
             self._profile_activation_ready(status)
 
     def _profile_activation_ready(self, status: IndexStatus) -> None:
+        if self.backend.bundle_update_running:
+            return
         if status.state is IndexState.READY:
             self.schedule_reconcile(initial_check=True)
         self._schedule_semantic_autostart()
@@ -3624,6 +3935,9 @@ class SmartSearchAddonController:
         self.schedule_reconcile()
 
     def _install_semantic(self) -> None:
+        if self.backend.bundle_update_running:
+            self._show_error("Restart Anki to finish the Smart Search update.")
+            return
         self.backend.install_semantic(
             on_progress=lambda _fraction, _detail: self._queue_dialog_refresh(),
             on_success=lambda _status: self._semantic_install_complete(),
@@ -3661,6 +3975,9 @@ class SmartSearchAddonController:
         self._schedule_semantic_autostart(delay_ms=0)
 
     def _index_semantic(self) -> None:
+        if self.backend.bundle_update_running:
+            self._show_error("Restart Anki to finish the Smart Search update.")
+            return
         self.backend.index_semantic(
             on_progress=lambda _fraction, _detail: self._queue_dialog_refresh(),
             on_success=lambda _status: self._semantic_index_complete(),
@@ -3884,6 +4201,14 @@ class SmartSearchAddonController:
             tooltip(str(message), parent=self.mw)
         except Exception:
             return
+
+    def _show_info(self, message: str) -> None:
+        try:
+            from aqt.utils import showInfo
+
+            showInfo(str(message), parent=self.mw, title="Smart Search")
+        except Exception:
+            self._show_message(message)
 
 
 def create_controller(

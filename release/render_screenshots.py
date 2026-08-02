@@ -583,24 +583,35 @@ def about_privacy() -> str:
             text(472, 163, "About", size=15, fill="#fff", weight=700, anchor="middle"),
             f'<image href="data:image/png;base64,{logo_data}" x="644" y="219" width="152" height="152"/>',
             text(720, 409, "Smart Search for Anki — Medical", size=27, weight=740, anchor="middle"),
-            text(720, 440, "Version 1.0.15", size=14, fill=FAINT, weight=600, anchor="middle"),
+            text(
+                720,
+                440,
+                "Version 1.0.19 · Updates managed by Anki",
+                size=14,
+                fill=FAINT,
+                weight=600,
+                anchor="middle",
+            ),
             text(720, 483, "Created by Saleh Mostafa with MedBrevia", size=17, fill=MUTED, anchor="middle"),
-            rect(390, 518, 660, 88, fill="#20242b", radius=12, stroke="#363e49"),
-            circle(426, 547, 7, fill=GREEN),
-            text(446, 553, "Searches, card contents, and indexes remain on this computer.", size=14, fill=MUTED),
-            circle(426, 579, 7, fill=GREEN),
-            text(446, 585, "Networking occurs only when you explicitly set up or repair Semantic Search.", size=14, fill=MUTED),
+            rect(390, 510, 660, 112, fill="#20242b", radius=12, stroke="#363e49"),
+            circle(426, 539, 7, fill=GREEN),
+            text(446, 545, "Searches, card contents, and indexes remain on this computer.", size=14, fill=MUTED),
+            circle(426, 575, 7, fill=GREEN),
+            text(446, 579, "Anki may check for add-on updates. Other network access occurs", size=14, fill=MUTED),
+            text(446, 597, "only after an explicit setup, repair, or About-link action.", size=14, fill=MUTED),
         ]
     )
-    mobile, _ = button(562, 638, "Mobile App", width=142, primary=True)
-    feedback, _ = button(718, 638, "Feedback", width=126)
+    mobile, _ = button(487, 646, "Mobile App", width=142, primary=True)
+    feedback, _ = button(643, 646, "Feedback", width=126)
+    updates, _ = button(783, 646, "Check & Update", width=170)
     parts.extend(
         [
             mobile,
             feedback,
+            updates,
             text(
                 720,
-                716,
+                724,
                 "Independent add-on; not affiliated with or endorsed by Anki.",
                 size=13,
                 fill=FAINT,
@@ -617,6 +628,10 @@ SCREENS = {
     "02-semantic-setup.svg": semantic_setup,
     "03-bulk-actions.svg": bulk_actions,
     "04-about-privacy.svg": about_privacy,
+}
+CAPTURE_PNGS = {
+    "01-smart-search.png",
+    "05-inline-editor.png",
 }
 
 
@@ -650,6 +665,8 @@ def main() -> int:
             raise SystemExit("--png requires rsvg-convert")
         for svg_path in generated.copy():
             png_path = svg_path.with_suffix(".png")
+            if png_path.name in CAPTURE_PNGS:
+                continue
             subprocess.run(
                 [
                     converter,
@@ -663,8 +680,13 @@ def main() -> int:
             )
             generated.append(png_path)
 
-    write_checksums(generated)
-    print(f"Rendered {len(generated)} assets in {OUTPUT}")
+    shipped = sorted(
+        path
+        for path in OUTPUT.iterdir()
+        if path.is_file() and path.suffix in {".svg", ".png"}
+    )
+    write_checksums(shipped)
+    print(f"Rendered and checksummed {len(shipped)} assets in {OUTPUT}")
     return 0
 
 

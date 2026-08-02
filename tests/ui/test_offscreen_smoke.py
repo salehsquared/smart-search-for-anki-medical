@@ -36,6 +36,7 @@ try:
         AboutPanel,
         QApplication,
         QColor,
+        QDialog,
         QEvent,
         QLabel,
         QPalette,
@@ -1293,8 +1294,9 @@ class OffscreenSmokeTests(unittest.TestCase):
         )
         self.assertEqual(
             panel.network_label.text(),
-            "Networking occurs only when you explicitly set up or repair "
-            "Semantic Search.",
+            "Anki may check for add-on updates. Other network access occurs "
+            "only when you set up or repair Semantic Search, or open an "
+            "About link.",
         )
         self.assertIn(
             "not affiliated with or endorsed by Anki",
@@ -1315,12 +1317,13 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertLessEqual(panel.logo_label.pixmap().width(), 96)
         self.assertLessEqual(panel.logo_label.pixmap().height(), 96)
 
-        # The Mobile App and Feedback buttons are the only outbound controls
-        # and stay visible and keyboard reachable.
+        # The Mobile App and Feedback buttons stay visible and keyboard
+        # reachable. Local/manual installations do not offer native updates.
         self.assertEqual(panel.mobile_button.text(), "Mobile App")
         self.assertEqual(panel.feedback_button.text(), "Feedback")
         self.assertTrue(panel.mobile_button.isVisibleTo(dialog))
         self.assertTrue(panel.feedback_button.isVisibleTo(dialog))
+        self.assertFalse(panel.update_button.isVisibleTo(dialog))
         self.assertNotEqual(
             panel.mobile_button.focusPolicy(),
             Qt.FocusPolicy.NoFocus,
@@ -1338,6 +1341,35 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertTrue(panel.network_label.accessibleName())
         self.assertTrue(panel.mobile_button.accessibleName())
         self.assertTrue(panel.feedback_button.accessibleName())
+        dialog.deleteLater()
+
+    def test_public_about_offers_native_update_and_accepts_settings(self) -> None:
+        dialog = _SettingsDialog(
+            SearchMode.EXACT,
+            80,
+            None,
+            about=self._about_info(can_check_for_updates=True),
+        )
+        requests: list[bool] = []
+        dialog.updateRequested.connect(lambda: requests.append(True))
+        dialog.show()
+        dialog.tabs.setCurrentIndex(1)
+        self.app.processEvents()
+
+        panel = dialog.about_panel
+        self.assertTrue(panel.update_button.isVisibleTo(dialog))
+        self.assertEqual(panel.update_button.text(), "Check & Update")
+        self.assertIn("Updates managed by Anki", panel.version_label.text())
+        self.assertNotEqual(
+            panel.update_button.focusPolicy(),
+            Qt.FocusPolicy.NoFocus,
+        )
+        panel.update_button.click()
+        self.app.processEvents()
+
+        self.assertEqual(requests, [True])
+        self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
+        self.assertEqual(dialog.values(), (SearchMode.EXACT, 80, True))
         dialog.deleteLater()
 
     def test_about_link_activation_routes_to_desktop_services(self) -> None:
@@ -1363,7 +1395,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.18")
+        self.assertEqual(fallback.version, "1.0.19")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())

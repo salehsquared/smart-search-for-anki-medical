@@ -375,6 +375,7 @@ class AboutInfo:
     website_url: str = ""
     feedback_url: str = ""
     privacy_url: str = ""
+    can_check_for_updates: bool = False
 
 
 # ---------------------------------------------------------------------------

@@ -31,6 +31,7 @@ PUBLIC_TOP_LEVEL_FILES = {
     "controller.py",
     "inline_preview.py",
     "manifest.json",
+    "updater.py",
 }
 PUBLIC_CODE_DIRECTORIES = {
     "backend",
@@ -115,6 +116,7 @@ REQUIRED = {
     "config.json",
     "anki_actions.py",
     "inline_preview.py",
+    "updater.py",
     "backend/__init__.py",
     "resources/medbrevia-logo.png",
     "ui/__init__.py",

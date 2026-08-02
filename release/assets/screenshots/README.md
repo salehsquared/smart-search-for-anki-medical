@@ -6,9 +6,10 @@ path.
 
 - `01-smart-search.png` and `05-inline-editor.png` are clean-profile captures
   of the frozen v1.0.15 add-on.
-- `02-semantic-setup.png`, `03-bulk-actions.png`, and
-  `04-about-privacy.png` are deterministic release compositions reviewed
-  against the frozen interface.
+- `02-semantic-setup.png` and `03-bulk-actions.png` are deterministic release
+  compositions reviewed against the original public interface.
+- `04-about-privacy.png` is a deterministic release composition reviewed
+  against the v1.0.19 About interface.
 - The matching SVG files are editable source compositions, not test evidence.
 
 Render them from the repository root:

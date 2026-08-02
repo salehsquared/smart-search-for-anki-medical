@@ -27,6 +27,7 @@ spec.loader.exec_module(controller)
 
 models = sys.modules[f"{PACKAGE}.backend.models"]
 contracts = sys.modules[f"{PACKAGE}.ui.contracts"]
+updater = importlib.import_module(f"{PACKAGE}.updater")
 
 
 class _AddonManager:
@@ -87,8 +88,16 @@ class _MainWindow:
 
 
 class _SynchronousBackend(controller.AnkiSearchBackend):
-    def _run_query_op(self, *, uses_collection, op, success, failure):
-        del uses_collection
+    def _run_query_op(
+        self,
+        *,
+        uses_collection,
+        op,
+        success,
+        failure,
+        allow_during_bundle_update=False,
+    ):
+        del uses_collection, allow_during_bundle_update
         try:
             success(op(self.mw.col))
         except Exception as error:  # exercise the same callback seam as QueryOp
@@ -100,13 +109,22 @@ class _ConcurrentExternalBackend(_SynchronousBackend):
         self.threads = []
         super().__init__(*args, **kwargs)
 
-    def _run_query_op(self, *, uses_collection, op, success, failure):
+    def _run_query_op(
+        self,
+        *,
+        uses_collection,
+        op,
+        success,
+        failure,
+        allow_during_bundle_update=False,
+    ):
         if uses_collection:
             return super()._run_query_op(
                 uses_collection=uses_collection,
                 op=op,
                 success=success,
                 failure=failure,
+                allow_during_bundle_update=allow_during_bundle_update,
             )
 
         def run() -> None:
@@ -125,13 +143,22 @@ class _DeferredCollectionBackend(_SynchronousBackend):
         self.pending_query_ops = []
         super().__init__(*args, **kwargs)
 
-    def _run_query_op(self, *, uses_collection, op, success, failure):
+    def _run_query_op(
+        self,
+        *,
+        uses_collection,
+        op,
+        success,
+        failure,
+        allow_during_bundle_update=False,
+    ):
         self.pending_query_ops.append(
             {
                 "uses_collection": uses_collection,
                 "op": op,
                 "success": success,
                 "failure": failure,
+                "allow_during_bundle_update": allow_during_bundle_update,
             }
         )
 
@@ -241,6 +268,7 @@ class _AutostartBackend:
         token: int = 41,
         config: dict | None = None,
     ) -> None:
+        self.bundle_update_running = False
         self.status = status
         self.config = {
             "semantic_enabled": True,
@@ -2589,6 +2617,220 @@ class ControllerTests(unittest.TestCase):
 
         open_cards.assert_called_once_with((101, 102, 103))
         open_notes.assert_not_called()
+
+    def test_native_update_availability_uses_the_running_module(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="677438639",
+        )
+        with patch.object(
+            updater,
+            "native_update_available",
+            return_value=True,
+        ) as available:
+            self.assertTrue(addon._native_update_available())
+
+        available.assert_called_once_with(addon.mw, "677438639")
+
+    def test_bundle_update_gate_is_atomic_and_blocks_new_writers(self) -> None:
+        backend = controller.AnkiSearchBackend(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="677438639",
+        )
+        backend._background_op_count = 1
+        self.assertFalse(backend.begin_bundle_update())
+        backend._background_op_count = 0
+
+        self.assertTrue(backend.begin_bundle_update())
+        self.assertTrue(backend.bundle_update_running)
+        self.assertFalse(backend._begin_maintenance())
+        self.assertTrue(backend._new_cancellation().is_set())
+        errors = []
+        self.assertIsNone(backend.install_semantic(on_error=errors.append))
+        self.assertIn("Restart Anki", errors[-1])
+
+        backend.finish_bundle_update()
+        self.assertFalse(backend.bundle_update_running)
+        self.assertTrue(backend._begin_maintenance())
+        backend._end_maintenance()
+
+    def test_query_op_holds_update_gate_until_callback_finishes(self) -> None:
+        backend = controller.AnkiSearchBackend(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="677438639",
+        )
+        pending = []
+
+        class QueryOp:
+            def __init__(self, *, parent, op, success):
+                del parent
+                self.op = op
+                self.success = success
+                self.failure_callback = None
+
+            def failure(self, callback):
+                self.failure_callback = callback
+                return self
+
+            def without_collection(self):
+                return self
+
+            def run_in_background(self):
+                pending.append(self)
+
+        aqt_module = types.ModuleType("aqt")
+        aqt_module.__path__ = []
+        operations_module = types.ModuleType("aqt.operations")
+        operations_module.QueryOp = QueryOp
+        callback_gate_attempts = []
+        with patch.dict(
+            sys.modules,
+            {"aqt": aqt_module, "aqt.operations": operations_module},
+        ):
+            backend._run_query_op(
+                uses_collection=False,
+                op=lambda _collection: "done",
+                success=lambda _result: callback_gate_attempts.append(
+                    backend.begin_bundle_update()
+                ),
+                failure=lambda error: self.fail(str(error)),
+            )
+            self.assertFalse(backend.begin_bundle_update())
+            operation = pending.pop()
+            operation.success(operation.op(None))
+
+        self.assertEqual(callback_gate_attempts, [False])
+        self.assertTrue(backend.begin_bundle_update())
+
+    def test_bundle_update_quiesce_closes_profile_owned_files(self) -> None:
+        backend = _SynchronousBackend(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="677438639",
+        )
+        closed = []
+        engine = types.SimpleNamespace(semantic_provider=object())
+        index = types.SimpleNamespace(close=lambda: closed.append("lexical"))
+        vector_index = types.SimpleNamespace(
+            close=lambda: closed.append("semantic")
+        )
+        backend._context = controller._ProfileContext(
+            token=backend._profile_token,
+            key="profile",
+            profile_name="Profile",
+            collection_path="/tmp/collection.anki2",
+            index=index,
+            engine=engine,
+            semantic=types.SimpleNamespace(index=vector_index),
+        )
+        ready = []
+        errors = []
+
+        self.assertTrue(backend.begin_bundle_update())
+        backend.quiesce_for_bundle_update(
+            on_ready=lambda: ready.append(True),
+            on_error=errors.append,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(ready, [True])
+        self.assertEqual(closed, ["lexical", "semantic"])
+        self.assertIsNone(backend._context)
+        self.assertIsNone(engine.semantic_provider)
+        self.assertTrue(backend.bundle_update_running)
+
+    def test_update_check_coalesces_and_reports_up_to_date(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="677438639",
+        )
+        pending = []
+        messages = []
+        info = []
+        addon._show_message = messages.append
+        addon._show_info = info.append
+
+        def start(_parent, _mw, _module, on_done):
+            pending.append(on_done)
+            return "targeted"
+
+        with patch.object(updater, "request_native_update", side_effect=start):
+            addon._check_for_updates()
+            addon._check_for_updates()
+            self.assertTrue(addon._update_check_running)
+            self.assertEqual(len(pending), 1)
+            self.assertIn("already checking", messages[-1])
+            pending[0]([])
+
+        self.assertFalse(addon._update_check_running)
+        self.assertEqual(info, ["Smart Search is up to date."])
+
+    def test_completed_update_uses_anki_native_result_ui(self) -> None:
+        mw = _MainWindow()
+        completed = []
+        mw.on_updates_installed = lambda log: completed.append(list(log))
+        addon = controller.SmartSearchAddonController(
+            mw,
+            bundle_root=self.bundle,
+            addon_module="677438639",
+        )
+        entry = (677438639, object())
+
+        def finish(_parent, _mw, _module, on_done):
+            on_done([entry])
+            return "targeted"
+
+        with (
+            patch.object(updater, "request_native_update", side_effect=finish),
+            patch.object(
+                updater,
+                "native_update_was_installed",
+                return_value=True,
+            ),
+        ):
+            addon._check_for_updates()
+
+        self.assertTrue(addon._update_check_running)
+        self.assertTrue(addon.backend.bundle_update_running)
+        self.assertEqual(completed, [[entry]])
+
+    def test_update_waits_for_index_maintenance_to_finish(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="677438639",
+        )
+        addon.backend._maintenance_running = True
+        info = []
+        addon._show_info = info.append
+        with patch.object(updater, "request_native_update") as request:
+            addon._check_for_updates()
+
+        request.assert_not_called()
+        self.assertFalse(addon._update_check_running)
+        self.assertIn("wait", info[0].lower())
+
+    def test_synchronous_update_failure_resets_busy_state(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="677438639",
+        )
+        errors = []
+        addon._show_error = errors.append
+        with patch.object(
+            updater,
+            "request_native_update",
+            side_effect=RuntimeError("native updater unavailable"),
+        ):
+            addon._check_for_updates()
+
+        self.assertFalse(addon._update_check_running)
+        self.assertEqual(errors, ["native updater unavailable"])
 
     def test_multi_browser_open_falls_back_to_notes_without_card_ids(self) -> None:
         results = (

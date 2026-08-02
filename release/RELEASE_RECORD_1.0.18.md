@@ -1,5 +1,9 @@
 # Release record — v1.0.18
 
+> **Superseded before publication:** v1.0.18 was a validated local candidate
+> but was never uploaded to GitHub Releases or AnkiWeb. Its compatibility work
+> is included in v1.0.19; do not publish this artifact.
+
 ## Candidate identity
 
 - Version: `1.0.18`

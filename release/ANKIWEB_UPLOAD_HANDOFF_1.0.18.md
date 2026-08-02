@@ -1,5 +1,8 @@
 # AnkiWeb upload handoff — v1.0.18
 
+> **Superseded:** v1.0.18 was never published. Use
+> `ANKIWEB_UPLOAD_HANDOFF_1.0.19.md` and do not upload this archive.
+
 ## Existing listing
 
 - Add-on code: `677438639`
