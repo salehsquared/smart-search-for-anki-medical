@@ -91,22 +91,21 @@ not part of the public package.
 - [x] Ensure the public repository does not contain generated profile indexes or
       expanded runtimes.
 
-## 6. Distribution-path validation — refreshed 2026-08-01
+## 6. Distribution-path validation — refreshed 2026-08-02
 
 Current compatibility and native-upgrade evidence is in
 `RELEASE_RECORD_1.0.19.md`; the original public-listing evidence remains in
 `RELEASE_RECORD_1.0.15.md`. The v1.0.18 candidate was never published and is
-superseded. The v1.0.19 AnkiWeb-code checks remain pending until upload.
+superseded. The v1.0.19 public server boundary and artifact checks passed.
 
 ### A. Isolated clean-install matrix
 
 - [x] Create a new local OS user or disposable test environment.
 - [x] Install the exact supported Anki release with no existing add-ons.
 - [x] Create a synthetic profile containing only generated, non-personal notes.
-- [ ] Install the release candidate through the same route users will use:
-      first as a local `.ankiaddon`, then using AnkiWeb's assigned numeric code
-      after the private/unlisted upload exists. The local `.ankiaddon` path
-      passed; the real assigned-code path is the post-upload gate.
+- [x] Install the release through the same route users will use: first as a
+      local `.ankiaddon`, then from the public AnkiWeb numeric code. Both paths
+      installed the frozen v1.0.19 artifact successfully.
 - [x] Restart Anki and confirm no duplicate add-on folders or startup warnings.
 - [x] Verify Smart and Exact before enabling Semantic.
 - [ ] Enable Semantic explicitly; verify download progress, digest validation,
@@ -157,26 +156,28 @@ fully usable.
 
 ### D. AnkiWeb staging and final publication
 
-- [ ] Upload the frozen archive as an unlisted/private staging item if AnkiWeb
-      permits the intended staging workflow.
-- [ ] Record the assigned numeric add-on code.
-- [ ] Repeat clean install and upgrade tests using that numeric code.
-- [ ] Verify the listing, images, links, formatting, version range, and support
+- [x] Update the existing public item in place with the frozen archive; no
+      duplicate staging item or compatibility branch was created.
+- [x] Record the assigned numeric add-on code: `677438639`.
+- [x] Repeat clean install and v1.0.15 → v1.0.19 upgrade tests using that
+      numeric code through Anki's official updater.
+- [x] Verify the listing, images, links, formatting, version range, and support
       contact in AnkiWeb's rendered page.
-- [ ] Obtain explicit approval for the public listing.
-- [ ] Make the listing public.
-- [ ] Install once more from the public code and compare its archive checksum to
-      the approved release candidate when the service permits that comparison.
+- [x] Obtain explicit approval for the public listing.
+- [x] Make the listing public.
+- [x] Install once more from the public code and compare all 67 installed
+      archive members byte-for-byte with the approved release candidate.
 - [ ] Monitor the support channel for installation or compatibility failures
       during the first release window.
 
-The unchecked AnkiWeb items are intentionally the only publication-boundary
-steps left. Other unchecked compound stress cases are explicitly disclosed in
-the release record and are not part of the public beta support claim.
+The publication-boundary, public-code install, and live-upgrade checks are
+complete. First-window support monitoring remains an ongoing post-publication
+task. Other unchecked compound stress cases are explicitly disclosed in the
+release record and are not part of the public beta support claim.
 
 ## 7. Release record
 
-The v1.0.19 artifact, hashes, compatibility evidence, and remaining AnkiWeb
-fields are recorded in `RELEASE_RECORD_1.0.19.md`. The original AnkiWeb
+The v1.0.19 artifact, hashes, compatibility evidence, and live publication
+metadata are recorded in `RELEASE_RECORD_1.0.19.md`. The original AnkiWeb
 publication remains documented in `RELEASE_RECORD_1.0.15.md`; v1.0.18 is an
 unpublished, superseded candidate retained only for audit history.
