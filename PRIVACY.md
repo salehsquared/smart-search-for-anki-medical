@@ -1,7 +1,7 @@
 # Privacy
 
 **Effective date:** July 29, 2026
-**Applies to:** Smart Search for Anki — Medical 1.0.18
+**Applies to:** Smart Search for Anki — Medical 1.0.19
 
 ## Plain-language summary
 
@@ -13,6 +13,8 @@ Smart Search is designed to search your Anki collection locally.
   semantic embeddings.
 - Semantic setup makes one kind of network request: it downloads pinned model
   files from Hugging Face after you explicitly start setup.
+- Anki may contact AnkiWeb to check for add-on updates. The About-screen update
+  button delegates that request to Anki and does not send collection content.
 - The add-on stores disposable search indexes on your computer. Those indexes
   contain or are derived from your note content and should be treated as
   private.
@@ -68,6 +70,12 @@ backup practices.
 ## Network activity
 
 Smart and Exact search do not require a network connection.
+
+Anki may independently contact AnkiWeb to check installed add-ons for updates.
+Choosing **Check & Update** in Smart Search's About screen asks Anki to run
+its native, compatibility-aware update process for public AnkiWeb item
+`677438639`. The request does not include note or card content, embeddings,
+search queries, tags, deck names, Anki profile names, or collection identifiers.
 
 When a user explicitly starts Semantic setup, the add-on downloads pinned
 model and tokenizer files over HTTPS from:

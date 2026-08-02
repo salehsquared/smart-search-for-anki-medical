@@ -76,6 +76,10 @@ the user's computer.
   embeddings
 - No automatic model installation
 
+Anki may check AnkiWeb for compatible add-on updates. Public installations also
+offer **Check & Update** in the About tab; it uses Anki's native updater and
+never sends card content or search queries.
+
 When the user explicitly starts Semantic setup, the add-on downloads pinned
 model/tokenizer files over HTTPS and verifies their SHA-256 digests. Ordinary
 request metadata such as an IP address and user-agent can be visible to the

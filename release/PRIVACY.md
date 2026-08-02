@@ -19,6 +19,11 @@ It does not send searches or card content to MedBrevia.
 
 Smart and Exact require no model download.
 
+Anki may contact AnkiWeb to check installed add-ons for updates. The
+**Check & Update** button in Smart Search's About tab delegates to Anki's
+native updater for public item `677438639`; no card text, query, tag, deck,
+profile, collection identifier, or embedding is included by Smart Search.
+
 Semantic Search is optional. When a user explicitly chooses to set it up, the
 add-on installs the reviewed runtime files bundled in the add-on and downloads
 the disclosed model/tokenizer assets from their documented source over HTTPS.

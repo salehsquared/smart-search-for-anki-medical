@@ -35,7 +35,7 @@ MACOS_ARM64_RUNTIME_TAGS = frozenset(
     (MACOS_ARM64_PY39_RUNTIME_TAG, MACOS_ARM64_RUNTIME_TAG)
 )
 MINIMUM_SEMANTIC_MACOS_MAJOR = 14
-DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.18"
+DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.19"
 
 
 class ModelInstallError(RuntimeError):

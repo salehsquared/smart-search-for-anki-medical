@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.19] — 2026-08-01
+
+### Added
+
+- Added a simple **Check & Update** action to the About tab for public
+  AnkiWeb installations.
+
+### Safety and reliability
+
+- Updates delegate to Anki's native, compatibility-aware installer and retain
+  Anki's normal restart and error handling.
+- Manual and development installations hide the update action so the public
+  numeric add-on cannot be installed beside a second live copy.
+- Repeated update requests are coalesced, local `user_files` remain under
+  Anki's native preservation rules, and no custom self-replacement code runs.
+- Update installation claims an exclusive maintenance lane, waits for active
+  work to finish, stops deferred writers, and closes profile-owned search files
+  off the UI thread before Anki replaces the add-on bundle.
+- Updated the privacy disclosure for AnkiWeb update checks.
+
 ## [1.0.18] — 2026-08-01
 
 ### Added

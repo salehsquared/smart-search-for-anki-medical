@@ -154,6 +154,7 @@ class _SettingsDialog(QDialog):
 
     semanticInstallRequested = pyqtSignal()
     semanticIndexRequested = pyqtSignal()
+    updateRequested = pyqtSignal()
 
     def __init__(
         self,
@@ -283,6 +284,7 @@ class _SettingsDialog(QDialog):
             about if about is not None else _default_about_info(),
             self.tabs,
         )
+        self.about_panel.updateRequested.connect(self._request_update)
         self.tabs.addTab(self.about_panel, "About")
 
         self.button_box = QDialogButtonBox(
@@ -301,6 +303,12 @@ class _SettingsDialog(QDialog):
             self.limit_spin.value(),
             self.preview_check.isChecked(),
         )
+
+    def _request_update(self) -> None:
+        """Close Settings before Anki presents its native update progress."""
+
+        self.updateRequested.emit()
+        self.accept()
 
     def _set_semantic_status(self, status: Optional[SemanticStatus]) -> None:
         if status is None:
@@ -444,6 +452,7 @@ class SearchDialog(QDialog):
     rebuildRequested = pyqtSignal()
     semanticInstallRequested = pyqtSignal()
     semanticIndexRequested = pyqtSignal()
+    updateRequested = pyqtSignal()
     settingsChanged = pyqtSignal(object, int, bool)  # mode, limit, preview?
     flagRequested = pyqtSignal(object, int)  # tuple[SearchResult, ...], 0..7
     suspensionRequested = pyqtSignal(object, bool)  # results, suspend?
@@ -2022,9 +2031,18 @@ class SearchDialog(QDialog):
         )
         dialog.semanticInstallRequested.connect(self.semanticInstallRequested)
         dialog.semanticIndexRequested.connect(self.semanticIndexRequested)
+        update_requested = False
+
+        def remember_update_request() -> None:
+            nonlocal update_requested
+            update_requested = True
+
+        dialog.updateRequested.connect(remember_update_request)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             mode, limit, preview_enabled = dialog.values()
             self.settingsChanged.emit(mode, limit, preview_enabled)
+            if update_requested:
+                self.updateRequested.emit()
         self.focus_query()
 
     def eventFilter(self, obj, event) -> bool:

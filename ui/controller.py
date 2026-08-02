@@ -41,6 +41,7 @@ class SearchController(QObject):
     openAllRequested = pyqtSignal(object)  # tuple[SearchResult, ...]
     semanticInstallRequested = pyqtSignal()
     semanticIndexRequested = pyqtSignal()
+    updateRequested = pyqtSignal()
     textIndexRebuilt = pyqtSignal()
     flagRequested = pyqtSignal(object, int)
     suspensionRequested = pyqtSignal(object, bool)
@@ -104,6 +105,7 @@ class SearchController(QObject):
         dialog.rebuildRequested.connect(self.start_rebuild)
         dialog.semanticInstallRequested.connect(self.semanticInstallRequested)
         dialog.semanticIndexRequested.connect(self.semanticIndexRequested)
+        dialog.updateRequested.connect(self.updateRequested)
         dialog.flagRequested.connect(self.flagRequested)
         dialog.suspensionRequested.connect(self.suspensionRequested)
         dialog.tagActionRequested.connect(self.tagActionRequested)

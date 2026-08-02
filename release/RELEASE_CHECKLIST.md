@@ -93,9 +93,10 @@ not part of the public package.
 
 ## 6. Distribution-path validation — refreshed 2026-08-01
 
-Current compatibility evidence is in `RELEASE_RECORD_1.0.18.md`; the original
-public-listing evidence remains in `RELEASE_RECORD_1.0.15.md`. The v1.0.18
-AnkiWeb-code checks remain pending until that archive is uploaded.
+Current compatibility and native-upgrade evidence is in
+`RELEASE_RECORD_1.0.19.md`; the original public-listing evidence remains in
+`RELEASE_RECORD_1.0.15.md`. The v1.0.18 candidate was never published and is
+superseded. The v1.0.19 AnkiWeb-code checks remain pending until upload.
 
 ### A. Isolated clean-install matrix
 
@@ -124,8 +125,8 @@ AnkiWeb-code checks remain pending until that archive is uploaded.
 
 - [x] Install the oldest version users could reasonably have.
 - [x] Create synthetic indexes and non-default settings.
-- [x] Upgrade through Anki's **Install from file** mechanism to the release
-      candidate.
+- [x] Upgrade through Anki's native `AddonManager.install()` mechanism to the
+      release candidate on every supported version.
 - [x] Confirm intended `user_files` survive, stale generated assets are migrated
       or safely rebuilt, and no duplicate menu item appears.
 - [ ] Confirm a failed/cancelled Semantic upgrade leaves Smart and Exact usable.
@@ -175,6 +176,7 @@ the release record and are not part of the public beta support claim.
 
 ## 7. Release record
 
-The v1.0.18 artifact, hashes, compatibility evidence, and remaining AnkiWeb
-fields are recorded in `RELEASE_RECORD_1.0.18.md`. The original AnkiWeb
-publication remains documented in `RELEASE_RECORD_1.0.15.md`.
+The v1.0.19 artifact, hashes, compatibility evidence, and remaining AnkiWeb
+fields are recorded in `RELEASE_RECORD_1.0.19.md`. The original AnkiWeb
+publication remains documented in `RELEASE_RECORD_1.0.15.md`; v1.0.18 is an
+unpublished, superseded candidate retained only for audit history.

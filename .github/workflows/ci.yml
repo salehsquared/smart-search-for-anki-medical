@@ -134,3 +134,21 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m unittest discover -s tests -t . -p 'test_*.py' -v
+
+      - name: Probe native updater compatibility
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python - <<'PY'
+          import inspect
+          from aqt import addons
+
+          signature = inspect.signature(addons.install_or_update_addon)
+          assert list(signature.parameters) == [
+              "parent",
+              "mgr",
+              "addon_id",
+              "on_done",
+          ], signature
+          assert callable(addons.show_log_to_user)
+          PY

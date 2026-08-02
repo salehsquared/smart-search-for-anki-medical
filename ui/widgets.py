@@ -601,7 +601,8 @@ _ABOUT_PRIVACY_LOCAL = (
     "Searches, card contents, and indexes remain on this computer."
 )
 _ABOUT_PRIVACY_NETWORK = (
-    "Networking occurs only when you explicitly set up or repair Semantic Search."
+    "Anki may check for add-on updates. Other network access occurs only when "
+    "you set up or repair Semantic Search, or open an About link."
 )
 _ABOUT_PRIVACY = f"{_ABOUT_PRIVACY_LOCAL} {_ABOUT_PRIVACY_NETWORK}"
 _ABOUT_INDEPENDENCE = (
@@ -614,10 +615,11 @@ class AboutPanel(QWidget, PaletteMixin):
     """The quiet About tab: logo, identity, attribution, privacy, actions.
 
     All content comes from :class:`AboutInfo` plus fixed truthful copy, so
-    the panel stays a dumb renderer.  The Mobile App and Feedback buttons
-    are the only outbound controls; they open only on explicit activation
-    and carry no card or search data.
+    the panel stays a dumb renderer.  Update and outbound-link controls act
+    only on explicit activation and carry no card or search data.
     """
+
+    updateRequested = pyqtSignal()
 
     def __init__(
         self,
@@ -666,9 +668,12 @@ class AboutPanel(QWidget, PaletteMixin):
         self.name_label.setAccessibleName(about.product_name)
         outer.addWidget(self.name_label)
 
-        self.version_label = QLabel(f"Version {about.version}", self)
+        version_text = f"Version {about.version}"
+        if about.can_check_for_updates:
+            version_text += " · Updates managed by Anki"
+        self.version_label = QLabel(version_text, self)
         self.version_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.version_label.setAccessibleName(f"Version {about.version}")
+        self.version_label.setAccessibleName(version_text)
         self.version_label.setVisible(bool(about.version))
         outer.addWidget(self.version_label)
 
@@ -759,6 +764,17 @@ class AboutPanel(QWidget, PaletteMixin):
             lambda _checked=False: self._open_link(about.feedback_url)
         )
         button_row.addWidget(self.feedback_button)
+
+        self.update_button = QPushButton("Check & Update", self)
+        self.update_button.setObjectName("aboutSecondaryButton")
+        self.update_button.setMinimumSize(156, 42)
+        self.update_button.setAccessibleName("Check and update Smart Search")
+        self.update_button.setToolTip(
+            "Check AnkiWeb and install a compatible Smart Search update"
+        )
+        self.update_button.setVisible(bool(about.can_check_for_updates))
+        self.update_button.clicked.connect(self.updateRequested)
+        button_row.addWidget(self.update_button)
         button_row.addStretch(1)
         outer.addLayout(button_row)
 
