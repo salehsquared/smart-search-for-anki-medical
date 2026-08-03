@@ -31,11 +31,15 @@ class _Card:
         nid: int,
         queue: int = 0,
         flag: int = 0,
+        did: int = 1,
+        odid: int = 0,
     ) -> None:
         self.nid = nid
         self.queue = queue
         self.flags = flag
         self._flag = flag
+        self.did = did
+        self.odid = odid
 
     def user_flag(self) -> int:
         return self._flag
@@ -66,12 +70,16 @@ class _Scheduler:
     def __init__(self) -> None:
         self.suspend_calls: list[tuple[int, ...]] = []
         self.unsuspend_calls: list[tuple[int, ...]] = []
+        self.bury_calls: list[tuple[int, ...]] = []
+        self.unbury_calls: list[tuple[int, ...]] = []
         self.suspend_result: object = _BackendResult(
             changes="suspend-changes"
         )
         self.unsuspend_result: object = _BackendResult(
             changes="unsuspend-changes"
         )
+        self.bury_result: object = _BackendResult(changes="bury-changes")
+        self.unbury_result: object = _BackendResult(changes="unbury-changes")
 
     def suspend_cards(self, card_ids) -> object:
         self.suspend_calls.append(tuple(card_ids))
@@ -80,6 +88,26 @@ class _Scheduler:
     def unsuspend_cards(self, card_ids) -> object:
         self.unsuspend_calls.append(tuple(card_ids))
         return self.unsuspend_result
+
+    def bury_cards(self, card_ids) -> object:
+        self.bury_calls.append(tuple(card_ids))
+        return self.bury_result
+
+    def unbury_cards(self, card_ids) -> object:
+        self.unbury_calls.append(tuple(card_ids))
+        return self.unbury_result
+
+
+class _Decks:
+    def __init__(self, normal: dict[int, str] | None = None) -> None:
+        self.normal = dict(normal or {1: "Default", 2: "Target"})
+
+    def all_names_and_ids(self, *, include_filtered: bool):
+        del include_filtered
+        return tuple(
+            types.SimpleNamespace(id=deck_id, name=name)
+            for deck_id, name in self.normal.items()
+        )
 
 
 class _Tags:
@@ -106,6 +134,7 @@ class _Collection:
         *,
         cards: dict[int, object | None] | None = None,
         notes: dict[int, object | None] | None = None,
+        decks: dict[int, str] | None = None,
     ) -> None:
         self.cards = dict(cards or {})
         self.notes = dict(notes or {})
@@ -113,8 +142,11 @@ class _Collection:
         self.note_lookups: list[int] = []
         self.flag_calls: list[tuple[int, tuple[int, ...]]] = []
         self.flag_result: object = _BackendResult(changes="flag-changes")
+        self.set_deck_calls: list[tuple[tuple[int, ...], int]] = []
+        self.set_deck_result: object = _BackendResult(changes="deck-changes")
         self.sched = _Scheduler()
         self.tags = _Tags()
+        self.decks = _Decks(decks)
 
     def get_card(self, card_id: int) -> object | None:
         self.card_lookups.append(card_id)
@@ -131,6 +163,10 @@ class _Collection:
     def set_user_flag_for_cards(self, flag: int, card_ids) -> object:
         self.flag_calls.append((flag, tuple(card_ids)))
         return self.flag_result
+
+    def set_deck(self, card_ids, deck_id: int) -> object:
+        self.set_deck_calls.append((tuple(card_ids), int(deck_id)))
+        return self.set_deck_result
 
 
 def _outcome(
@@ -243,6 +279,16 @@ class NormalizationAndValidationTests(unittest.TestCase):
                         kind,
                         note_ids=(1,),
                         tags=" \n\t ",
+                    )
+
+    def test_change_deck_requires_a_positive_destination(self) -> None:
+        for invalid in (None, 0, -1, "bad"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(ValueError, "destination deck"):
+                    actions.CollectionAction(
+                        actions.ActionKind.CHANGE_DECK,
+                        card_ids=(1,),
+                        deck_id=invalid,
                     )
 
     def test_unknown_action_kind_is_rejected(self) -> None:
@@ -370,6 +416,104 @@ class CardActionTests(unittest.TestCase):
         self.assertEqual(outcome.changed, 1)
         self.assertEqual(outcome.skipped, 4)
         self.assertEqual(outcome.note_count, 1)
+
+    def test_bury_skips_buried_and_suspended_cards(self) -> None:
+        collection = _Collection(
+            cards={
+                1: _Card(nid=10, queue=0),
+                2: _Card(nid=10, queue=-2),
+                3: _Card(nid=11, queue=-3),
+                4: _Card(nid=12, queue=-1),
+                5: _Card(nid=13, queue=2),
+            }
+        )
+        collection.sched.bury_result = _BackendResult(
+            changes="buried",
+            count=2,
+        )
+        action = actions.CollectionAction(
+            actions.ActionKind.BURY,
+            card_ids=(1, 2, 3, 4, 5),
+        )
+
+        outcome = self.execute(collection, action)
+
+        self.assertEqual(collection.sched.bury_calls, [(1, 5)])
+        self.assertEqual(collection.sched.unbury_calls, [])
+        self.assertEqual(outcome.changed, 2)
+        self.assertEqual(outcome.skipped, 3)
+        self.assertEqual(outcome.changed_card_ids, (1, 5))
+
+    def test_unbury_only_passes_buried_cards_never_suspended_cards(self) -> None:
+        collection = _Collection(
+            cards={
+                1: _Card(nid=10, queue=-3),
+                2: _Card(nid=11, queue=-2),
+                3: _Card(nid=12, queue=-1),
+                4: _Card(nid=13, queue=0),
+            }
+        )
+        collection.sched.unbury_result = _BackendResult(
+            changes="unburied",
+            count=2,
+        )
+        action = actions.CollectionAction(
+            actions.ActionKind.UNBURY,
+            card_ids=(1, 2, 3, 4),
+        )
+
+        outcome = self.execute(collection, action)
+
+        self.assertEqual(collection.sched.unbury_calls, [(1, 2)])
+        self.assertNotIn(3, collection.sched.unbury_calls[0])
+        self.assertEqual(outcome.changed, 2)
+        self.assertEqual(outcome.skipped, 2)
+
+    def test_change_deck_uses_home_deck_and_one_exact_card_call(self) -> None:
+        collection = _Collection(
+            cards={
+                1: _Card(nid=10, did=1),
+                2: _Card(nid=10, did=99, odid=2),
+                3: _Card(nid=11, did=99, odid=1),
+            },
+            decks={1: "Default", 2: "Target"},
+        )
+        collection.set_deck_result = _BackendResult(
+            changes="moved",
+            count=2,
+        )
+        action = actions.CollectionAction(
+            actions.ActionKind.CHANGE_DECK,
+            note_ids=(10, 11),
+            card_ids=(1, 2, 3),
+            deck_id=2,
+            deck_name="Target",
+        )
+
+        outcome = self.execute(collection, action)
+
+        self.assertEqual(collection.set_deck_calls, [((1, 3), 2)])
+        self.assertEqual(outcome.changed, 2)
+        self.assertEqual(outcome.skipped, 1)
+        self.assertEqual(outcome.note_count, 2)
+        self.assertEqual(outcome.changed_card_ids, (1, 3))
+
+    def test_change_deck_rejects_deleted_or_filtered_destination(self) -> None:
+        collection = _Collection(
+            cards={1: _Card(nid=10, did=1)},
+            decks={1: "Default"},
+        )
+        action = actions.CollectionAction(
+            actions.ActionKind.CHANGE_DECK,
+            card_ids=(1,),
+            deck_id=90,
+            deck_name="Old filtered deck",
+        )
+
+        with self.assertRaisesRegex(ValueError, "no longer available"):
+            self.execute(collection, action)
+
+        self.assertEqual(collection.set_deck_calls, [])
 
     def test_all_noop_cards_return_without_mutation_call(self) -> None:
         collection = _Collection(
@@ -558,6 +702,45 @@ class MessageFormattingTests(unittest.TestCase):
                     note_count=1,
                 ),
                 "Unsuspended 1 card from 1 note — Undo available",
+            ),
+            (
+                actions.CollectionAction(
+                    actions.ActionKind.BURY,
+                    card_ids=(1, 2),
+                ),
+                _outcome(
+                    actions.ActionKind.BURY,
+                    changed=2,
+                    note_count=1,
+                ),
+                "Buried 2 cards from 1 note — Undo available",
+            ),
+            (
+                actions.CollectionAction(
+                    actions.ActionKind.UNBURY,
+                    card_ids=(1,),
+                ),
+                _outcome(
+                    actions.ActionKind.UNBURY,
+                    changed=1,
+                    note_count=1,
+                ),
+                "Unburied 1 card from 1 note — Undo available",
+            ),
+            (
+                actions.CollectionAction(
+                    actions.ActionKind.CHANGE_DECK,
+                    card_ids=(1, 2),
+                    deck_id=9,
+                    deck_name="AnKing::Step 2",
+                ),
+                _outcome(
+                    actions.ActionKind.CHANGE_DECK,
+                    changed=2,
+                    note_count=1,
+                ),
+                "Moved 2 cards from 1 note to “AnKing::Step 2”"
+                " — Undo available",
             ),
             (
                 actions.CollectionAction(

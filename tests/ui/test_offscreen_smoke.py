@@ -182,6 +182,33 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller.deleteLater()
         dialog.deleteLater()
 
+    def test_controller_forwards_bury_and_change_deck_intents(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        result = SearchResult(note_id=7, card_ids=(71,))
+        burials = []
+        moves = []
+        controller.burialRequested.connect(
+            lambda target, bury: burials.append((target, bury))
+        )
+        controller.deckChangeRequested.connect(
+            lambda target, deck_id, name: moves.append(
+                (target, deck_id, name)
+            )
+        )
+
+        # Real Anki deck IDs are timestamp-sized and exceed Qt's signed
+        # 32-bit ``int`` range.  Both UI signal hops must preserve every bit.
+        deck_id = 1_785_791_800_898
+        dialog.burialRequested.emit((result,), True)
+        dialog.deckChangeRequested.emit((result,), deck_id, "Cardiology")
+
+        self.assertEqual(burials, [((result,), True)])
+        self.assertEqual(moves, [((result,), deck_id, "Cardiology")])
+        controller.deleteLater()
+        dialog.deleteLater()
+
     def test_deck_picker_applies_exclusion_scope_to_visible_query(self) -> None:
         backend = _HeldSearchBackend()
         dialog = SearchDialog()
@@ -303,14 +330,15 @@ class OffscreenSmokeTests(unittest.TestCase):
             card_states=(
                 CardState(101, flag=1, suspended=True),
                 CardState(102, flag=4, suspended=True),
-                CardState(103),
+                CardState(103, buried=True),
             ),
             sibling_count=3,
             title="Mixed card state",
         )
         self.assertEqual(
             card_state_summary(result),
-            "2 of 3 cards suspended. Flags: red 1, blue 1, unflagged 1.",
+            "2 of 3 cards suspended. 1 of 3 cards buried. "
+            "Flags: red 1, blue 1, unflagged 1.",
         )
 
         dialog = SearchDialog()
@@ -1411,7 +1439,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.22")
+        self.assertEqual(fallback.version, "1.0.23")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())
@@ -2225,6 +2253,9 @@ class OffscreenSmokeTests(unittest.TestCase):
         mixed_labels = [action.text() for action in mixed_menu.actions()]
         self.assertIn("Suspend", mixed_labels)
         self.assertIn("Unsuspend", mixed_labels)
+        self.assertIn("Bury", mixed_labels)
+        self.assertNotIn("Unbury", mixed_labels)
+        self.assertIn("Change Deck…", mixed_labels)
         self.assertIn("Flag", mixed_labels)
         self.assertIn("Tags", mixed_labels)
 
@@ -2235,6 +2266,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         active_labels = [action.text() for action in active_menu.actions()]
         self.assertIn("Suspend", active_labels)
         self.assertNotIn("Unsuspend", active_labels)
+        self.assertIn("Bury", active_labels)
 
         flags: list[tuple[tuple[SearchResult, ...], int]] = []
         tags: list[tuple[tuple[SearchResult, ...], bool]] = []
@@ -2278,6 +2310,85 @@ class OffscreenSmokeTests(unittest.TestCase):
 
         mixed_menu.deleteLater()
         active_menu.deleteLater()
+        dialog.deleteLater()
+
+    def test_context_menu_bury_toggle_and_deck_move_keep_frozen_targets(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        results = (
+            SearchResult(
+                note_id=1,
+                card_ids=(11,),
+                card_states=(CardState(11),),
+                title="Active",
+            ),
+            SearchResult(
+                note_id=2,
+                card_ids=(21,),
+                card_states=(CardState(21, buried=True),),
+                title="Buried",
+            ),
+            SearchResult(
+                note_id=3,
+                card_ids=(31,),
+                card_states=(CardState(31),),
+                title="Other",
+            ),
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=22,
+                query="context actions",
+                results=results,
+                total_results=3,
+            ),
+            (),
+        )
+        model = dialog.results.results_model()
+        model.set_checked(0, True)
+        model.set_checked(1, True)
+        selected = model.checked_results()
+
+        menu = dialog._build_result_context_menu(selected)
+        labels = [action.text() for action in menu.actions()]
+        self.assertIn("Bury", labels)
+        self.assertIn("Unbury", labels)
+
+        burial = []
+        dialog.burialRequested.connect(
+            lambda target, bury: burial.append((target, bury))
+        )
+        model.set_all_checked(False)
+        model.set_checked(2, True)
+        next(action for action in menu.actions() if action.text() == "Bury").trigger()
+        next(action for action in menu.actions() if action.text() == "Unbury").trigger()
+        self.assertEqual(
+            [([result.note_id for result in target], bury) for target, bury in burial],
+            [([1, 2], True), ([1, 2], False)],
+        )
+
+        dialog.show_deck_catalog(
+            DeckCatalog(
+                (
+                    DeckEntry(1, "Default"),
+                    DeckEntry(2, "Medicine::Cardiology"),
+                ),
+                1,
+            )
+        )
+        anchor = dialog.mapToGlobal(dialog.rect().center())
+        dialog._open_deck_destination_picker(selected, anchor)
+        moved = []
+        dialog.deckChangeRequested.connect(
+            lambda target, deck_id, name: moved.append((target, deck_id, name))
+        )
+        dialog._apply_deck_destination(DeckEntry(2, "Medicine::Cardiology"))
+
+        self.assertEqual([result.note_id for result in moved[0][0]], [1, 2])
+        self.assertEqual(moved[0][1:], (2, "Medicine::Cardiology"))
+        dialog.deck_destination_picker.reject()
+        menu.deleteLater()
         dialog.deleteLater()
 
 

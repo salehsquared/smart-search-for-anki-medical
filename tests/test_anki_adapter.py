@@ -246,7 +246,7 @@ class TargetedAnkiReaderTests(unittest.TestCase):
 
             def all_names_and_ids(self, *, include_filtered: bool):
                 self.include_filtered_calls.append(include_filtered)
-                return (
+                rows = (
                     types.SimpleNamespace(id=1, name="Default"),
                     types.SimpleNamespace(id=20, name="Medicine"),
                     types.SimpleNamespace(id=21, name="Medicine::Cardiology"),
@@ -254,6 +254,9 @@ class TargetedAnkiReaderTests(unittest.TestCase):
                     types.SimpleNamespace(id=20, name="duplicate id"),
                     types.SimpleNamespace(id=0, name="invalid"),
                 )
+                if include_filtered:
+                    return rows
+                return tuple(item for item in rows if item.id != 30)
 
             def get_current_id(self) -> int:
                 return 21
@@ -264,7 +267,7 @@ class TargetedAnkiReaderTests(unittest.TestCase):
         catalog = adapter.AnkiCollectionReader.deck_catalog(collection)
 
         self.assertIsInstance(catalog.decks, tuple)
-        self.assertEqual(decks.include_filtered_calls, [True])
+        self.assertEqual(decks.include_filtered_calls, [False, True])
         self.assertEqual(
             tuple((deck.deck_id, deck.name) for deck in catalog.decks),
             (
@@ -277,6 +280,8 @@ class TargetedAnkiReaderTests(unittest.TestCase):
         self.assertEqual(catalog.current_deck_id, 21)
         self.assertEqual(catalog.current_deck, catalog.decks[2])
         self.assertEqual(catalog.entries, catalog.decks)
+        self.assertFalse(catalog.decks[2].filtered)
+        self.assertTrue(catalog.decks[3].filtered)
 
     def test_deck_catalog_falls_back_to_current_deck_object(self) -> None:
         class _LegacyDecks:
@@ -732,8 +737,35 @@ class TargetedAnkiReaderTests(unittest.TestCase):
             card_ids_by_note={41: (401,)},
         )
 
-        self.assertEqual(states, {41: ((401, 1, True),)})
+        self.assertEqual(states, {41: ((401, 1, True, False),)})
         self.assertEqual(collection.card_lookups, [401])
+
+    def test_card_state_distinguishes_buried_from_suspended(self) -> None:
+        collection = _Collection(
+            notes={},
+            cards_by_note={41: (401, 402, 403, 404)},
+            cards={
+                401: _Card(did=1, nid=41, queue=-1),
+                402: _Card(did=1, nid=41, queue=-2),
+                403: _Card(did=1, nid=41, queue=-3),
+                404: _Card(did=1, nid=41, queue=2),
+            },
+        )
+
+        states = adapter.AnkiCollectionReader.card_states_for_notes(
+            collection,
+            (41,),
+        )
+
+        self.assertEqual(
+            states[41],
+            (
+                (401, 0, True, False),
+                (402, 0, False, True),
+                (403, 0, False, True),
+                (404, 0, False, False),
+            ),
+        )
 
 
 if __name__ == "__main__":

@@ -108,12 +108,18 @@ def card_state_summary(result: SearchResult) -> str:
         return ""
     total = len(states)
     suspended = sum(1 for state in states if state.suspended)
+    buried = sum(1 for state in states if state.buried)
     flag_counts = Counter(state.flag for state in states)
     parts: list[str] = []
     if suspended:
         parts.append(
             f"{suspended} of {total} "
             f"card{'s' if total != 1 else ''} suspended"
+        )
+    if buried:
+        parts.append(
+            f"{buried} of {total} "
+            f"card{'s' if total != 1 else ''} buried"
         )
     flagged = [
         f"{_FLAG_NAMES[flag]} {count}"
@@ -317,11 +323,14 @@ class ResultsModel(QAbstractListModel):
         *,
         flag: Optional[int] = None,
         suspended: Optional[bool] = None,
+        buried: Optional[bool] = None,
     ) -> None:
         """Update visible live-state indicators after a successful Anki op."""
 
         targets = {int(card_id) for card_id in card_ids if int(card_id) > 0}
-        if not targets or (flag is None and suspended is None):
+        if not targets or (
+            flag is None and suspended is None and buried is None
+        ):
             return
         changed_rows: list[int] = []
         for row, result in enumerate(self._results):
@@ -338,6 +347,11 @@ class ResultsModel(QAbstractListModel):
                         state.suspended
                         if suspended is None
                         else bool(suspended)
+                    ),
+                    buried=(
+                        state.buried
+                        if buried is None
+                        else bool(buried)
                     ),
                 )
                 states.append(updated)
@@ -878,7 +892,8 @@ class ResultsView(QListView):
             "Right Arrow to show the answer and Left Arrow to show the front. "
             "Click a checkbox or press Shift+Space to include a result in a "
             "bulk action; Shift-click a row to include a range. "
-            "Right-click a row to open, flag, suspend, or tag the target selection. "
+            "Right-click a row to open, move, bury, flag, suspend, or tag the "
+            "target selection. "
             "Press Return to open the highlighted note, or Up on the first row "
             "to return to the search field."
         )

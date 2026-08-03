@@ -9,7 +9,7 @@ path.
 - `02-semantic-setup.png` and `03-bulk-actions.png` are deterministic release
   compositions reviewed against the original public interface.
 - `04-about-privacy.png` is a deterministic release composition reviewed
-  against the prepared v1.0.22 About interface.
+  against the prepared v1.0.23 About interface.
 - The matching SVG files are editable source compositions, not test evidence.
 
 Render them from the repository root:

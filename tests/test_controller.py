@@ -3898,6 +3898,70 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(captures, [])
         self.assertEqual(reruns, [])
 
+    def test_bury_and_change_deck_build_exact_card_actions(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        results = (
+            contracts.SearchResult(note_id=11, card_ids=(101, 102)),
+            contracts.SearchResult(note_id=22, card_ids=(201,)),
+        )
+
+        with patch.object(addon, "_run_collection_action") as run:
+            addon._set_results_buried(results, True)
+            bury = run.call_args.args[0]
+            self.assertIs(bury.kind, controller.ActionKind.BURY)
+            self.assertEqual(bury.note_ids, (11, 22))
+            self.assertEqual(bury.card_ids, (101, 102, 201))
+
+            addon._change_results_deck(results, 9, "Medicine::Cardiology")
+            move = run.call_args.args[0]
+            self.assertIs(move.kind, controller.ActionKind.CHANGE_DECK)
+            self.assertEqual(move.card_ids, (101, 102, 201))
+            self.assertEqual(move.deck_id, 9)
+            self.assertEqual(move.deck_name, "Medicine::Cardiology")
+
+    def test_bury_success_updates_only_changed_cards_in_place(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        applied = []
+        addon._dialog = types.SimpleNamespace(
+            apply_card_state_change=lambda card_ids, **change: applied.append(
+                (tuple(card_ids), change)
+            ),
+            finish_batch_action=lambda _ok, _text: None,
+        )
+        addon._show_message = lambda _message: None
+        action = controller.CollectionAction(
+            controller.ActionKind.BURY,
+            note_ids=(11, 22),
+            card_ids=(101, 102, 201),
+        )
+        outcome = types.SimpleNamespace(
+            changes=object(),
+            kind=controller.ActionKind.BURY,
+            requested=3,
+            live=3,
+            eligible=2,
+            changed=2,
+            stale=0,
+            skipped=1,
+            note_count=2,
+            changed_card_ids=(101, 201),
+        )
+
+        addon._collection_action_succeeded(action, outcome)
+
+        self.assertEqual(
+            applied,
+            [((101, 201), {"suspended": False, "buried": True})],
+        )
+
     def test_tag_filtered_action_also_keeps_current_results_stable(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),
@@ -4070,6 +4134,50 @@ class ControllerTests(unittest.TestCase):
             [{"note_ids": (22, 11)}],
         )
         self.assertFalse(any(request.get("full") for request in requests))
+
+    def test_owned_deck_move_reconciles_exact_notes_but_bury_does_not(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        requests = []
+        addon.schedule_reconcile = lambda **kwargs: requests.append(kwargs)
+        context = self.backend._context
+        assert context
+        changes = types.SimpleNamespace(
+            card=True,
+            note=False,
+            deck=True,
+            tag=False,
+            notetype=False,
+            note_text=False,
+        )
+        move = controller.CollectionAction(
+            controller.ActionKind.CHANGE_DECK,
+            note_ids=(22, 11),
+            card_ids=(201, 101),
+            deck_id=9,
+            deck_name="Target",
+        )
+
+        addon._on_operation(
+            changes,
+            controller._OwnedMutation(context.token, move),
+        )
+        self.assertEqual(requests, [{"note_ids": (22, 11)}])
+
+        bury = controller.CollectionAction(
+            controller.ActionKind.BURY,
+            note_ids=(22,),
+            card_ids=(201,),
+        )
+        addon._on_operation(
+            changes,
+            controller._OwnedMutation(context.token, bury),
+        )
+        self.assertEqual(requests, [{"note_ids": (22, 11)}])
 
     def test_unknown_native_bulk_tag_operation_keeps_safe_full_fallback(self) -> None:
         addon = controller.SmartSearchAddonController(

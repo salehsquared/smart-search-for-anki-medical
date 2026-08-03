@@ -4,10 +4,10 @@
 
 - Smart Search runs in Anki Desktop only. AnkiMobile and AnkiDroid do not load
   desktop add-ons.
-- v1.0.22 supports Anki Desktop 24.11 through 26.08, including the 25.02,
+- v1.0.23 supports Anki Desktop 24.11 through 26.08, including the 25.02,
   25.07, 25.09, 26.05, and 26.08 release families.
 - The supported-version matrix was exercised on macOS with Apple silicon.
-  Windows, Linux, and Intel Mac integration are not part of the v1.0.22 support
+  Windows, Linux, and Intel Mac integration are not part of the v1.0.23 support
   claim.
 - Semantic Search currently supports **macOS 14 or later on Apple-silicon Macs
   only**.
@@ -65,9 +65,11 @@
 
 ## Actions and state
 
-- Tags apply to notes; flags and suspension apply to cards. A selected note can
-  represent multiple sibling cards, so the selection summary should be reviewed
-  before a bulk action.
+- Tags apply to notes; flags, suspension, burial, and deck moves apply to cards.
+  A selected note can represent multiple sibling cards, so the selection
+  summary should be reviewed before a bulk action.
+- Cards can be moved only to normal decks. Filtered decks remain available as
+  search scopes but are intentionally excluded as move destinations.
 - “All shown” means the currently displayed result set, not every possible
   result when a relevance cutoff or display limit is active.
 - Anki's Browser remains the authoritative interface for reviewing complex

@@ -58,9 +58,10 @@ usable while Semantic prepares.
   **Invert**.
 - Open exactly the checked cards in Anki's Browser.
 - Flag, suspend, unsuspend, add tags, or remove tags from the toolbar or
-  right-click menu.
+  right-click menu. The right-click menu can also bury/unbury cards or move the
+  exact selection with a searchable hierarchical destination picker.
 - Review the live selection summary before acting; tags apply to notes, while
-  flags and suspension apply to cards.
+  flags, suspension, burial, and deck moves apply to cards.
 
 Every collection change uses Anki's supported, undoable operations and creates
 one clean Undo step per action. Smart Search never writes directly to

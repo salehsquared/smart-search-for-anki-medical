@@ -156,6 +156,7 @@ class DeckEntry:
 
     deck_id: int
     name: str
+    filtered: bool = False
 
     def __post_init__(self) -> None:
         deck_id = int(self.deck_id)
@@ -166,6 +167,7 @@ class DeckEntry:
             raise ValueError("DeckEntry.name must not be empty")
         object.__setattr__(self, "deck_id", deck_id)
         object.__setattr__(self, "name", name)
+        object.__setattr__(self, "filtered", bool(self.filtered))
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +226,7 @@ class CardState:
     card_id: int
     flag: int = 0
     suspended: bool = False
+    buried: bool = False
 
     def __post_init__(self) -> None:
         card_id = int(self.card_id)
@@ -235,6 +238,7 @@ class CardState:
         object.__setattr__(self, "card_id", card_id)
         object.__setattr__(self, "flag", flag)
         object.__setattr__(self, "suspended", bool(self.suspended))
+        object.__setattr__(self, "buried", bool(self.buried))
 
 
 @dataclass(frozen=True, slots=True)
