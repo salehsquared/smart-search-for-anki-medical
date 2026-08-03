@@ -16,6 +16,7 @@ from .manifest import MODEL_DIMENSION, MODEL_NAME
 
 SCHEMA_VERSION = 1
 GROWTH_SLOTS = 1024
+VECTOR_SCAN_BATCH_SIZE = 512
 _SOURCE_GENERATION_KEY = "source_generation"
 
 
@@ -504,9 +505,15 @@ def _vector_row_batches(
     connection: sqlite3.Connection,
     *,
     allowed_note_ids: set[int] | None,
-    scan_batch_size: int = 4096,
+    scan_batch_size: int = VECTOR_SCAN_BATCH_SIZE,
 ) -> Iterable[list[sqlite3.Row]]:
-    """Stream vector metadata without materializing the full index in Python."""
+    """Stream vector metadata without materializing the full index in Python.
+
+    A 512-row chunk keeps each float16-to-float32 conversion below 1 MiB at
+    the fixed 384 dimensions. Larger chunks offered no measurable speedup in
+    a 40k-note index but left substantially more allocator high-water memory
+    in Anki after a search.
+    """
 
     if allowed_note_ids is None:
         cursor = connection.execute("SELECT note_id, slot FROM vectors")

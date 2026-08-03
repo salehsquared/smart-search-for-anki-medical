@@ -7,12 +7,9 @@ from pathlib import Path
 import threading
 from typing import Any
 
+from .errors import SemanticRuntimeError
 from .manifest import MODEL_DIMENSION, MODEL_MAX_LENGTH
 from .model_manager import ModelManager
-
-
-class SemanticRuntimeError(RuntimeError):
-    pass
 
 
 class OnnxMedicalEmbedder:

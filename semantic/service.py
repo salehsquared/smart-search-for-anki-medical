@@ -7,18 +7,17 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
-import sys
 import threading
 from typing import Any
 
-from .embedder import OnnxMedicalEmbedder, SemanticRuntimeError
+from .errors import SemanticRuntimeError, SemanticWorkerError
 from .model_manager import ModelManager
 from .vector_index import VectorIndex
+from .worker_client import SemanticWorkerClient
 
 
 _HASH_LOOKUP_BATCH_SIZE = 900
 _SHARED_RUNTIME_LOCK = threading.Lock()
-_RUNTIME_RESTART_REQUIRED = threading.Event()
 
 
 @contextmanager
@@ -96,11 +95,7 @@ class SemanticService:
     ) -> None:
         self.manager = ModelManager(data_root=Path(data_root), bundle_root=Path(bundle_root))
         self.index = VectorIndex(Path(data_root) / "profiles" / profile_key / "vectors")
-        self._embedder: OnnxMedicalEmbedder | None = None
-        self._embedder_lock = threading.RLock()
-        self._embedder_condition = threading.Condition(self._embedder_lock)
-        self._embedder_users = 0
-        self._unload_when_idle = False
+        self._worker = SemanticWorkerClient(self.manager, Path(bundle_root))
         self._last_error: str | None = None
         self._last_error_kind: str | None = None
 
@@ -123,21 +118,9 @@ class SemanticService:
     ) -> SemanticStatus:
         try:
             with _shared_runtime_access(cancel_check):
-                runtime_was_imported = any(
-                    name == "onnxruntime" or name.startswith("onnxruntime.")
-                    for name in sys.modules
-                )
-                if repair and runtime_was_imported:
-                    # Repair may replace native files before a later model
-                    # download fails or is cancelled. Fail closed before any
-                    # mutation, and retain the guard across profile switches.
-                    _RUNTIME_RESTART_REQUIRED.set()
-                # Do not retain this condition during extraction/download.
-                # Cleanup/unload can then detach an old profile immediately,
-                # while the process-wide lock keeps shared assets single-writer.
-                with self._embedder_condition:
-                    self._embedder = None
-                    self._unload_when_idle = False
+                # Native files live only in the helper, so a repair is safe as
+                # soon as that disposable process has been terminated.
+                self._worker.terminate_and_wait()
                 self.manager.install_all(
                     progress,
                     repair_runtime=repair,
@@ -146,6 +129,29 @@ class SemanticService:
             self._last_error = None
             self._last_error_kind = None
         except Exception as error:
+            if cancel_check is not None:
+                cancel_check()
+            self._last_error = str(error)
+            self._last_error_kind = "model"
+            raise
+        return self.status()
+
+    def install_runtime(
+        self,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> SemanticStatus:
+        """Install only bundled local worker files during a version upgrade."""
+
+        try:
+            with _shared_runtime_access(cancel_check):
+                self._worker.terminate_and_wait()
+                self.manager.install_runtime(cancel_check=cancel_check)
+            self._last_error = None
+            self._last_error_kind = None
+        except Exception as error:
+            if cancel_check is not None:
+                cancel_check()
             self._last_error = str(error)
             self._last_error_kind = "model"
             raise
@@ -153,72 +159,40 @@ class SemanticService:
 
     @property
     def restart_required(self) -> bool:
-        """Whether repaired native files require a clean interpreter load."""
+        """Worker repairs never require restarting the Anki interpreter."""
 
-        return _RUNTIME_RESTART_REQUIRED.is_set()
-
-    def _get_embedder(self) -> OnnxMedicalEmbedder:
-        with self._embedder_lock:
-            if self._embedder is None:
-                self._embedder = OnnxMedicalEmbedder(self.manager)
-            return self._embedder
-
-    @contextmanager
-    def _use_embedder(
-        self,
-        cancel_check: Callable[[], None] | None = None,
-    ) -> Iterator[OnnxMedicalEmbedder]:
-        """Hold a logical lease so unload cannot disrupt active inference."""
-
-        with _shared_runtime_access(cancel_check):
-            with self._embedder_lock:
-                embedder = self._get_embedder()
-                self._embedder_users += 1
-            try:
-                yield embedder
-            finally:
-                with self._embedder_lock:
-                    self._embedder_users = max(0, self._embedder_users - 1)
-                    if self._embedder_users == 0 and self._unload_when_idle:
-                        self._embedder = None
-                        self._unload_when_idle = False
-                    self._embedder_condition.notify_all()
+        return False
 
     @property
     def model_loaded(self) -> bool:
-        """Whether this service currently retains an embedding model."""
+        """Whether this service currently owns a live helper process."""
 
-        with self._embedder_lock:
-            return self._embedder is not None
+        return self._worker.running
+
+    @property
+    def last_error_kind(self) -> str | None:
+        """Return the latest cheap recovery hint without touching disk."""
+
+        return self._last_error_kind
 
     def unload(self) -> bool:
-        """Best-effort release of the optional native model and tokenizer.
+        """Terminate the helper so macOS reclaims all native model memory."""
 
-        ONNX Runtime does not expose a portable force-close API.  Dropping the
-        final Python reference is therefore the safest supported release
-        mechanism.  If inference is in flight, release is deferred until its
-        lease exits instead of invalidating a live native session.
+        return self._worker.terminate_now()
 
-        Returns ``True`` when a loaded model existed (including one whose
-        release was deferred), and ``False`` when there was nothing to release.
-        """
+    abort_now = unload
 
-        with self._embedder_lock:
-            if self._embedder is None:
-                return False
-            if self._embedder_users:
-                self._unload_when_idle = True
-            else:
-                self._embedder = None
-                self._unload_when_idle = False
-            return True
+    def close(self) -> bool:
+        """Synchronously reap the helper before profile files are retired."""
+
+        return self._worker.terminate_and_wait()
 
     def warmup(self) -> None:
         """Load the local runtime and run one tiny inference off the UI thread."""
 
         try:
-            with self._use_embedder() as embedder:
-                embedder.embed(["medical semantic search"])
+            with _shared_runtime_access():
+                self._worker.warmup()
             self._last_error = None
             self._last_error_kind = None
         except Exception as error:
@@ -292,7 +266,7 @@ class SemanticService:
             embed_batch_size = max(1, int(batch_size))
             indexed = 0
             pending: list[SemanticDocument] = []
-            with self._use_embedder(cancel_check) as embedder:
+            with _shared_runtime_access(cancel_check):
                 for document, current in self.iter_document_freshness(
                     documents,
                     cancel_check=cancel_check,
@@ -303,7 +277,6 @@ class SemanticService:
                     if len(pending) < embed_batch_size:
                         continue
                     indexed += self._index_batch(
-                        embedder,
                         pending,
                         cancel_check=cancel_check,
                     )
@@ -312,7 +285,6 @@ class SemanticService:
                         progress(indexed, stale_count)
                 if pending:
                     indexed += self._index_batch(
-                        embedder,
                         pending,
                         cancel_check=cancel_check,
                     )
@@ -321,6 +293,16 @@ class SemanticService:
             self._last_error = None
             self._last_error_kind = None
             return indexed
+        except SemanticWorkerError:
+            # A killed/crashed helper is disposable. Reviewer cancellation is
+            # re-raised by the caller's checkpoint; any other transient child
+            # failure can be retried without falsely declaring the verified
+            # model or index corrupt.
+            if cancel_check is not None:
+                cancel_check()
+            self._last_error = None
+            self._last_error_kind = None
+            raise
         except Exception as error:
             # The caller owns the cancellation exception type. Re-run its
             # checkpoint so an expected reviewer/profile cancellation is not
@@ -335,17 +317,18 @@ class SemanticService:
 
     def _index_batch(
         self,
-        embedder: OnnxMedicalEmbedder,
         documents: Sequence[SemanticDocument],
         *,
         cancel_check: Callable[[], None] | None = None,
     ) -> int:
-        vectors = embedder.embed(
+        vectors = self._worker.embed(
             [document.text for document in documents],
+            background=True,
             cancel_check=cancel_check,
         )
         if cancel_check is not None:
             cancel_check()
+        self.manager.activate_vector_runtime()
         self.index.upsert_many(
             [document.note_id for document in documents],
             [document.content_hash for document in documents],
@@ -385,11 +368,13 @@ class SemanticService:
         try:
             if cancel_check is not None:
                 cancel_check()
-            with self._use_embedder(cancel_check) as embedder:
-                vector = embedder.embed(
+            with _shared_runtime_access(cancel_check):
+                vector = self._worker.embed(
                     [query],
+                    background=False,
                     cancel_check=cancel_check,
                 )[0]
+            self.manager.activate_vector_runtime()
             hits = self.index.search(
                 vector,
                 limit=limit,
@@ -402,7 +387,18 @@ class SemanticService:
                 SemanticHit(note_id=hit.note_id, score=hit.score)
                 for hit in hits
             ]
+        except SemanticWorkerError:
+            # A child crash, lifecycle termination, or protocol fault does not
+            # imply that the verified local assets are corrupt. Surface one
+            # transient query warning and let the next request start cleanly.
+            if cancel_check is not None:
+                cancel_check()
+            self._last_error = None
+            self._last_error_kind = None
+            raise
         except SemanticRuntimeError as error:
+            if cancel_check is not None:
+                cancel_check()
             self._last_error = str(error)
             self._last_error_kind = "model"
             return []

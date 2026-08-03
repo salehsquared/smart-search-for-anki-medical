@@ -110,7 +110,7 @@ _DEFAULT_DEBOUNCE_MS = 1200
 _DEFAULT_SEMANTIC_AUTOSTART_DELAY_MS = 20_000
 _SEMANTIC_AUTOSTART_RETRY_MS = 2_000
 _POST_REVIEW_MAINTENANCE_DELAY_MS = 5_000
-_SEMANTIC_IDLE_UNLOAD_MS = 90_000
+_SEMANTIC_IDLE_UNLOAD_MS = 2_000
 _SEMANTIC_DELTA_BATCH_SIZE = 250
 _RXTERMS_RESOURCE = Path("resources") / "medical_vocab" / "rxterms_202607.json.gz"
 _DIALOG_MANAGER_NAME = "SmartSearchMedical"
@@ -643,6 +643,13 @@ class AnkiSearchBackend:
             self._semantic_progress = None
         for event in events:
             event.set()
+        semantic = getattr(context, "semantic", None)
+        abort = getattr(semantic, "abort_now", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:
+                pass
         self._set_index_state(
             IndexState.UNAVAILABLE,
             detail="Open an Anki profile to initialize Smart Search.",
@@ -683,10 +690,12 @@ class AnkiSearchBackend:
             if context.maintenance is not None:
                 context.maintenance.close()
             semantic = context.semantic
-            unload = getattr(semantic, "unload", None)
-            if callable(unload):
+            close_semantic = getattr(semantic, "close", None)
+            if not callable(close_semantic):
+                close_semantic = getattr(semantic, "unload", None)
+            if callable(close_semantic):
                 try:
-                    unload()
+                    close_semantic()
                 except Exception:
                     pass
             vector_index = getattr(semantic, "index", None)
@@ -1095,7 +1104,13 @@ class AnkiSearchBackend:
         on_success: Callable[[SearchResponse], None],
         on_error: ErrorCallback,
     ) -> Callable[[], None]:
-        event = self._new_cancellation()
+        event = self._new_cancellation(
+            kind=(
+                "semantic"
+                if not request.literal and request.mode is SearchMode.SEMANTIC
+                else "interactive"
+            )
+        )
         context = self._context
         token = context.token if context else -1
         executable_query, incomplete_filters = strip_incomplete_filter_tokens(
@@ -2939,7 +2954,8 @@ class AnkiSearchBackend:
             if self._finalize_semantic_delta_chain(context):
                 return
             if not current:
-                self._refresh_existing_semantic_index(context)
+                if not self._refresh_existing_semantic_index(context):
+                    self.release_semantic_runtime()
             else:
                 self.release_semantic_runtime()
 
@@ -3012,6 +3028,7 @@ class AnkiSearchBackend:
     def install_semantic(
         self,
         *,
+        runtime_only: bool = False,
         on_progress: ProgressCallback = _noop,
         on_success: StatusCallback = _noop,
         on_error: ErrorCallback = _noop,
@@ -3086,11 +3103,16 @@ class AnkiSearchBackend:
 
         def install(_collection: Any) -> bool:
             _raise_if_cancelled(event)
-            context.semantic.install(
-                progress,
-                repair=repair,
-                cancel_check=lambda: _raise_if_cancelled(event),
-            )
+            if runtime_only:
+                context.semantic.install_runtime(
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+            else:
+                context.semantic.install(
+                    progress,
+                    repair=repair,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
             context.semantic_restart_required = bool(
                 getattr(context.semantic, "restart_required", False)
             )
@@ -3344,7 +3366,8 @@ class AnkiSearchBackend:
             on_success(self.get_status())
             if not current:
                 if not self._start_semantic_delta(context):
-                    self._refresh_existing_semantic_index(context)
+                    if not self._refresh_existing_semantic_index(context):
+                        self.release_semantic_runtime()
             else:
                 self.release_semantic_runtime()
 
@@ -3489,7 +3512,8 @@ class AnkiSearchBackend:
             on_success(self.get_status())
             if not current:
                 if not self._start_semantic_delta(context):
-                    self._refresh_existing_semantic_index(context)
+                    if not self._refresh_existing_semantic_index(context):
+                        self.release_semantic_runtime()
             else:
                 self.release_semantic_runtime()
 
@@ -3516,9 +3540,15 @@ class AnkiSearchBackend:
         cancelled = isinstance(error, _CancelledOperation) or event.is_set()
         if not cancelled:
             context.semantic_error = str(error)
-            service_kind = getattr(
-                context.semantic_snapshot, "error_kind", None
-            )
+            # The cached snapshot intentionally avoids file and SQLite reads on
+            # Anki's GUI thread, but it predates the operation that just failed.
+            # Read the service's in-memory recovery hint first so a verified
+            # runtime/model failure is not mislabeled as a reindex failure.
+            service_kind = getattr(context.semantic, "last_error_kind", None)
+            if service_kind is None:
+                service_kind = getattr(
+                    context.semantic_snapshot, "error_kind", None
+                )
             with self._state_lock:
                 phase = self._semantic_phase
             context.semantic_error_recovery = (
@@ -3646,8 +3676,9 @@ class AnkiSearchBackend:
         """Apply one central host-activity gate to every background writer.
 
         Reviewer transitions use this before any timer callback can enqueue a
-        collection read.  Interactive Smart/Exact/Semantic searches are not
-        cancelled; only derived-index and model-maintenance operations are.
+        collection read.  Smart and Exact searches remain independent, while
+        Semantic inference is cancelled so its disposable worker cannot
+        compete with reviews or a temporary collection close.
         """
 
         events: tuple[threading.Event, ...] = ()
@@ -3695,6 +3726,19 @@ class AnkiSearchBackend:
         except Exception:
             return False
         return True
+
+    def abort_semantic_runtime_now(self) -> bool:
+        """Stop inference immediately without queueing behind its worker."""
+
+        context = self._context
+        semantic = context.semantic if context is not None else None
+        abort = getattr(semantic, "abort_now", None)
+        if not callable(abort):
+            return False
+        try:
+            return bool(abort())
+        except Exception:
+            return False
 
     def resume_pending_background_work(self) -> bool:
         """Resume semantic deltas retained while the reviewer gate was closed."""
@@ -3884,6 +3928,7 @@ class SmartSearchAddonController:
         self._semantic_unload_timer: Any | None = None
         self._post_review_resume_timer: Any | None = None
         self._review_active = _host_state_name(getattr(mw, "state", "")) == "review"
+        self._collection_temporarily_closed = False
         self._update_check_running = False
         self._update_profile_was_active = False
         self._hooks: list[tuple[Any, Callable[..., Any]]] = []
@@ -4042,7 +4087,11 @@ class SmartSearchAddonController:
         """True while background work would compete with core reviewing."""
 
         current = _host_state_name(getattr(self.mw, "state", ""))
-        return self._review_active or current == "review"
+        return (
+            self._collection_temporarily_closed
+            or self._review_active
+            or current == "review"
+        )
 
     def _set_backend_maintenance_pause(self, paused: bool) -> None:
         setter = getattr(self.backend, "set_background_maintenance_paused", None)
@@ -4083,16 +4132,21 @@ class SmartSearchAddonController:
         self._pending_preview_result = None
         if not self._dialog_is_visible():
             self._close_previewer(save=False)
-        release = getattr(self.backend, "release_semantic_runtime", None)
-        if callable(release):
-            release()
+        abort = getattr(self.backend, "abort_semantic_runtime_now", None)
+        if callable(abort):
+            abort()
+        else:
+            release = getattr(self.backend, "release_semantic_runtime", None)
+            if callable(release):
+                release()
 
     def _leave_review_mode(self) -> None:
         """Resume queued maintenance only after the reviewer has settled."""
 
         self._review_active = False
-        self._set_backend_maintenance_pause(False)
-        if self._post_review_resume_timer is not None:
+        still_paused = self._collection_temporarily_closed
+        self._set_backend_maintenance_pause(still_paused)
+        if not still_paused and self._post_review_resume_timer is not None:
             self._post_review_resume_timer.start(
                 _POST_REVIEW_MAINTENANCE_DELAY_MS
             )
@@ -5384,6 +5438,36 @@ class SmartSearchAddonController:
         if status.state is not IndexState.READY:
             return
         semantic = status.semantic
+        raw_semantic = getattr(context, "semantic_snapshot", None)
+        if (
+            raw_semantic is not None
+            and bool(getattr(raw_semantic, "supported", False))
+            and bool(getattr(raw_semantic, "model_ready", False))
+            and not bool(getattr(raw_semantic, "runtime_ready", False))
+        ):
+            # v1.0.20 and earlier stored the model in the same durable
+            # location but installed native inference libraries directly into
+            # Anki's interpreter.  Upgrade that local installation to the
+            # bundled disposable worker in the background.  No network access
+            # is needed when the already-verified model is present, and a
+            # fresh user without the model still retains the explicit setup
+            # flow.
+            if self._semantic_unload_timer is not None:
+                self._semantic_unload_timer.stop()
+            started = self.backend.install_semantic(
+                runtime_only=True,
+                on_progress=lambda _fraction, _detail: self._queue_dialog_refresh(),
+                on_success=lambda _status: self._run_on_main(
+                    self._semantic_runtime_migration_complete
+                ),
+                on_error=lambda _message: self._run_on_main(
+                    self._refresh_dialog_now
+                ),
+            )
+            if started is not None:
+                self._semantic_autostart_attempted_token = token
+            self._refresh_dialog()
+            return
         if semantic is None or semantic.state is not SemanticState.MODEL_READY:
             # READY/INDEXING need no second worker.  NOT_INSTALLED,
             # UNSUPPORTED, and ERROR remain explicit user-facing actions.
@@ -5409,6 +5493,7 @@ class SmartSearchAddonController:
     def _on_profile_open(self) -> None:
         if self.backend.bundle_update_running:
             return
+        self._collection_temporarily_closed = False
         self._close_dialog()
         self._clear_pending_reconciles()
         self._clear_captured_notes()
@@ -5634,10 +5719,31 @@ class SmartSearchAddonController:
     ) -> None:
         # Match Anki's Browser: a live Editor must save and close before sync
         # temporarily swaps out the collection beneath its note/card objects.
+        self._collection_temporarily_closed = True
+        self._set_backend_maintenance_pause(True)
+        for timer in (
+            self._reconcile_timer,
+            self._semantic_autostart_timer,
+            self._dialog_refresh_timer,
+            self._vocabulary_refresh_timer,
+            self._card_state_refresh_timer,
+            self._preview_open_timer,
+            self._semantic_unload_timer,
+            self._post_review_resume_timer,
+        ):
+            if timer is not None:
+                timer.stop()
+        abort = getattr(self.backend, "abort_semantic_runtime_now", None)
+        if callable(abort):
+            abort()
         self._close_dialog_with_callback(lambda: None)
 
     def _on_collection_reopened(self, _collection: Any) -> None:
+        self._collection_temporarily_closed = False
+        self._set_backend_maintenance_pause(self._review_active)
         self.schedule_reconcile()
+        if not self._review_active and self._post_review_resume_timer is not None:
+            self._post_review_resume_timer.start(250)
 
     def _install_semantic(self) -> None:
         if self.backend.bundle_update_running:
@@ -5682,6 +5788,16 @@ class SmartSearchAddonController:
                 "Semantic search is set up. Choose Prepare Semantic Search to "
                 "finish this profile."
             )
+
+    def _semantic_runtime_migration_complete(self) -> None:
+        """Continue automatic preparation after a silent runtime upgrade."""
+
+        self._refresh_dialog_now()
+        context = self.backend._context
+        if context is None or self._maintenance_blocked():
+            return
+        self._semantic_autostart_attempted_token = None
+        self._schedule_semantic_autostart(delay_ms=0)
 
     def _text_index_rebuilt(self) -> None:
         """Re-arm first-time semantic indexing after a later successful rebuild."""
@@ -5853,6 +5969,11 @@ class SmartSearchAddonController:
             return
 
         self._dialog_close_in_progress = True
+        if ui_controller is not None:
+            try:
+                ui_controller.pause()
+            except (AttributeError, RuntimeError):
+                pass
         if self._preview_open_timer is not None:
             self._preview_open_timer.stop()
         self._pending_preview_result = None

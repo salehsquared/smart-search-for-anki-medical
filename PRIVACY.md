@@ -1,7 +1,7 @@
 # Privacy
 
 **Effective date:** July 29, 2026
-**Applies to:** Smart Search for Anki — Medical 1.0.20
+**Applies to:** Smart Search for Anki — Medical 1.0.21
 
 ## Plain-language summary
 
@@ -42,7 +42,11 @@ ratings, or scheduling history in its own search indexes.
 ## Local processing and storage
 
 Searches, spelling-distance calculations, alias expansion, indexing, and
-semantic inference run on the user's computer.
+semantic inference run on the user's computer. Native semantic inference runs
+inside a local helper process and communicates with the add-on through local
+operating-system pipes. It does not create a network service or transmit card
+text. The helper is started only for semantic work and is terminated when it
+is no longer needed so its model and native-library memory can be reclaimed.
 
 Smart Search stores add-on-owned files below its Anki `user_files` directory:
 
@@ -59,7 +63,9 @@ Smart Search stores add-on-owned files below its Anki `user_files` directory:
   text copy of the notes, but embeddings are still derived from private
   content and should be protected accordingly.
 - `model/` contains the optional semantic model and tokenizer.
-- `runtime/` contains the optional local inference libraries.
+- `runtime/` contains the expanded standalone Python worker, its optional local
+  inference libraries, and a separate NumPy-only directory used for local
+  vector-index arithmetic.
 
 The profile key is a one-way hash of the Anki profile name and collection path.
 It is used to keep indexes separate; it is not sent anywhere.
@@ -138,13 +144,15 @@ backups or filesystem snapshots.
 
 ## Integrity and security
 
-Bundled runtime wheels and downloaded model files are pinned by version and
-verified with SHA-256 before use. This protects against accidental corruption
-and unannounced file changes at the pinned locations; it is not a substitute
-for operating-system security or an independent security audit. The semantic
-model's pinned source revision, transformation parameters, toolchain,
-artifact hashes, and numerical parity sanity check are published in the
-provenance record linked above.
+The bundled standalone interpreter and runtime wheels, and the downloaded
+model files, are pinned by version, expected byte size where applicable, and
+SHA-256 before use. Archive paths, link targets, executable entry points, and
+required license payloads are also validated before a public package is built.
+This protects against accidental corruption and unannounced file changes at
+the pinned locations; it is not a substitute for operating-system security or
+an independent security audit. The semantic model's pinned source revision,
+transformation parameters, toolchain, artifact hashes, and numerical parity
+sanity check are published in the provenance record linked above.
 
 ## Children and sensitive information
 

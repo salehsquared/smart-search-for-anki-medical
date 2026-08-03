@@ -10,6 +10,8 @@ import json
 from pathlib import Path, PurePosixPath
 import py_compile
 import re
+import runpy
+import tarfile
 import tempfile
 import zipfile
 
@@ -45,15 +47,11 @@ PUBLIC_RESOURCE_FILES = {
 PUBLIC_LICENSE_FILES = {
     "licenses/Apache-2.0.txt",
     "licenses/bge-small-en-v1.5-MIT.txt",
-    "licenses/flatbuffers-24.3.25-LICENSE.txt",
     "licenses/numpy-2.0.2-LICENSE.txt",
     "licenses/numpy-LICENSE.txt",
-    "licenses/onnxruntime-1.19.2-LICENSE.txt",
-    "licenses/onnxruntime-1.19.2-ThirdPartyNotices.txt",
     "licenses/onnxruntime-LICENSE.txt",
     "licenses/onnxruntime-ThirdPartyNotices.txt",
-    "licenses/tokenizers-0.20.3-LICENSE.txt",
-    "licenses/tokenizers-0.20.3-NOTICES.txt",
+    "licenses/python-build-standalone-20260728-NOTICES.txt",
     "licenses/tokenizers-0.23.1-NOTICES.txt",
     "licenses/tokenizers-0.23.1-transitive-inventory.md",
 }
@@ -63,20 +61,8 @@ PUBLIC_USER_FILES = {
 BUNDLED_WHEEL_SHA256 = {
     (
         "vendor_wheels/darwin-arm64-py39/"
-        "flatbuffers-24.3.25-py2.py3-none-any.whl"
-    ): "8dbdec58f935f3765e4f7f3cf635ac3a77f83568138d6a2311f524ec96364812",
-    (
-        "vendor_wheels/darwin-arm64-py39/"
         "numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl"
     ): "2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b",
-    (
-        "vendor_wheels/darwin-arm64-py39/"
-        "onnxruntime-1.19.2-cp39-cp39-macosx_11_0_universal2.whl"
-    ): "006c8d326835c017a9e9f74c9c77ebb570a71174a1e89fe078b29a557d9c3848",
-    (
-        "vendor_wheels/darwin-arm64-py39/"
-        "tokenizers-0.20.3-cp39-cp39-macosx_11_0_arm64.whl"
-    ): "f4cb0c614b0135e781de96c2af87e73da0389ac1458e2a97562ed26e29490d8d",
     (
         "vendor_wheels/darwin-arm64-py313/"
         "flatbuffers-25.12.19-py2.py3-none-any.whl"
@@ -94,10 +80,28 @@ BUNDLED_WHEEL_SHA256 = {
         "tokenizers-0.23.1-cp310-abi3-macosx_11_0_arm64.whl"
     ): "e0948bbb1ac1d7cdfc9fb6d62c596e3b7550036ad60ecd654a66ad273326324e",
 }
-TOKENIZERS_NOTICE_BUNDLE_SHA256 = {
-    "licenses/tokenizers-0.20.3-NOTICES.txt": (
-        "010a9a6b3c02d5a7cc2318d65452b7bd5f9d58316206e33cc1a2f39"
-        "cbb2f8ac5"
+BUNDLED_RUNTIME_SHA256 = {
+    (
+        "vendor_runtime/darwin-arm64-worker-py313/"
+        "cpython-3.13.14+20260728-aarch64-apple-darwin-"
+        "install_only_stripped.tar.gz"
+    ): "aa2a054f5e04bde63ae199e3bb6bbb634e457423efd294842deeb1299e7e5932",
+}
+BUNDLED_RUNTIME_SIZE = {
+    relative_name: 25_121_759 for relative_name in BUNDLED_RUNTIME_SHA256
+}
+EXPECTED_WORKER_PYTHON_SOURCE = (
+    "https://github.com/astral-sh/python-build-standalone/releases/download/"
+    "20260728/cpython-3.13.14%2B20260728-aarch64-apple-darwin-"
+    "install_only_stripped.tar.gz"
+)
+EXPECTED_RUNTIME_LICENSE_MEMBER = "python/lib/python3.13/LICENSE.txt"
+EXPECTED_RUNTIME_LICENSE_SHA256 = (
+    "78b12c3a81360b357002334f0e70ea0e92eebf7a9b358805c03c48484945f3bb"
+)
+REVIEWED_NOTICE_BUNDLE_SHA256 = {
+    "licenses/python-build-standalone-20260728-NOTICES.txt": (
+        "5b7c5701dcfc4891d0b4bc570c9712d68af94c9e3750953ae06e77e3dbbe61e0"
     ),
     "licenses/tokenizers-0.23.1-NOTICES.txt": (
         "514952837bda657205f2d31ed08dc7b4796752c6eea9abdacb9e5908"
@@ -109,6 +113,7 @@ CONTROLLED_DIRECTORY_FILES = (
     | PUBLIC_LICENSE_FILES
     | PUBLIC_USER_FILES
     | set(BUNDLED_WHEEL_SHA256)
+    | set(BUNDLED_RUNTIME_SHA256)
 )
 REQUIRED = {
     "__init__.py",
@@ -121,13 +126,15 @@ REQUIRED = {
     "resources/medbrevia-logo.png",
     "ui/__init__.py",
     "semantic/__init__.py",
+    "semantic/manifest.py",
     "semantic/model_manager.py",
     "user_files/README.txt",
 } | CONTROLLED_DIRECTORY_FILES
 
-# A public build intentionally ships wheel archives, not the locally expanded
-# runtime or downloaded model.  Keeping this well below AnkiWeb's approximate
-# upload ceiling also catches accidental payload regressions.
+# A public build intentionally ships reviewed wheel and standalone-interpreter
+# archives, not locally expanded runtimes or the downloaded model. Keeping this
+# well below AnkiWeb's approximate upload ceiling also catches accidental
+# payload regressions.
 MAX_PACKAGE_BYTES = 64 * 1024 * 1024
 ZIP_TIMESTAMP = (2026, 7, 29, 0, 0, 0)
 
@@ -271,6 +278,7 @@ def validate_controlled_directories(root: Path) -> None:
         "licenses": PUBLIC_LICENSE_FILES,
         "user_files": PUBLIC_USER_FILES,
         "vendor_wheels": set(BUNDLED_WHEEL_SHA256),
+        "vendor_runtime": set(BUNDLED_RUNTIME_SHA256),
     }
     for directory, expected in expected_by_directory.items():
         actual = _controlled_actual_files(root, directory)
@@ -292,6 +300,7 @@ def included_files(root: Path) -> list[Path]:
         | PUBLIC_LICENSE_FILES
         | PUBLIC_USER_FILES
         | set(BUNDLED_WHEEL_SHA256)
+        | set(BUNDLED_RUNTIME_SHA256)
     )
     output = [root / name for name in sorted(public_names)]
     for directory in sorted(PUBLIC_CODE_DIRECTORIES):
@@ -311,7 +320,156 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _resolved_archive_path(base: PurePosixPath, target: str) -> PurePosixPath:
+    """Resolve a relative tar link without allowing escape above its root."""
+
+    target_path = PurePosixPath(target)
+    if target_path.is_absolute():
+        raise SystemExit("Bundled runtime contains an absolute link target")
+    parts: list[str] = []
+    for part in (*base.parts, *target_path.parts):
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                raise SystemExit("Bundled runtime link escapes its archive root")
+            parts.pop()
+            continue
+        parts.append(part)
+    return PurePosixPath(*parts)
+
+
+def validate_runtime_archive(runtime: Path, relative_name: str) -> None:
+    """Validate the reviewed standalone interpreter's structure and links."""
+
+    try:
+        with tarfile.open(runtime, mode="r:gz") as archive:
+            members = archive.getmembers()
+            names = [member.name for member in members]
+            if len(names) != len(set(names)):
+                raise SystemExit(
+                    f"Bundled runtime contains duplicate paths: {relative_name}"
+                )
+
+            member_by_name = {member.name: member for member in members}
+            for member in members:
+                path = PurePosixPath(member.name)
+                if (
+                    path.is_absolute()
+                    or not path.parts
+                    or path.parts[0] != "python"
+                    or ".." in path.parts
+                ):
+                    raise SystemExit(
+                        "Bundled runtime contains an unsafe archive path: "
+                        f"{member.name}"
+                    )
+                if member.islnk():
+                    raise SystemExit(
+                        "Bundled runtime contains an unsupported hard link: "
+                        f"{member.name}"
+                    )
+                if member.issym():
+                    resolved = _resolved_archive_path(path.parent, member.linkname)
+                    if not resolved.parts or resolved.parts[0] != "python":
+                        raise SystemExit(
+                            "Bundled runtime symlink escapes its archive root: "
+                            f"{member.name} -> {member.linkname}"
+                        )
+                    if resolved.as_posix() not in member_by_name:
+                        raise SystemExit(
+                            "Bundled runtime contains a dangling symlink: "
+                            f"{member.name} -> {member.linkname}"
+                        )
+                    continue
+                if not member.isfile() and not member.isdir():
+                    raise SystemExit(
+                        "Bundled runtime contains an unsupported special member: "
+                        f"{member.name}"
+                    )
+
+            python_link = member_by_name.get("python/bin/python3")
+            python_binary = member_by_name.get("python/bin/python3.13")
+            if (
+                python_link is None
+                or not python_link.issym()
+                or _resolved_archive_path(
+                    PurePosixPath(python_link.name).parent,
+                    python_link.linkname,
+                )
+                != PurePosixPath("python/bin/python3.13")
+            ):
+                raise SystemExit(
+                    f"Bundled runtime has no valid Python entry point: {relative_name}"
+                )
+            if (
+                python_binary is None
+                or not python_binary.isfile()
+                or not python_binary.mode & 0o111
+            ):
+                raise SystemExit(
+                    f"Bundled runtime Python binary is not executable: {relative_name}"
+                )
+
+            license_member = member_by_name.get(EXPECTED_RUNTIME_LICENSE_MEMBER)
+            if license_member is None or not license_member.isfile():
+                raise SystemExit(
+                    f"Bundled runtime has no exact Python license: {relative_name}"
+                )
+            extracted = archive.extractfile(license_member)
+            if extracted is None:
+                raise SystemExit(
+                    f"Bundled runtime Python license is unreadable: {relative_name}"
+                )
+            actual_license_digest = hashlib.sha256(extracted.read()).hexdigest()
+            if actual_license_digest != EXPECTED_RUNTIME_LICENSE_SHA256:
+                raise SystemExit(
+                    f"Bundled runtime Python license mismatch: {relative_name}"
+                )
+    except (OSError, tarfile.TarError) as error:
+        raise SystemExit(
+            f"Bundled runtime is not a valid tar archive: {relative_name}"
+        ) from error
+
+
+def validate_semantic_manifest_parity(root: Path) -> None:
+    """Keep build allowlists exactly aligned with the runtime manifest."""
+
+    try:
+        manifest = runpy.run_path(str(root / "semantic" / "manifest.py"))
+    except Exception as error:
+        raise SystemExit("Could not load semantic/manifest.py") from error
+
+    runtime_tag = str(manifest["WORKER_RUNTIME_TAG"])
+    filename = str(manifest["WORKER_PYTHON_FILENAME"])
+    relative_name = f"vendor_runtime/{runtime_tag}/{filename}"
+    if BUNDLED_RUNTIME_SHA256 != {
+        relative_name: str(manifest["WORKER_PYTHON_SHA256"])
+    }:
+        raise SystemExit("Bundled runtime checksum does not match semantic manifest")
+    if BUNDLED_RUNTIME_SIZE != {
+        relative_name: int(manifest["WORKER_PYTHON_SIZE"])
+    }:
+        raise SystemExit("Bundled runtime size does not match semantic manifest")
+    if str(manifest["WORKER_PYTHON_SOURCE"]) != EXPECTED_WORKER_PYTHON_SOURCE:
+        raise SystemExit("Bundled runtime source does not match the reviewed release")
+
+    expected_wheels: dict[str, str] = {}
+    for wheel in manifest["WORKER_RUNTIME_WHEELS"]:
+        expected_wheels[
+            f"vendor_wheels/darwin-arm64-py313/{wheel.filename}"
+        ] = wheel.sha256
+    for host_tag, wheels in manifest["HOST_VECTOR_WHEELS"].items():
+        for wheel in wheels:
+            expected_wheels[
+                f"vendor_wheels/{host_tag}/{wheel.filename}"
+            ] = wheel.sha256
+    if BUNDLED_WHEEL_SHA256 != expected_wheels:
+        raise SystemExit("Bundled wheels do not match semantic manifest")
+
+
 def validate_bundled_payloads(root: Path) -> None:
+    validate_semantic_manifest_parity(root)
     for relative_name, expected_digest in BUNDLED_WHEEL_SHA256.items():
         wheel = root / relative_name
         actual_digest = _sha256_file(wheel)
@@ -331,6 +489,23 @@ def validate_bundled_payloads(root: Path) -> None:
             raise SystemExit(
                 f"Bundled wheel is not a valid wheel archive: {relative_name}"
             ) from error
+
+    for relative_name, expected_digest in BUNDLED_RUNTIME_SHA256.items():
+        runtime = root / relative_name
+        actual_size = runtime.stat().st_size
+        expected_size = BUNDLED_RUNTIME_SIZE[relative_name]
+        if actual_size != expected_size:
+            raise SystemExit(
+                f"Byte-size mismatch for bundled runtime {relative_name}: "
+                f"expected {expected_size}, got {actual_size}"
+            )
+        actual_digest = _sha256_file(runtime)
+        if actual_digest != expected_digest:
+            raise SystemExit(
+                f"Checksum mismatch for bundled runtime {relative_name}: "
+                f"expected {expected_digest}, got {actual_digest}"
+            )
+        validate_runtime_archive(runtime, relative_name)
 
     logo = root / "resources/medbrevia-logo.png"
     if not logo.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"):
@@ -353,10 +528,9 @@ def validate_bundled_payloads(root: Path) -> None:
         if not (root / relative_name).read_text(encoding="utf-8").strip():
             raise SystemExit(f"Required license/notice is empty: {relative_name}")
 
-    # Both tokenizers builds have generated, source-verified legal bundles.
-    # Pinning the finished text makes any regeneration or hand edit require an
-    # explicit release review.
-    for relative_name, expected_digest in TOKENIZERS_NOTICE_BUNDLE_SHA256.items():
+    # Pinning generated, source-verified legal bundles makes any regeneration
+    # or hand edit require an explicit release review.
+    for relative_name, expected_digest in REVIEWED_NOTICE_BUNDLE_SHA256.items():
         actual_notice_digest = _sha256_file(root / relative_name)
         if actual_notice_digest != expected_digest:
             raise SystemExit(
