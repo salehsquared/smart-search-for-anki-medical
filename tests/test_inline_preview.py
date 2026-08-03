@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -30,6 +32,36 @@ class _Pane:
 
     def set_card_controls_visible(self, visible: bool) -> None:
         self.card_controls_visible = bool(visible)
+
+
+class _Signal:
+    def __init__(self) -> None:
+        self._handlers: list[object] = []
+
+    def connect(self, handler: object) -> None:
+        self._handlers.append(handler)
+
+    def emit(self) -> None:
+        for handler in self._handlers:
+            handler()
+
+
+class _Shortcut:
+    created: list["_Shortcut"] = []
+
+    def __init__(self, sequence: object, parent: object) -> None:
+        self.sequence = sequence
+        self.parent = parent
+        self.context: object | None = None
+        self.auto_repeat: bool | None = None
+        self.activated = _Signal()
+        self.created.append(self)
+
+    def setContext(self, context: object) -> None:  # noqa: N802
+        self.context = context
+
+    def setAutoRepeat(self, enabled: bool) -> None:  # noqa: N802
+        self.auto_repeat = bool(enabled)
 
 
 class InlinePreviewSurfaceTests(unittest.TestCase):
@@ -117,6 +149,52 @@ class InlinePreviewSideTests(unittest.TestCase):
 
         self.inspector._card_ids = ()
         self.assertFalse(self.inspector.is_targeting(result))
+
+    def test_card_web_shortcuts_reveal_without_repeat_or_page_scroll(self) -> None:
+        web = object()
+        context = object()
+        self.inspector.web = web
+        _Shortcut.created = []
+        fake_aqt = types.ModuleType("aqt")
+        fake_aqt.__path__ = []  # type: ignore[attr-defined]
+        fake_qt = types.ModuleType("aqt.qt")
+        fake_qt.QKeySequence = lambda sequence: sequence
+        fake_qt.QShortcut = _Shortcut
+        fake_qt.Qt = types.SimpleNamespace(
+            ShortcutContext=types.SimpleNamespace(
+                WidgetWithChildrenShortcut=context
+            )
+        )
+        fake_aqt.qt = fake_qt  # type: ignore[attr-defined]
+
+        with patch.dict(
+            sys.modules,
+            {"aqt": fake_aqt, "aqt.qt": fake_qt},
+        ):
+            self.inspector._install_card_shortcuts()
+
+        self.assertEqual(
+            [shortcut.sequence for shortcut in _Shortcut.created],
+            ["Space", "Right", "Left"],
+        )
+        for shortcut in _Shortcut.created:
+            self.assertIs(shortcut.parent, web)
+            self.assertIs(shortcut.context, context)
+            self.assertFalse(shortcut.auto_repeat)
+
+        _Shortcut.created[0].activated.emit()
+        self.assertEqual(self.inspector._state, "answer")
+        self.assertEqual(self.render_requests, [True])
+
+        # An already-visible answer is still owned by the shortcut, but its
+        # deterministic handler does not queue another render or replay audio.
+        _Shortcut.created[0].activated.emit()
+        self.assertEqual(self.render_requests, [True])
+
+        _Shortcut.created[2].activated.emit()
+        _Shortcut.created[1].activated.emit()
+        self.assertEqual(self.inspector._state, "answer")
+        self.assertEqual(self.render_requests, [True, True, True])
 
 
 if __name__ == "__main__":

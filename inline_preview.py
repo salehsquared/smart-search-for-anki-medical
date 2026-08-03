@@ -114,6 +114,14 @@ class InlineResultInspector:
         )
         card_layout.addWidget(self.web, 1)
 
+        # Once the rendered card is clicked, QtWebEngine's internal focus
+        # proxy owns keyboard input instead of the result list. Preview-scoped
+        # shortcuts keep reviewer-style controls working there and consume
+        # Space before Chromium treats it as page scrolling. The child-widget
+        # context reaches the focus proxy without affecting the search field
+        # or the separate native editor surface.
+        self._install_card_shortcuts()
+
         # Keep the compact card controls in the pane header. They survive
         # renderer/editor surface changes and leave the full body for content.
         self.previous_button = self.pane.previous_button
@@ -156,6 +164,23 @@ class InlineResultInspector:
         gui_hooks.operation_did_execute.append(self._on_operation_did_execute)
 
         self.set_result(initial_result, force=True)
+
+    def _install_card_shortcuts(self) -> None:
+        from aqt.qt import QKeySequence, QShortcut, Qt
+
+        self._card_shortcuts: list[Any] = []
+        for sequence, handler in (
+            ("Space", self.show_answer),
+            ("Right", self.show_answer),
+            ("Left", self.show_question),
+        ):
+            shortcut = QShortcut(QKeySequence(sequence), self.web)
+            shortcut.setContext(
+                Qt.ShortcutContext.WidgetWithChildrenShortcut
+            )
+            shortcut.setAutoRepeat(False)
+            shortcut.activated.connect(handler)
+            self._card_shortcuts.append(shortcut)
 
     # ---------------------------------------------------------------- target
 

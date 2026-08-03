@@ -47,7 +47,8 @@ usable while Semantic prepares.
 - Move into the result list and the rendered inline card preview opens
   automatically; disable it at any time in **Settings → Card preview**.
 - Press **Space** or **Right Arrow** to reveal the selected card's answer;
-  press **Left Arrow** to return to its front.
+  press **Left Arrow** to return to its front. These controls keep working
+  after you click inside the rendered card.
 - Preview and edit the selected card in a resizable pane without leaving the
   search window; close it temporarily or expand it when more room is useful.
 - See compact suspension and flag indicators on each result.
@@ -169,7 +170,8 @@ The builder:
 
 - **Command/Ctrl-K:** open or focus Smart Search
 - **Up/Down** or **Control-J/Control-K:** move through results; the open preview follows
-- **Space/Right Arrow:** show the highlighted card's answer
+- **Space/Right Arrow:** show the highlighted card's answer, including when
+  the rendered card has focus
 - **Left Arrow:** return to the highlighted card's front
 - **Return:** open the highlighted result in Anki's Browser
 - **Control-Shift-P:** open or close the inline card preview
