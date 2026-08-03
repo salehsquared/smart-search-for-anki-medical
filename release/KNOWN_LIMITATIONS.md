@@ -4,10 +4,10 @@
 
 - Smart Search runs in Anki Desktop only. AnkiMobile and AnkiDroid do not load
   desktop add-ons.
-- v1.0.20 supports Anki Desktop 24.11 through 26.08, including the 25.02,
+- v1.0.21 supports Anki Desktop 24.11 through 26.08, including the 25.02,
   25.07, 25.09, 26.05, and 26.08 release families.
 - The supported-version matrix was exercised on macOS with Apple silicon.
-  Windows, Linux, and Intel Mac integration are not part of the v1.0.20 support
+  Windows, Linux, and Intel Mac integration are not part of the v1.0.21 support
   claim.
 - Semantic Search currently supports **macOS 14 or later on Apple-silicon Macs
   only**.
@@ -26,8 +26,8 @@
 - The indexes do not sync through AnkiWeb. A second computer prepares its own
   local copy.
 - Smart and Exact become available after their initial fast setup. Semantic
-  preparation is separate, typically longer, and may temporarily use noticeable
-  CPU and memory.
+  preparation is separate, typically longer, and temporarily starts a local
+  worker that uses additional CPU and memory while it computes embeddings.
 - Smart and Exact remain available while Semantic indexes.
 - Adds, edits, and deletes are normally refreshed incrementally. Sync, import,
   undo/redo, native bulk operations, deck changes, and note-type changes may
@@ -35,11 +35,17 @@
   the affected note IDs. Only detected candidates are then hydrated.
 - Collection reads share Anki's serialized collection worker. They run away from
   the graphical interface but can briefly queue behind other collection work.
-- Local model inference competes for CPU and memory with Anki even though it is
-  not performed on the graphical interface thread.
-- The Semantic model is released after use, but native libraries and allocator
-  caches can remain mapped in Anki's process. Guaranteed hard memory
-  reclamation would require a separate helper process.
+- Local model inference still competes for finite system CPU and memory while
+  active. It is limited to one ONNX thread, one text sequence per inference,
+  bounded messages, and a 256 MiB macOS process-memory ceiling, but a full
+  first-time Semantic build is intentionally substantial work.
+- Inference runs in a standalone helper process, not inside Anki. The helper is
+  stopped before review and after Semantic work, so its model, native libraries,
+  and allocator caches are reclaimed by the operating system. A small
+  NumPy-only vector layer remains available in Anki for Semantic ranking.
+- The bundled standalone interpreter increases add-on download and installed
+  disk size. The downloaded model and per-profile vector index add further
+  local disk use.
 
 ## Search behavior
 

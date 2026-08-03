@@ -5,13 +5,21 @@ import tempfile
 import unittest
 
 from semantic.manifest import (
-    DARWIN_ARM64_PY39,
+    DARWIN_ARM64_PY39_NUMPY,
+    DARWIN_ARM64_PY313,
+    HOST_VECTOR_WHEELS,
     MODEL_ARTIFACTS,
     MODEL_BASE_URL,
     MODEL_NAME,
     MODEL_REPOSITORY,
     MODEL_REVISION,
     RUNTIME_WHEELS,
+    WORKER_PYTHON_FILENAME,
+    WORKER_PYTHON_SHA256,
+    WORKER_PYTHON_SIZE,
+    WORKER_PYTHON_SOURCE,
+    WORKER_RUNTIME_TAG,
+    WORKER_RUNTIME_WHEELS,
 )
 from semantic.model_manager import ModelManager
 
@@ -66,27 +74,35 @@ EXPECTED_ARTIFACTS = (
 
 
 class PublishedModelManifestTests(unittest.TestCase):
-    def test_python39_apple_silicon_runtime_is_pinned(self) -> None:
-        self.assertIs(RUNTIME_WHEELS["darwin-arm64-py39"], DARWIN_ARM64_PY39)
+    def test_standalone_worker_and_host_vector_runtimes_are_pinned(self) -> None:
+        self.assertIs(RUNTIME_WHEELS[WORKER_RUNTIME_TAG], WORKER_RUNTIME_WHEELS)
+        self.assertIs(WORKER_RUNTIME_WHEELS, DARWIN_ARM64_PY313)
         self.assertEqual(
-            tuple((wheel.filename, wheel.sha256) for wheel in DARWIN_ARM64_PY39),
+            WORKER_PYTHON_FILENAME,
+            "cpython-3.13.14+20260728-aarch64-apple-darwin-"
+            "install_only_stripped.tar.gz",
+        )
+        self.assertEqual(
+            WORKER_PYTHON_SHA256,
+            "aa2a054f5e04bde63ae199e3bb6bbb634e457423efd294842deeb1299e7e5932",
+        )
+        self.assertEqual(WORKER_PYTHON_SIZE, 25_121_759)
+        self.assertEqual(
+            WORKER_PYTHON_SOURCE,
+            "https://github.com/astral-sh/python-build-standalone/releases/"
+            "download/20260728/cpython-3.13.14%2B20260728-aarch64-"
+            "apple-darwin-install_only_stripped.tar.gz",
+        )
+        self.assertEqual(
+            HOST_VECTOR_WHEELS["darwin-arm64-py39"],
+            (DARWIN_ARM64_PY39_NUMPY,),
+        )
+        self.assertEqual(HOST_VECTOR_WHEELS["darwin-arm64-py313"], (DARWIN_ARM64_PY313[1],))
+        self.assertEqual(
+            (DARWIN_ARM64_PY39_NUMPY.filename, DARWIN_ARM64_PY39_NUMPY.sha256),
             (
-                (
-                    "onnxruntime-1.19.2-cp39-cp39-macosx_11_0_universal2.whl",
-                    "006c8d326835c017a9e9f74c9c77ebb570a71174a1e89fe078b29a557d9c3848",
-                ),
-                (
-                    "numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl",
-                    "2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b",
-                ),
-                (
-                    "tokenizers-0.20.3-cp39-cp39-macosx_11_0_arm64.whl",
-                    "f4cb0c614b0135e781de96c2af87e73da0389ac1458e2a97562ed26e29490d8d",
-                ),
-                (
-                    "flatbuffers-24.3.25-py2.py3-none-any.whl",
-                    "8dbdec58f935f3765e4f7f3cf635ac3a77f83568138d6a2311f524ec96364812",
-                ),
+                "numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl",
+                "2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b",
             ),
         )
 
@@ -150,6 +166,26 @@ class PublishedModelManifestTests(unittest.TestCase):
                 text,
             )
         self.assertIn(EXPECTED_ARTIFACTS[0][2], sources)
+
+    def test_compliance_docs_describe_only_the_current_worker_runtime(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        notices = (root / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        privacy = (root / "PRIVACY.md").read_text(encoding="utf-8")
+        limitations = (root / "release" / "KNOWN_LIMITATIONS.md").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(WORKER_PYTHON_FILENAME, notices)
+        self.assertIn(WORKER_PYTHON_SHA256, notices)
+        self.assertIn("python-build-standalone-20260728-NOTICES.txt", notices)
+        for stale_name in (
+            "onnxruntime-1.19.2-cp39",
+            "tokenizers-0.20.3-cp39",
+            "flatbuffers-24.3.25",
+        ):
+            self.assertNotIn(stale_name, notices)
+        self.assertIn("local helper process", privacy)
+        self.assertNotIn("would require a separate helper process", limitations)
 
 
 if __name__ == "__main__":

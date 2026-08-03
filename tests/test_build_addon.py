@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 from pathlib import Path
 import shutil
 import tempfile
+import tarfile
 import unittest
 import zipfile
 
@@ -22,13 +24,17 @@ class BuildAddonTests(unittest.TestCase):
             | build_addon.PUBLIC_LICENSE_FILES
             | build_addon.PUBLIC_USER_FILES
             | set(build_addon.BUNDLED_WHEEL_SHA256)
+            | set(build_addon.BUNDLED_RUNTIME_SHA256)
             | build_addon.REQUIRED
         )
         for relative_name in sorted(paths):
             source = PROJECT_ROOT / relative_name
             target = destination / relative_name
             target.parent.mkdir(parents=True, exist_ok=True)
-            if relative_name in build_addon.BUNDLED_WHEEL_SHA256:
+            if relative_name in (
+                set(build_addon.BUNDLED_WHEEL_SHA256)
+                | set(build_addon.BUNDLED_RUNTIME_SHA256)
+            ):
                 os.link(source, target)
             else:
                 shutil.copy2(source, target)
@@ -54,6 +60,7 @@ class BuildAddonTests(unittest.TestCase):
                 {"user_files/README.txt"},
             )
             self.assertTrue(set(build_addon.BUNDLED_WHEEL_SHA256) <= names)
+            self.assertTrue(set(build_addon.BUNDLED_RUNTIME_SHA256) <= names)
 
     def test_profile_owned_data_blocks_public_build(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -131,7 +138,7 @@ class BuildAddonTests(unittest.TestCase):
             ui_package = root / "ui" / "__init__.py"
             ui_package.write_text(
                 ui_package.read_text(encoding="utf-8").replace(
-                    '__version__ = "1.0.20"',
+                    '__version__ = "1.0.21"',
                     '__version__ = "9.9.9"',
                 ),
                 encoding="utf-8",
@@ -151,7 +158,7 @@ class BuildAddonTests(unittest.TestCase):
 
             self.assertEqual(
                 build_addon.default_output_path(root),
-                root / "dist" / "Smart_Search_Medical_1.0.20.ankiaddon",
+                root / "dist" / "Smart_Search_Medical_1.0.21.ankiaddon",
             )
 
     def test_manifest_covers_the_reviewed_anki_release_matrix(self) -> None:
@@ -214,11 +221,15 @@ class BuildAddonTests(unittest.TestCase):
             ):
                 build_addon.validate_sources(root, files)
 
-    def test_tampered_python39_tokenizers_notices_block_build(self) -> None:
+    def test_tampered_python_runtime_notices_block_build(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             self._copy_public_source(root)
-            notice = root / "licenses" / "tokenizers-0.20.3-NOTICES.txt"
+            notice = (
+                root
+                / "licenses"
+                / "python-build-standalone-20260728-NOTICES.txt"
+            )
             notice.write_text("incomplete notice bundle", encoding="utf-8")
 
             files = build_addon.included_files(root)
@@ -227,6 +238,86 @@ class BuildAddonTests(unittest.TestCase):
                 "Checksum mismatch for the reviewed tokenizers notice bundle",
             ):
                 build_addon.validate_sources(root, files)
+
+    def test_runtime_manifest_size_drift_blocks_build(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._copy_public_source(root)
+            manifest = root / "semantic" / "manifest.py"
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8").replace(
+                    "WORKER_PYTHON_SIZE = 25_121_759",
+                    "WORKER_PYTHON_SIZE = 25_121_758",
+                ),
+                encoding="utf-8",
+            )
+
+            files = build_addon.included_files(root)
+            with self.assertRaisesRegex(
+                SystemExit,
+                "Bundled runtime size does not match semantic manifest",
+            ):
+                build_addon.validate_sources(root, files)
+
+    def test_truncated_runtime_blocks_build_before_tar_extraction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self._copy_public_source(root)
+            relative_name = next(iter(build_addon.BUNDLED_RUNTIME_SHA256))
+            runtime = root / relative_name
+            runtime.unlink()
+            runtime.write_bytes(b"not the reviewed runtime")
+
+            files = build_addon.included_files(root)
+            with self.assertRaisesRegex(SystemExit, "Byte-size mismatch"):
+                build_addon.validate_sources(root, files)
+
+    def test_runtime_archive_rejects_path_traversal(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "unsafe.tar.gz"
+            with tarfile.open(runtime, "w:gz") as archive:
+                payload = b"escape"
+                member = tarfile.TarInfo("python/../../outside")
+                member.size = len(payload)
+                archive.addfile(member, io.BytesIO(payload))
+
+            with self.assertRaisesRegex(SystemExit, "unsafe archive path"):
+                build_addon.validate_runtime_archive(runtime, "unsafe.tar.gz")
+
+    def test_runtime_archive_rejects_escaping_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "unsafe-link.tar.gz"
+            with tarfile.open(runtime, "w:gz") as archive:
+                member = tarfile.TarInfo("python/bin/python3")
+                member.type = tarfile.SYMTYPE
+                member.linkname = "../../../outside"
+                archive.addfile(member)
+
+            with self.assertRaisesRegex(SystemExit, "escapes its archive root"):
+                build_addon.validate_runtime_archive(runtime, "unsafe-link.tar.gz")
+
+    def test_runtime_archive_rejects_dangling_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "dangling-link.tar.gz"
+            with tarfile.open(runtime, "w:gz") as archive:
+                member = tarfile.TarInfo("python/bin/python3")
+                member.type = tarfile.SYMTYPE
+                member.linkname = "python3.13"
+                archive.addfile(member)
+
+            with self.assertRaisesRegex(SystemExit, "dangling symlink"):
+                build_addon.validate_runtime_archive(runtime, "dangling-link.tar.gz")
+
+    def test_runtime_archive_rejects_special_members(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "unsafe-fifo.tar.gz"
+            with tarfile.open(runtime, "w:gz") as archive:
+                member = tarfile.TarInfo("python/run.pipe")
+                member.type = tarfile.FIFOTYPE
+                archive.addfile(member)
+
+            with self.assertRaisesRegex(SystemExit, "special member"):
+                build_addon.validate_runtime_archive(runtime, "unsafe-fifo.tar.gz")
 
     def test_build_is_slim_and_contains_only_reviewed_user_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

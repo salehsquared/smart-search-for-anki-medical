@@ -119,6 +119,27 @@ this add-on.
 All downloads use immutable revision URLs and must pass the expected byte-size
 and SHA-256 checks before installation.
 
+### Local inference execution
+
+The model is executed in a short-lived local worker instead of loading ONNX
+Runtime and Tokenizers into Anki's process. The worker uses the official
+`astral-sh/python-build-standalone` CPython 3.13.14 release artifact from build
+`20260728`, pinned to 25,121,759 bytes and SHA-256
+`aa2a054f5e04bde63ae199e3bb6bbb634e457423efd294842deeb1299e7e5932`.
+Inference uses one text sequence per batch and one ONNX intra/inter-op thread,
+which bounds transient padding and CPU use. On macOS, the helper also receives
+a 256 MiB process-memory ceiling. The 384-dimensional output is sent back over
+a local operating-system pipe; the worker is then eligible to exit so the
+operating system can reclaim the model and native-library memory.
+
+Vector-index arithmetic in Anki uses a separate NumPy-only runtime. It does
+not expose the worker's ONNX Runtime, Tokenizers, or FlatBuffers packages to
+Anki. Vector scans use bounded 512-row chunks to avoid retaining a large native
+allocator high-water mark. These implementation boundaries do not change the model, tokenizer,
+pooling, normalization, index format, or similarity calculation described
+here. Exact runtime artifacts, checksums, and licenses are recorded in
+`THIRD_PARTY_NOTICES.md`.
+
 ### Reproducible conversion record
 
 The public conversion repository includes:

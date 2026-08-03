@@ -187,6 +187,8 @@ class _BlockingSemanticService:
         self.source_generation = 1 if indexed else None
         self.cleared_generations: list[int | None] = []
         self.marked_generations: list[int] = []
+        self.abort_calls = 0
+        self.unload_calls = 0
 
     def status(self):
         return types.SimpleNamespace(
@@ -260,6 +262,15 @@ class _BlockingSemanticService:
         if cancel_check is not None:
             cancel_check()
         return ()
+
+    def abort_now(self) -> bool:
+        self.abort_calls += 1
+        self.release.set()
+        self.release_search.set()
+        return True
+
+    def unload(self) -> None:
+        self.unload_calls += 1
 
 
 class _FakeTimer:
@@ -1455,6 +1466,88 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(semantic_responses, [])
         self.assertEqual(errors, [])
 
+    def test_review_entry_aborts_semantic_search_silently_and_next_search_works(
+        self,
+    ) -> None:
+        self.backend.deactivate_profile()
+        backend = _ConcurrentExternalBackend(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        self.backend = backend
+        backend.activate_profile(auto_rebuild=False)
+        context = backend._context
+        assert context is not None
+        note = models.IndexedNote(
+            note_id=1001,
+            fields={"Text": "Bupropion treats depression."},
+            guid="review-semantic-cancel-test",
+        )
+        context.index.rebuild((note,))
+        context.note_count = 1
+        context.lexical_generation = context.index.generation
+        context.field_names = context.index.field_names()
+        context.engine = controller.SearchEngine(context.index)
+        semantic = _BlockingSemanticService(indexed=True, block_search=True)
+        semantic.source_generation = context.lexical_generation
+        context.semantic = semantic
+        context.semantic_needs_reconcile = False
+        backend._refresh_semantic_snapshot(context)
+        backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="1 note indexed.",
+        )
+        addon = controller.SmartSearchAddonController(
+            backend.mw,
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = backend
+        responses = []
+        errors = []
+
+        backend.submit_search(
+            contracts.SearchRequest(
+                request_id=24,
+                query="atypical antidepressant",
+                mode=contracts.SearchMode.SEMANTIC,
+            ),
+            responses.append,
+            errors.append,
+        )
+        self.assertTrue(semantic.search_started.wait(timeout=1))
+
+        addon._enter_review_mode()
+
+        self.assertTrue(backend.background_maintenance_paused)
+        self.assertEqual(semantic.abort_calls, 1)
+        self.assertTrue(
+            _wait_until(lambda: not any(thread.is_alive() for thread in backend.threads))
+        )
+        self.assertEqual(responses, [])
+        self.assertEqual(errors, [])
+        self.assertIsNone(context.semantic_error)
+        self.assertIsNone(context.semantic_snapshot.error)
+
+        addon._leave_review_mode()
+        semantic.search_started.clear()
+        next_finished = threading.Event()
+        backend.submit_search(
+            contracts.SearchRequest(
+                request_id=25,
+                query="atypical antidepressant",
+                mode=contracts.SearchMode.SEMANTIC,
+            ),
+            lambda response: (responses.append(response), next_finished.set()),
+            errors.append,
+        )
+
+        self.assertTrue(next_finished.wait(timeout=1))
+        self.assertEqual([response.request_id for response in responses], [25])
+        self.assertEqual(errors, [])
+        self.assertTrue(semantic.search_started.is_set())
+
     def test_status_reads_cached_semantic_metadata_only(self) -> None:
         context = self.backend._context
         assert context
@@ -1710,6 +1803,40 @@ class ControllerTests(unittest.TestCase):
         self.assertIsNone(self.backend.index_semantic(on_error=errors.append))
         self.assertIn("Restart Anki", errors[-1])
 
+    def test_semantic_runtime_failure_uses_current_service_recovery_hint(self) -> None:
+        context = self.backend._context
+        assert context is not None
+        semantic = _BlockingSemanticService(indexed=True)
+        semantic.last_error_kind = "model"
+        context.semantic = semantic
+        self.backend._refresh_semantic_snapshot(context)
+        # The immutable UI snapshot was captured before the worker operation
+        # failed and therefore contains no error kind.
+        self.assertIsNone(getattr(context.semantic_snapshot, "error_kind", None))
+        event = self.backend._new_cancellation(kind="semantic")
+        errors = []
+        with self.backend._state_lock:
+            self.backend._semantic_phase = "indexing"
+
+        with patch.object(
+            self.backend,
+            "release_semantic_runtime",
+            return_value=True,
+        ):
+            self.backend._semantic_failed(
+                RuntimeError("verified runtime failure"),
+                event,
+                context.token,
+                context,
+                errors.append,
+            )
+
+        self.assertIs(
+            context.semantic_error_recovery,
+            contracts.SemanticRecovery.MODEL,
+        )
+        self.assertIn("Repair Semantic Search", errors[-1])
+
     def test_semantic_delta_updates_are_bounded(self) -> None:
         context = self.backend._context
         assert context is not None
@@ -1730,6 +1857,63 @@ class ControllerTests(unittest.TestCase):
             semantic.marked_generations,
             [context.lexical_generation],
         )
+
+    def test_failed_semantic_follow_up_launch_releases_worker(self) -> None:
+        context = self.backend._context
+        assert context is not None
+        note = models.IndexedNote(
+            note_id=1001,
+            fields={"Text": "Bupropion treats depression."},
+            guid="semantic-follow-up-release-test",
+        )
+        context.index.rebuild((note,))
+        # Simulate a collection change landing after the full pass captured
+        # its lexical generation.  The completed pass is useful but cannot be
+        # published as current, so the controller attempts a follow-up.
+        context.note_count = 2
+        context.lexical_generation = context.index.generation
+        context.engine = controller.SearchEngine(context.index)
+        semantic = _BlockingSemanticService(indexed=True, index_count=1)
+        semantic.release.set()
+        semantic.source_generation = context.lexical_generation
+        context.semantic = semantic
+        self.backend._refresh_semantic_snapshot(context)
+        self.backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="Smart & Exact ready.",
+        )
+        completed = []
+        errors = []
+
+        with (
+            patch.object(
+                self.backend,
+                "_start_semantic_delta",
+                return_value=False,
+            ) as start_delta,
+            patch.object(
+                self.backend,
+                "_refresh_existing_semantic_index",
+                return_value=False,
+            ) as refresh,
+            patch.object(
+                self.backend,
+                "release_semantic_runtime",
+                return_value=True,
+            ) as release,
+        ):
+            cancel = self.backend.index_semantic(
+                on_success=completed.append,
+                on_error=errors.append,
+            )
+
+        self.assertTrue(callable(cancel))
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(errors, [])
+        self.assertTrue(context.semantic_needs_reconcile)
+        start_delta.assert_called_once_with(context)
+        refresh.assert_called_once_with(context)
+        release.assert_called_once_with()
 
     def test_semantic_delta_coalescing_uses_latest_note_state(self) -> None:
         context = self.backend._context
@@ -2788,7 +2972,8 @@ class ControllerTests(unittest.TestCase):
             set_managed_close_handler=lambda _handler: None,
         )
         ui_controller = types.SimpleNamespace(
-            dispose=lambda: events.append("dispose")
+            pause=lambda: events.append("pause"),
+            dispose=lambda: events.append("dispose"),
         )
         preview = _Preview()
         addon._dialog = dialog
@@ -2796,12 +2981,15 @@ class ControllerTests(unittest.TestCase):
         addon._previewer = preview
 
         addon._close_dialog()
-        self.assertEqual(events, ["save"])
+        self.assertEqual(events, ["pause", "save"])
         self.assertIs(addon._dialog, dialog)
         self.assertIs(addon._previewer, preview)
 
         saved_callbacks.pop()()
-        self.assertEqual(events, ["save", "close", "dispose", "delete"])
+        self.assertEqual(
+            events,
+            ["pause", "save", "close", "dispose", "delete"],
+        )
         self.assertIsNone(addon._dialog)
         self.assertIsNone(addon._ui_controller)
         self.assertIsNone(addon._previewer)
@@ -2857,12 +3045,89 @@ class ControllerTests(unittest.TestCase):
             addon_module="smart_search_medical",
         )
         callbacks = []
+        timers = [_FakeTimer() for _ in range(8)]
+        (
+            addon._reconcile_timer,
+            addon._semantic_autostart_timer,
+            addon._dialog_refresh_timer,
+            addon._vocabulary_refresh_timer,
+            addon._card_state_refresh_timer,
+            addon._preview_open_timer,
+            addon._semantic_unload_timer,
+            addon._post_review_resume_timer,
+        ) = timers
+        pauses = []
+        aborts = []
+        reconciles = []
+        addon.backend.set_background_maintenance_paused = (
+            lambda paused: pauses.append(bool(paused))
+        )
+        addon.backend.abort_semantic_runtime_now = lambda: aborts.append(True)
+        addon.schedule_reconcile = lambda **kwargs: reconciles.append(kwargs)
         addon._close_dialog_with_callback = callbacks.append
 
         addon._on_collection_will_temporarily_close(object())
 
+        self.assertTrue(addon._collection_temporarily_closed)
+        self.assertTrue(addon._maintenance_blocked())
         self.assertEqual(len(callbacks), 1)
         self.assertTrue(callable(callbacks[0]))
+        self.assertEqual(pauses, [True])
+        self.assertEqual(aborts, [True])
+        self.assertTrue(all(timer.stop_count == 1 for timer in timers))
+
+        addon._on_collection_reopened(object())
+
+        self.assertFalse(addon._collection_temporarily_closed)
+        self.assertFalse(addon._maintenance_blocked())
+        self.assertEqual(pauses, [True, False])
+        self.assertEqual(reconciles, [{}])
+        self.assertEqual(addon._post_review_resume_timer.starts, [250])
+
+    def test_temporary_collection_reopen_stays_paused_during_review(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon._collection_temporarily_closed = True
+        addon._review_active = True
+        addon._post_review_resume_timer = _FakeTimer()
+        pauses = []
+        reconciles = []
+        addon.backend.set_background_maintenance_paused = (
+            lambda paused: pauses.append(bool(paused))
+        )
+        addon.schedule_reconcile = lambda **kwargs: reconciles.append(kwargs)
+
+        addon._on_collection_reopened(object())
+
+        self.assertFalse(addon._collection_temporarily_closed)
+        self.assertTrue(addon._maintenance_blocked())
+        self.assertEqual(pauses, [True])
+        self.assertEqual(reconciles, [{}])
+        self.assertEqual(addon._post_review_resume_timer.starts, [])
+
+    def test_leaving_review_does_not_unpause_a_closed_collection(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon._review_active = True
+        addon._collection_temporarily_closed = True
+        addon._post_review_resume_timer = _FakeTimer()
+        pauses = []
+        addon.backend.set_background_maintenance_paused = (
+            lambda paused: pauses.append(bool(paused))
+        )
+
+        addon._leave_review_mode()
+
+        self.assertFalse(addon._review_active)
+        self.assertTrue(addon._maintenance_blocked())
+        self.assertEqual(pauses, [True])
+        self.assertEqual(addon._post_review_resume_timer.starts, [])
 
     def test_auto_preview_is_queued_only_while_results_are_browsed(self) -> None:
         addon = controller.SmartSearchAddonController(
@@ -2989,6 +3254,55 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(backend.index_calls, 0)
         self.assertIsNone(addon._semantic_autostart_attempted_token)
+
+    def test_semantic_autostart_silently_migrates_an_existing_model_runtime(
+        self,
+    ) -> None:
+        status = contracts.IndexStatus(
+            contracts.IndexState.READY,
+            semantic=contracts.SemanticStatus(
+                contracts.SemanticState.NOT_INSTALLED
+            ),
+        )
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        backend = _AutostartBackend(status)
+        backend._context.semantic_snapshot = types.SimpleNamespace(
+            supported=True,
+            model_ready=True,
+            runtime_ready=False,
+        )
+        installs = []
+
+        def install_semantic(**callbacks):
+            installs.append(callbacks)
+            return lambda: None
+
+        backend.install_semantic = install_semantic
+        timer = _FakeTimer()
+        addon.backend = backend
+        addon._semantic_autostart_timer = timer
+        addon._refresh_dialog = lambda: None
+        addon._refresh_dialog_now = lambda: None
+        addon._run_on_main = lambda callback: callback()
+
+        addon._schedule_semantic_autostart()
+        addon._run_semantic_autostart()
+
+        self.assertEqual(len(installs), 1)
+        self.assertEqual(backend.index_calls, 0)
+        self.assertEqual(
+            addon._semantic_autostart_attempted_token,
+            backend._context.token,
+        )
+
+        installs[0]["on_success"](status)
+
+        self.assertIsNone(addon._semantic_autostart_attempted_token)
+        self.assertEqual(timer.starts[-1], 0)
 
     def test_semantic_autostart_respects_config_and_startup_reconcile(self) -> None:
         status = contracts.IndexStatus(
@@ -3264,11 +3578,11 @@ class ControllerTests(unittest.TestCase):
             addon._post_review_resume_timer,
         ) = timers
         pauses = []
-        releases = []
+        aborts = []
         addon.backend.set_background_maintenance_paused = (
             lambda paused: pauses.append(bool(paused))
         )
-        addon.backend.release_semantic_runtime = lambda: releases.append(True)
+        addon.backend.abort_semantic_runtime_now = lambda: aborts.append(True)
 
         addon._enter_review_mode()
         first_stop_counts = tuple(timer.stop_count for timer in timers)
@@ -3276,7 +3590,7 @@ class ControllerTests(unittest.TestCase):
 
         self.assertTrue(addon._review_active)
         self.assertEqual(pauses, [True])
-        self.assertEqual(releases, [True])
+        self.assertEqual(aborts, [True])
         self.assertEqual(
             tuple(timer.stop_count for timer in timers),
             first_stop_counts,

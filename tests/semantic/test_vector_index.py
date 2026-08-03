@@ -8,10 +8,13 @@ import unittest
 
 import numpy as np
 
-from semantic.vector_index import VectorIndex
+from semantic.vector_index import VECTOR_SCAN_BATCH_SIZE, VectorIndex
 
 
 class VectorIndexTests(unittest.TestCase):
+    def test_scan_batches_bound_host_allocator_high_water(self) -> None:
+        self.assertEqual(VECTOR_SCAN_BATCH_SIZE, 512)
+
     def test_upsert_search_filter_delete_and_slot_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             index = VectorIndex(Path(directory), dimension=3)

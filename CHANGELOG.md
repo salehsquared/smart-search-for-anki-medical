@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.0.21] — 2026-08-02
+
+### Memory and CPU
+
+- Fixed high idle RAM after Semantic work. ONNX Runtime, Tokenizers, the model,
+  and their native allocator caches previously lived inside Anki and could
+  remain mapped even after the active model object was released.
+- Semantic inference now runs in a disposable, pinned local worker. The worker
+  starts only for Semantic work, is stopped before review and after use, and
+  lets macOS reclaim its native memory when it exits.
+- Anki retains only a NumPy-based vector-ranking layer. Vector scans use
+  512-note chunks, while inference uses one thread, one sequence at a time,
+  bounded 16 KiB inputs, and a 256 MiB worker memory ceiling.
+
+### Compatibility and safety
+
+- Existing downloaded models and profile indexes remain reusable; upgrading
+  performs a one-time local runtime migration without changing cards or review
+  data.
+- Worker startup, cancellation, crashes, profile transitions, and repeated
+  launch/exit cycles are covered by protocol, lifecycle, and real-runtime
+  integration tests across the supported Python 3.9 and 3.13 hosts.
+
 ## [1.0.20] — 2026-08-02
 
 ### Performance

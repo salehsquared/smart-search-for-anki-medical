@@ -85,6 +85,11 @@ model/tokenizer files over HTTPS and verifies their SHA-256 digests. Ordinary
 request metadata such as an IP address and user-agent can be visible to the
 download host; no Anki content or query is included.
 
+Semantic inference runs in a local, short-lived worker process. Card text and
+embeddings travel only through local operating-system pipes; the worker does
+not open a network service. Exiting it lets macOS reclaim the model and native
+inference libraries instead of retaining them inside Anki.
+
 The local full-text index contains searchable copies of note/card content and
 metadata. The vector index contains embeddings derived from note text. Treat
 both with the same privacy as the Anki profile.
@@ -153,7 +158,8 @@ The builder:
   collection databases, credentials, and historical builds;
 - verifies every reviewed binary by SHA-256;
 - compiles all packaged Python;
-- validates resources, licenses, archive paths, CRCs, and a 64 MiB regression
+- validates resources, licenses, wheel CRCs, standalone-runtime size and
+  structure, archive paths and links, manifest parity, and a 64 MiB regression
   ceiling; and
 - writes a SHA-256 checksum beside the deterministic archive.
 
@@ -178,9 +184,16 @@ processing, spelling vocabulary construction, model inference, profile
 initialization, and cleanup run outside Anki's graphical interface thread.
 
 Reviewing has an explicit performance embargo: card answers schedule no search
-maintenance, and pending edit/sync work resumes only after the reviewer closes
-and the interface has settled. Semantic and typo-matching runtimes load on
-demand instead of at profile startup.
+maintenance, the Semantic worker is not allowed to remain resident, and
+pending edit/sync work resumes only after the reviewer closes and the interface
+has settled.
+
+Model inference is isolated in a pinned standalone Python 3.13 worker with one
+ONNX thread, single-sequence inference, bounded input messages, and a 256 MiB
+macOS process-memory ceiling. The worker starts only for Semantic work and
+exits afterward, allowing the operating system to reclaim its model, ONNX
+Runtime, and Tokenizers memory. The Anki process receives only a bounded,
+NumPy-based vector-index layer; it never imports those inference libraries.
 
 Adds, edits, and deletes normally refresh only affected notes. Operations for
 which Anki does not expose stable affected IDs—such as sync, imports, native
@@ -197,6 +210,7 @@ added to `collection.anki2` and are not synced by Smart Search.
   based on BAAI BGE small English v1.5
 - Reproducible CLS-pooled, L2-normalized INT8 ONNX export for local inference
 - NumPy, ONNX Runtime, Hugging Face Tokenizers, and FlatBuffers
+- Pinned python-build-standalone CPython 3.13 worker for reclaimable inference
 
 These components improve retrieval; they do not verify that a card is current
 or medically correct. Search results are not medical advice.

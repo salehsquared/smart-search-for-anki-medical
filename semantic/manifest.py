@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import platform
-import sys
 
 
 MODEL_NAME = "MedEmbed-small-v0.1-int8-medbrevia-6cbe4664"
@@ -16,6 +15,22 @@ MODEL_DIMENSION = 384
 MODEL_MAX_LENGTH = 512
 MODEL_BASE_URL = (
     f"https://huggingface.co/{MODEL_REPOSITORY}/resolve/{MODEL_REVISION}"
+)
+WORKER_RUNTIME_TAG = "darwin-arm64-worker-py313"
+WORKER_PYTHON_VERSION = "3.13.14"
+WORKER_PYTHON_BUILD = "20260728"
+WORKER_PYTHON_FILENAME = (
+    "cpython-3.13.14+20260728-aarch64-apple-darwin-"
+    "install_only_stripped.tar.gz"
+)
+WORKER_PYTHON_SHA256 = (
+    "aa2a054f5e04bde63ae199e3bb6bbb634e457423efd294842deeb1299e7e5932"
+)
+WORKER_PYTHON_SIZE = 25_121_759
+WORKER_PYTHON_SOURCE = (
+    "https://github.com/astral-sh/python-build-standalone/releases/download/"
+    "20260728/cpython-3.13.14%2B20260728-aarch64-apple-darwin-"
+    "install_only_stripped.tar.gz"
 )
 
 
@@ -77,23 +92,9 @@ class RuntimeWheel:
     sha256: str
 
 
-DARWIN_ARM64_PY39 = (
-    RuntimeWheel(
-        filename="onnxruntime-1.19.2-cp39-cp39-macosx_11_0_universal2.whl",
-        sha256="006c8d326835c017a9e9f74c9c77ebb570a71174a1e89fe078b29a557d9c3848",
-    ),
-    RuntimeWheel(
-        filename="numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl",
-        sha256="2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b",
-    ),
-    RuntimeWheel(
-        filename="tokenizers-0.20.3-cp39-cp39-macosx_11_0_arm64.whl",
-        sha256="f4cb0c614b0135e781de96c2af87e73da0389ac1458e2a97562ed26e29490d8d",
-    ),
-    RuntimeWheel(
-        filename="flatbuffers-24.3.25-py2.py3-none-any.whl",
-        sha256="8dbdec58f935f3765e4f7f3cf635ac3a77f83568138d6a2311f524ec96364812",
-    ),
+DARWIN_ARM64_PY39_NUMPY = RuntimeWheel(
+    filename="numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl",
+    sha256="2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b",
 )
 
 DARWIN_ARM64_PY313 = (
@@ -115,18 +116,23 @@ DARWIN_ARM64_PY313 = (
     ),
 )
 
-RUNTIME_WHEELS = {
-    "darwin-arm64-py39": DARWIN_ARM64_PY39,
-    "darwin-arm64-py313": DARWIN_ARM64_PY313,
+WORKER_RUNTIME_WHEELS = DARWIN_ARM64_PY313
+RUNTIME_WHEELS = {WORKER_RUNTIME_TAG: WORKER_RUNTIME_WHEELS}
+HOST_VECTOR_WHEELS = {
+    # The host process receives NumPy only. Inference libraries are confined
+    # to the standalone worker so they can be fully reclaimed after use.
+    "darwin-arm64-py39": (DARWIN_ARM64_PY39_NUMPY,),
+    "darwin-arm64-py313": (DARWIN_ARM64_PY313[1],),
 }
 
 
 def runtime_tag() -> str:
-    """Return the native-runtime bundle tag for this Python process."""
+    """Return the standalone Semantic worker tag for this platform."""
 
     system = platform.system().casefold()
     machine = platform.machine().casefold()
-    python_tag = f"py{sys.version_info.major}{sys.version_info.minor}"
     if system == "darwin" and machine in {"arm64", "aarch64"}:
         machine = "arm64"
-    return f"{system}-{machine}-{python_tag}"
+    if system == "darwin" and machine == "arm64":
+        return WORKER_RUNTIME_TAG
+    return f"{system}-{machine}-worker"

@@ -97,8 +97,52 @@ artifact hashes and validation results.
 
 ## Optional local semantic runtime
 
-The following wheels are distributed only to run semantic search locally on a
-supported Mac. Smart and Exact search do not depend on them.
+Semantic inference runs in a short-lived, standalone worker process on a
+supported Mac. This lets the operating system reclaim the model and native
+inference libraries when the worker exits instead of retaining them inside
+Anki. Smart and Exact search do not launch or depend on that worker.
+
+### Standalone CPython 3.13.14 worker
+
+The add-on redistributes this pinned, official
+`astral-sh/python-build-standalone` release artifact:
+
+| Bundled artifact | Bytes | SHA-256 |
+| --- | ---: | --- |
+| `cpython-3.13.14+20260728-aarch64-apple-darwin-install_only_stripped.tar.gz` | 25,121,759 | `aa2a054f5e04bde63ae199e3bb6bbb634e457423efd294842deeb1299e7e5932` |
+
+- Release: <https://github.com/astral-sh/python-build-standalone/releases/tag/20260728>
+- Exact artifact:
+  <https://github.com/astral-sh/python-build-standalone/releases/download/20260728/cpython-3.13.14%2B20260728-aarch64-apple-darwin-install_only_stripped.tar.gz>
+- Project source at the release tag:
+  <https://github.com/astral-sh/python-build-standalone/tree/20260728>
+- python-build-standalone project license: MPL-2.0
+
+The compact archive retains CPython's license at
+`python/lib/python3.13/LICENSE.txt` and the license files shipped with its pip
+installation. Its matching full release artifact also provides a top-level
+`python/licenses/` directory for CPython and compiled dependencies. Every one
+of those **19** exact release-supplied texts, plus the project's MPL-2.0 text,
+is preserved in
+`licenses/python-build-standalone-20260728-NOTICES.txt`.
+
+That notice bundle is generated from the exact matching full artifact,
+`cpython-3.13.14+20260728-aarch64-apple-darwin-pgo+lto-full.tar.zst`
+(58,335,956 bytes; SHA-256
+`85c6b957a86e44ec423e57b7af1b5abdffe33107bc951297a7a88eb46361d20b`).
+It covers the release texts for bdb, bzip2, CPython, Expat, libX11, libXau,
+libedit, libffi, liblzma, libuuid, libxcb, mpdecimal, ncurses, OpenSSL 1.1 and
+3, SQLite, Tcl, Tix, and zlib. Reproduce it with:
+
+`python3 scripts/build_python_runtime_notices.py`
+
+### Bundled Python wheels
+
+The Python 3.13 wheels below are installed only inside the isolated worker,
+except NumPy, which is also installed in a separate NumPy-only host directory
+for vector-index arithmetic. Anki versions that embed Python 3.9 receive only
+the compatible NumPy 2.0.2 wheel; the old Python 3.9 ONNX Runtime, Tokenizers,
+and FlatBuffers wheels are no longer distributed.
 
 | Bundled wheel | SHA-256 |
 | --- | --- |
@@ -106,6 +150,7 @@ supported Mac. Smart and Exact search do not depend on them.
 | `numpy-2.5.1-cp313-cp313-macosx_14_0_arm64.whl` | `6165343f81b56ef8f514f396989e529b61d9dc709b99421b07e9f3e698e2287d` |
 | `tokenizers-0.23.1-cp310-abi3-macosx_11_0_arm64.whl` | `e0948bbb1ac1d7cdfc9fb6d62c596e3b7550036ad60ecd654a66ad273326324e` |
 | `flatbuffers-25.12.19-py2.py3-none-any.whl` | `7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4` |
+| `numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl` | `2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b` |
 
 ### ONNX Runtime 1.28.0
 
@@ -130,6 +175,18 @@ localization or abridgment.
 
 The installed wheel also retains its component-level license files under
 `numpy-2.5.1.dist-info/licenses/`.
+
+### NumPy 2.0.2
+
+- Project: NumPy
+- Project license: BSD-3-Clause
+- Source: <https://github.com/numpy/numpy/tree/v2.0.2>
+- NumPy license and the notices supplied with the exact binary wheel:
+  `licenses/numpy-2.0.2-LICENSE.txt`
+
+This wheel provides vector-index arithmetic to supported Anki releases that
+embed Python 3.9. It is not an inference runtime and does not load ONNX
+Runtime or Tokenizers into Anki.
 
 ### Hugging Face tokenizers 0.23.1
 
@@ -164,91 +221,12 @@ to every supplying component. The release bundle can be reproduced with:
 - Source: <https://github.com/google/flatbuffers/tree/v25.12.19>
 - License text: `licenses/Apache-2.0.txt`
 
-### Python 3.9 compatibility runtime
-
-The compatibility runtime uses older, separately pinned wheels for Anki builds
-that embed Python 3.9. They are not installed on newer Python runtimes.
-
-| Bundled wheel | SHA-256 |
-| --- | --- |
-| `onnxruntime-1.19.2-cp39-cp39-macosx_11_0_universal2.whl` | `006c8d326835c017a9e9f74c9c77ebb570a71174a1e89fe078b29a557d9c3848` |
-| `numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl` | `2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b` |
-| `tokenizers-0.20.3-cp39-cp39-macosx_11_0_arm64.whl` | `f4cb0c614b0135e781de96c2af87e73da0389ac1458e2a97562ed26e29490d8d` |
-| `flatbuffers-24.3.25-py2.py3-none-any.whl` | `8dbdec58f935f3765e4f7f3cf635ac3a77f83568138d6a2311f524ec96364812` |
-
-#### ONNX Runtime 1.19.2
-
-- Project: Microsoft ONNX Runtime
-- License: MIT
-- Source: <https://github.com/microsoft/onnxruntime/tree/v1.19.2>
-- License extracted from the exact wheel:
-  `licenses/onnxruntime-1.19.2-LICENSE.txt`
-- Required upstream component notices extracted from the exact wheel:
-  `licenses/onnxruntime-1.19.2-ThirdPartyNotices.txt`
-
-The complete third-party notice distributed inside this ONNX Runtime wheel is
-retained without localization or abridgment.
-
-#### NumPy 2.0.2
-
-- Project: NumPy
-- Project license: BSD-3-Clause
-- Source: <https://github.com/numpy/numpy/tree/v2.0.2>
-- NumPy license and the notices for software included in its exact binary
-  wheel: `licenses/numpy-2.0.2-LICENSE.txt`
-
-The retained wheel license includes the component-level terms supplied by
-NumPy for libraries incorporated into that binary distribution.
-
-#### Hugging Face tokenizers 0.20.3
-
-- Project: Hugging Face tokenizers
-- License: Apache-2.0
-- Source: <https://github.com/huggingface/tokenizers/tree/v0.20.3>
-- Version-matched PyPI source distribution:
-  <https://files.pythonhosted.org/packages/da/25/b1681c1c30ea3ea6e584ae3fffd552430b12faa599b558c4c4783f56d7ff/tokenizers-0.20.3.tar.gz>
-- Source distribution SHA-256:
-  `2278b34c5d0dd78e087e1ca7f9b1dcbf129d80211afa645f214bd6e051037539`
-- Upstream license from that source distribution:
-  `licenses/tokenizers-0.20.3-LICENSE.txt`
-
-This older wheel does not embed a software bill of materials or license file.
-The exact, version-matched PyPI source distribution and its Cargo lockfile are
-therefore used as the dependency authority for the reproducible component
-notice at `licenses/tokenizers-0.20.3-NOTICES.txt`. The bundle covers the
-reviewed non-development dependency closure: **120** packages, including
-**118** checksum-verified crates.io archives and two local tokenizers packages.
-Because a Cargo lockfile can retain target-specific packages, the bundle may
-conservatively include an attribution that was not linked into this particular
-Mac wheel; it does not silently omit such an attribution.
-
-Every license, licence, copying, copyright, notice, and unlicense file found in
-those exact sources is retained. The `number_prefix` crate intentionally
-excludes its `LICENCE` from its crates.io archive, so that one notice is fetched
-from the exact repository commit recorded in the crate's VCS metadata and is
-separately checksum-verified. The checked-in bundle can be reproduced from the
-source repository with:
-
-`python3 scripts/build_tokenizers_0203_notices.py`
-
-#### Google FlatBuffers 24.3.25
-
-- Project: Google FlatBuffers
-- License: Apache-2.0
-- Source: <https://github.com/google/flatbuffers/tree/v24.3.25>
-- License from the immutable release commit:
-  <https://github.com/google/flatbuffers/blob/595bf0007ab1929570c7671f091313c8fc20644e/LICENSE>
-- Retained license text: `licenses/flatbuffers-24.3.25-LICENSE.txt`
-
-The Python wheel declares Apache-2.0 but does not itself contain a license
-file, so the retained version-specific text comes from the corresponding
-upstream release commit.
-
 ## Host-provided software
 
-Anki, Qt/PyQt, Python's standard library, and SQLite are supplied by Anki or
-the host system; they are not redistributed by this add-on. Their names are
-used only to describe compatibility and integration.
+Anki, Qt/PyQt, Anki's embedded Python runtime, and the host copy of SQLite are
+supplied by Anki or the operating system; they are not redistributed by this
+add-on. The standalone Python worker described above is redistributed and is
+covered by its separate notices.
 
 ## No endorsement
 
