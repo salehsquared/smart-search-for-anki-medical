@@ -23,7 +23,7 @@ Use `release/ANKIWEB_DESCRIPTION_1.0.20.md` as the description source.
 1. Confirmed AnkiWeb reports human version `1.0.20`, minimum `241100`, and hard
    maximum `-260800`.
 2. Boundary downloads at `241100` and `260800` were byte-identical to the
-   frozen archive; `241099` and `260900` were rejected.
+   frozen archive; `241099`, `260801`, and `260900` were rejected.
 3. Code `677438639` completed disposable clean installs through Anki 24.11 and
    26.08's official installer implementations.
 4. A live v1.0.19-to-v1.0.20 update through Anki 26.05 preserved customized

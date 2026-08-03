@@ -107,8 +107,8 @@ Requests at point versions `241100` and `260800` each downloaded exactly
 `52,275,482` bytes with SHA-256
 `dca1f90d52b3a4d64c86108547a7178108a6a55ddcb1d435a976fa9f8415cf8f`.
 Both archives were byte-identical to the frozen artifact and reported
-`human_version=1.0.20`. Requests immediately outside the range, at `241099`
-and `260900`, returned HTTP 404.
+`human_version=1.0.20`. Out-of-range requests at `241099`, `260801`, and
+`260900` returned HTTP 404.
 
 ## Public numeric-code installation
 
