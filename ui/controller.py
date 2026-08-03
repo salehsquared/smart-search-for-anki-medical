@@ -45,6 +45,9 @@ class SearchController(QObject):
     textIndexRebuilt = pyqtSignal()
     flagRequested = pyqtSignal(object, int)
     suspensionRequested = pyqtSignal(object, bool)
+    burialRequested = pyqtSignal(object, bool)
+    # Preserve Anki's timestamp-sized 64-bit deck IDs across this signal hop.
+    deckChangeRequested = pyqtSignal(object, object, str)
     tagActionRequested = pyqtSignal(object, bool)
     previewPreferenceChanged = pyqtSignal(bool)
 
@@ -108,6 +111,8 @@ class SearchController(QObject):
         dialog.updateRequested.connect(self.updateRequested)
         dialog.flagRequested.connect(self.flagRequested)
         dialog.suspensionRequested.connect(self.suspensionRequested)
+        dialog.burialRequested.connect(self.burialRequested)
+        dialog.deckChangeRequested.connect(self.deckChangeRequested)
         dialog.tagActionRequested.connect(self.tagActionRequested)
         dialog.deckPickerRequested.connect(self.load_decks)
         dialog.settingsChanged.connect(self._on_settings_changed)

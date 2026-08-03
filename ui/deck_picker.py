@@ -42,6 +42,7 @@ _ROLE_NAME = int(Qt.ItemDataRole.UserRole)
 _ROLE_REAL = _ROLE_NAME + 1
 _ROLE_INHERITED = _ROLE_NAME + 2
 _ROLE_MISSING = _ROLE_NAME + 3
+_ROLE_DECK_ID = _ROLE_NAME + 4
 
 
 def _read(value: object, *names: str, default: Any = None) -> Any:
@@ -112,6 +113,10 @@ def _entry_id(entry: DeckEntry | object) -> int:
         return int(_read(entry, "deck_id", "id", default=0) or 0)
     except (TypeError, ValueError):
         return 0
+
+
+def _entry_filtered(entry: DeckEntry | object) -> bool:
+    return bool(_read(entry, "filtered", "is_filtered", default=False))
 
 
 def _catalog_entries(catalog: DeckCatalog | object | None) -> tuple[object, ...]:
@@ -508,6 +513,8 @@ class DeckPickerPopup(QDialog):
         if self._catalog is None:
             self.set_error(message)
             return
+        cached_catalog = self._catalog
+        self.set_catalog(cached_catalog)
         self._ready = True
         self.tree.show()
         self.message_label.setText(
@@ -1180,4 +1187,518 @@ class DeckPickerPopup(QDialog):
         super().changeEvent(event)
 
 
-__all__ = ["DeckPickerPopup", "DeckScopeButton"]
+class DeckDestinationPopup(QDialog):
+    """Single-destination deck chooser for exact-card move operations."""
+
+    applied = pyqtSignal(object)  # DeckEntry
+    retryRequested = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        flags = Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
+        super().__init__(parent, flags)
+        self.setObjectName("deckPickerPopup")
+        self.setWindowTitle("Move cards")
+        self.setAccessibleName("Move cards to a deck")
+        self.setAccessibleDescription(
+            "Search the deck hierarchy and choose one destination deck."
+        )
+        self.setModal(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setMinimumWidth(320)
+        self.resize(430, 520)
+
+        self._catalog: DeckCatalog | object | None = None
+        self._entries: dict[int, DeckEntry] = {}
+        self._items: dict[str, QTreeWidgetItem] = {}
+        self._selected_id = 0
+        self._target_count = 0
+        self._ready = False
+        self._filter_active = False
+        self._expanded_before_filter: set[str] = set()
+        self._prior_focus: QWidget | None = None
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+        self.surface = QFrame(self)
+        self.surface.setObjectName("deckPickerSurface")
+        root.addWidget(self.surface)
+        layout = QVBoxLayout(self.surface)
+        layout.setContentsMargins(14, 14, 14, 12)
+        layout.setSpacing(10)
+
+        self.title_label = QLabel("Move cards", self.surface)
+        self.title_label.setObjectName("deckPickerTitle")
+        self.title_label.setAccessibleName("Move cards")
+        layout.addWidget(self.title_label)
+
+        self.filter_edit = QLineEdit(self.surface)
+        self.filter_edit.setObjectName("deckPickerFilter")
+        self.filter_edit.setPlaceholderText("Find a deck…")
+        self.filter_edit.setClearButtonEnabled(True)
+        self.filter_edit.setMinimumHeight(38)
+        self.filter_edit.setAccessibleName("Filter destination decks")
+        self.filter_edit.textChanged.connect(self._filter_tree)
+        self.filter_edit.installEventFilter(self)
+        layout.addWidget(self.filter_edit)
+
+        self.current_button = QToolButton(self.surface)
+        self.current_button.setObjectName("deckPickerQuick")
+        self.current_button.setText("Current deck")
+        self.current_button.setAccessibleName("Choose current deck")
+        self.current_button.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Fixed,
+        )
+        self.current_button.clicked.connect(self._choose_current)
+        layout.addWidget(self.current_button)
+
+        self.decks_label = QLabel("DESTINATION", self.surface)
+        self.decks_label.setObjectName("deckPickerSection")
+        self.decks_label.setAccessibleName("Destination decks")
+        layout.addWidget(self.decks_label)
+
+        self.message_label = QLabel(self.surface)
+        self.message_label.setObjectName("deckPickerMessage")
+        self.message_label.setWordWrap(True)
+        self.message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.message_label.setAccessibleName("Deck picker status")
+        self.message_label.hide()
+        layout.addWidget(self.message_label)
+
+        self.tree = QTreeWidget(self.surface)
+        self.tree.setObjectName("deckPickerTree")
+        self.tree.setHeaderHidden(True)
+        self.tree.setIndentation(16)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setUniformRowHeights(True)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.tree.setAccessibleName("Destination decks")
+        self.tree.setAccessibleDescription(
+            "Use arrows to navigate and Return to move the selected cards."
+        )
+        self.tree.itemSelectionChanged.connect(self._selection_changed)
+        self.tree.itemDoubleClicked.connect(self._item_activated)
+        self.tree.installEventFilter(self)
+        layout.addWidget(self.tree, 1)
+
+        self.no_matches_label = QLabel(self.surface)
+        self.no_matches_label.setObjectName("deckPickerNoMatches")
+        self.no_matches_label.setWordWrap(True)
+        self.no_matches_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.no_matches_label.setAccessibleName("Deck filter results")
+        self.no_matches_label.hide()
+        layout.addWidget(self.no_matches_label)
+
+        footer = QHBoxLayout()
+        footer.setContentsMargins(0, 0, 0, 0)
+        footer.setSpacing(8)
+        self.selection_label = QLabel("Choose a deck", self.surface)
+        self.selection_label.setObjectName("deckPickerSelection")
+        self.selection_label.setAccessibleName("Move summary")
+        footer.addWidget(self.selection_label)
+        footer.addStretch(1)
+        self.retry_button = QPushButton("Retry", self.surface)
+        self.retry_button.setObjectName("deckPickerSecondary")
+        self.retry_button.clicked.connect(self.retryRequested)
+        self.retry_button.hide()
+        footer.addWidget(self.retry_button)
+        self.cancel_button = QPushButton("Cancel", self.surface)
+        self.cancel_button.setObjectName("deckPickerSecondary")
+        self.cancel_button.clicked.connect(self.reject)
+        footer.addWidget(self.cancel_button)
+        self.apply_button = QPushButton("Move", self.surface)
+        self.apply_button.setObjectName("deckPickerApply")
+        self.apply_button.setDefault(True)
+        self.apply_button.clicked.connect(self._apply)
+        footer.addWidget(self.apply_button)
+        layout.addLayout(footer)
+
+        QWidget.setTabOrder(self.filter_edit, self.current_button)
+        QWidget.setTabOrder(self.current_button, self.tree)
+        QWidget.setTabOrder(self.tree, self.retry_button)
+        QWidget.setTabOrder(self.retry_button, self.cancel_button)
+        QWidget.setTabOrder(self.cancel_button, self.apply_button)
+        self._apply_theme()
+        self.set_loading()
+
+    @property
+    def selected_deck(self) -> DeckEntry | None:
+        return self._entries.get(self._selected_id)
+
+    def set_target_count(self, count: int) -> None:
+        self._target_count = max(0, int(count))
+        self._update_summary()
+
+    def set_catalog(self, catalog: DeckCatalog) -> None:
+        self._catalog = catalog
+        entries: dict[int, DeckEntry] = {}
+        for raw_entry in _catalog_entries(catalog):
+            deck_id = _entry_id(raw_entry)
+            name = _entry_name(raw_entry)
+            if deck_id <= 0 or not name or _entry_filtered(raw_entry):
+                continue
+            entries[deck_id] = DeckEntry(deck_id, name)
+        self._entries = entries
+        if self._selected_id not in self._entries:
+            self._selected_id = 0
+        self._ready = True
+        self.message_label.hide()
+        self.message_label.setToolTip("")
+        self.message_label.setProperty("validationError", False)
+        self.retry_button.hide()
+        self.tree.show()
+        self._rebuild_tree()
+        self._update_current_button()
+        self._update_summary()
+
+    def set_loading(self) -> None:
+        self._ready = False
+        self._entries.clear()
+        self._selected_id = 0
+        self.tree.clear()
+        self._items.clear()
+        self.tree.hide()
+        self.message_label.setText("Loading decks…")
+        self.message_label.setToolTip("")
+        self.message_label.setProperty("validationError", False)
+        self.message_label.show()
+        self.no_matches_label.hide()
+        self.retry_button.hide()
+        self.current_button.setEnabled(False)
+        self.apply_button.setEnabled(False)
+        self._update_summary()
+        self._apply_theme()
+
+    def set_error(self, message: str) -> None:
+        self._ready = False
+        self.tree.hide()
+        self.message_label.setText(str(message or "Decks could not be loaded."))
+        self.message_label.setToolTip("")
+        self.message_label.setProperty("validationError", True)
+        self.message_label.show()
+        self.no_matches_label.hide()
+        self.retry_button.show()
+        self.current_button.setEnabled(False)
+        self.apply_button.setEnabled(False)
+        self._apply_theme()
+
+    def set_refresh_error(self, message: str) -> None:
+        if self._catalog is None:
+            self.set_error(message)
+            return
+        # A refresh begins in ``set_loading()``, which intentionally clears the
+        # visible model.  Rehydrate it from the last successful catalog before
+        # reporting the non-fatal refresh error so the promised fallback list
+        # is genuinely usable.
+        cached_catalog = self._catalog
+        self.set_catalog(cached_catalog)
+        self._ready = True
+        self.tree.show()
+        self.message_label.setText(
+            "Deck choices could not be refreshed. Showing the last loaded list."
+        )
+        self.message_label.setToolTip(str(message or ""))
+        self.message_label.setProperty("validationError", True)
+        self.message_label.show()
+        self.retry_button.show()
+        self._update_current_button()
+        self._update_summary()
+        self._apply_theme()
+
+    def open_near(self, global_position: object) -> None:
+        parent_results = getattr(self.parentWidget(), "results", None)
+        self._prior_focus = parent_results or QApplication.focusWidget()
+        self.filter_edit.clear()
+        screen = (
+            QApplication.screenAt(global_position)
+            or QApplication.primaryScreen()
+        )
+        if screen is not None:
+            available = screen.availableGeometry()
+            self.resize(
+                min(max(390, self.width()), max(320, available.width() - 16)),
+                min(max(440, self.height()), max(320, available.height() - 16)),
+            )
+            x = max(
+                available.left() + 8,
+                min(global_position.x(), available.right() - self.width() - 8),
+            )
+            y = max(
+                available.top() + 8,
+                min(global_position.y(), available.bottom() - self.height() - 8),
+            )
+            self.move(x, y)
+        else:
+            self.move(global_position)
+        self.show()
+        self.raise_()
+        self.filter_edit.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def done(self, result: int) -> None:
+        super().done(result)
+        prior = self._prior_focus
+        self._prior_focus = None
+        if prior is not None:
+            try:
+                prior.setFocus(Qt.FocusReason.PopupFocusReason)
+            except RuntimeError:
+                pass
+
+    def _rebuild_tree(self) -> None:
+        self.tree.clear()
+        self._items.clear()
+        paths: dict[str, QTreeWidgetItem] = {}
+        by_name = {entry.name: entry for entry in self._entries.values()}
+        for full_name in sorted(by_name, key=str.casefold):
+            parent: QTreeWidgetItem | None = None
+            segments = full_name.split("::")
+            for index, segment in enumerate(segments):
+                path = "::".join(segments[: index + 1])
+                item = paths.get(path)
+                if item is None:
+                    item = QTreeWidgetItem(parent or self.tree)
+                    item.setText(0, segment)
+                    item.setData(0, _ROLE_NAME, path)
+                    paths[path] = item
+                parent = item
+        self._items = paths
+        for name, item in paths.items():
+            entry = by_name.get(name)
+            item.setData(0, _ROLE_REAL, entry is not None)
+            item.setData(0, _ROLE_DECK_ID, entry.deck_id if entry else 0)
+            item.setToolTip(0, name)
+            flags = Qt.ItemFlag.ItemIsEnabled
+            if entry is not None:
+                flags |= Qt.ItemFlag.ItemIsSelectable
+            item.setFlags(flags)
+            item.setData(
+                0,
+                Qt.ItemDataRole.AccessibleTextRole,
+                f"Destination deck {name}" if entry else f"Deck group {name}",
+            )
+        self.tree.collapseAll()
+        current = (
+            self._catalog.current_deck
+            if self._catalog is not None
+            else None
+        )
+        if current is not None and not current.filtered:
+            parts = current.name.split("::")
+            for index in range(1, len(parts)):
+                ancestor = self._items.get("::".join(parts[:index]))
+                if ancestor is not None:
+                    ancestor.setExpanded(True)
+        self._show_selected_item()
+        self._filter_tree(self.filter_edit.text())
+
+    def _show_selected_item(self) -> None:
+        for name, item in self._items.items():
+            selected = int(item.data(0, _ROLE_DECK_ID) or 0) == self._selected_id
+            leaf = name.rsplit("::", 1)[-1]
+            item.setText(0, f"✓  {leaf}" if selected else leaf)
+            if selected:
+                self.tree.setCurrentItem(item)
+
+    def _selection_changed(self) -> None:
+        item = self.tree.currentItem()
+        deck_id = int(item.data(0, _ROLE_DECK_ID) or 0) if item else 0
+        if deck_id not in self._entries:
+            return
+        self._selected_id = deck_id
+        self._show_selected_item()
+        self._update_summary()
+
+    def _item_activated(self, item: QTreeWidgetItem, _column: int) -> None:
+        deck_id = int(item.data(0, _ROLE_DECK_ID) or 0)
+        if deck_id in self._entries:
+            self._selected_id = deck_id
+            self._show_selected_item()
+            self._update_summary()
+            self._apply()
+
+    def _choose_current(self, _checked: bool = False) -> None:
+        current = (
+            self._catalog.current_deck
+            if self._catalog is not None
+            else None
+        )
+        if (
+            current is None
+            or current.filtered
+            or current.deck_id not in self._entries
+        ):
+            return
+        self._selected_id = int(current.deck_id)
+        self._show_selected_item()
+        self._update_summary()
+
+    def _update_current_button(self) -> None:
+        current = (
+            self._catalog.current_deck
+            if self._catalog is not None
+            else None
+        )
+        available = (
+            current is not None
+            and not current.filtered
+            and current.deck_id in self._entries
+        )
+        leaf = current.name.rsplit("::", 1)[-1] if available else ""
+        self.current_button.setText(
+            f"Current deck  ·  {leaf}" if leaf else "Current deck"
+        )
+        self.current_button.setEnabled(self._ready and available)
+        self.current_button.setToolTip(
+            f"Move to {current.name}"
+            if available
+            else "No regular current deck is available"
+        )
+        self.current_button.setAccessibleDescription(
+            self.current_button.toolTip()
+        )
+
+    def _update_summary(self) -> None:
+        count = self._target_count
+        card_label = f"{count:,} card{'s' if count != 1 else ''}"
+        entry = self.selected_deck
+        text = (
+            f"{card_label} → {entry.name.rsplit('::', 1)[-1]}"
+            if entry is not None
+            else f"{card_label} selected"
+        )
+        self.selection_label.setText(text)
+        self.selection_label.setToolTip(entry.name if entry is not None else "")
+        self.selection_label.setAccessibleDescription(
+            f"Move {card_label} to {entry.name}"
+            if entry is not None
+            else f"{card_label}; choose a destination"
+        )
+        self.apply_button.setEnabled(self._ready and entry is not None)
+
+    def _filter_tree(self, text: str) -> None:
+        raw_needle = str(text or "").strip()
+        needle = raw_needle.casefold()
+        if needle and not self._filter_active:
+            self._expanded_before_filter = {
+                name for name, item in self._items.items() if item.isExpanded()
+            }
+            self._filter_active = True
+        restoring = not needle and self._filter_active
+
+        def visit(item: QTreeWidgetItem) -> bool:
+            child_visible = any(
+                [visit(item.child(index)) for index in range(item.childCount())]
+            )
+            name = str(item.data(0, _ROLE_NAME) or "")
+            own = not needle or needle in name.casefold()
+            visible = own or child_visible
+            item.setHidden(not visible)
+            if needle and child_visible:
+                item.setExpanded(True)
+            return visible
+
+        visible = False
+        for index in range(self.tree.topLevelItemCount()):
+            visible = visit(self.tree.topLevelItem(index)) or visible
+        if restoring:
+            for name, item in self._items.items():
+                item.setExpanded(name in self._expanded_before_filter)
+            self._expanded_before_filter.clear()
+            self._filter_active = False
+        no_matches = bool(needle) and not visible and self._ready
+        self.no_matches_label.setText(
+            f'No decks match “{raw_needle}”. Clear the field to show all decks.'
+            if no_matches
+            else ""
+        )
+        self.no_matches_label.setVisible(no_matches)
+        self.no_matches_label.setAccessibleDescription(
+            self.no_matches_label.text()
+        )
+
+    def _first_visible_item(self) -> QTreeWidgetItem | None:
+        needle = self.filter_edit.text().strip().casefold()
+
+        def find(item: QTreeWidgetItem) -> QTreeWidgetItem | None:
+            name = str(item.data(0, _ROLE_NAME) or "")
+            matches_filter = not needle or needle in name.casefold()
+            if (
+                not item.isHidden()
+                and matches_filter
+                and int(item.data(0, _ROLE_DECK_ID) or 0)
+            ):
+                return item
+            for index in range(item.childCount()):
+                found = find(item.child(index))
+                if found is not None:
+                    return found
+            return None
+
+        for index in range(self.tree.topLevelItemCount()):
+            found = find(self.tree.topLevelItem(index))
+            if found is not None:
+                return found
+        return None
+
+    def _apply(self) -> None:
+        entry = self.selected_deck
+        if not self.apply_button.isEnabled() or entry is None:
+            return
+        self.applied.emit(entry)
+        self.accept()
+
+    def eventFilter(self, obj: object, event: QEvent) -> bool:
+        if event.type() == QEvent.Type.KeyPress:
+            key = event.key()
+            if obj is self.filter_edit and key == Qt.Key.Key_Down:
+                item = self._first_visible_item()
+                if item is not None:
+                    self.tree.setCurrentItem(item)
+                    self.tree.setFocus(Qt.FocusReason.ShortcutFocusReason)
+                return True
+            if obj is self.filter_edit and key in (
+                Qt.Key.Key_Return,
+                Qt.Key.Key_Enter,
+            ):
+                if self.selected_deck is None:
+                    item = self._first_visible_item()
+                    if item is not None:
+                        self.tree.setCurrentItem(item)
+                self._apply()
+                return True
+            if obj is self.tree and key in (
+                Qt.Key.Key_Return,
+                Qt.Key.Key_Enter,
+            ):
+                self._apply()
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.reject()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def _apply_theme(self) -> None:
+        DeckPickerPopup._apply_theme(self)
+
+    def changeEvent(self, event: QEvent) -> None:
+        if event.type() in (
+            QEvent.Type.PaletteChange,
+            QEvent.Type.ApplicationPaletteChange,
+        ) and not getattr(self, "_refreshing_palette", False):
+            self._refreshing_palette = True
+            try:
+                self._apply_theme()
+                if hasattr(self, "_items"):
+                    self._show_selected_item()
+            finally:
+                self._refreshing_palette = False
+        super().changeEvent(event)
+
+
+__all__ = ["DeckDestinationPopup", "DeckPickerPopup", "DeckScopeButton"]

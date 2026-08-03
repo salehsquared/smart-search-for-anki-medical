@@ -9,7 +9,11 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from ui.contracts import DeckCatalog, DeckEntry
-    from ui.deck_picker import DeckPickerPopup, DeckScopeButton
+    from ui.deck_picker import (
+        DeckDestinationPopup,
+        DeckPickerPopup,
+        DeckScopeButton,
+    )
     from ui.deck_query import DeckScopeSelection
     from ui.widgets import QApplication, Qt, QWidget
     from PyQt6.QtTest import QTest
@@ -74,6 +78,94 @@ class DeckPickerTests(unittest.TestCase):
             self.assertIn("Custom decks", button.text())
             self.assertIn("custom", button.accessibleName().casefold())
         button.deleteLater()
+
+    def test_destination_picker_is_single_select_and_omits_filtered_decks(self) -> None:
+        popup = DeckDestinationPopup()
+        popup.set_target_count(3)
+        popup.set_catalog(
+            DeckCatalog(
+                decks=(
+                    DeckEntry(1, "AnKing"),
+                    DeckEntry(2, "AnKing::Step 1"),
+                    DeckEntry(3, "AnKing::Step 2"),
+                    DeckEntry(4, "Filtered review", filtered=True),
+                ),
+                current_deck_id=3,
+            )
+        )
+
+        self.assertNotIn(4, popup._entries)
+        self.assertNotIn("Filtered review", popup._items)
+        popup.tree.setCurrentItem(popup._items["AnKing"])
+        self.app.processEvents()
+        self.assertEqual(popup.selected_deck, DeckEntry(1, "AnKing"))
+        popup.tree.setCurrentItem(popup._items["AnKing::Step 1"])
+        self.app.processEvents()
+        self.assertEqual(popup.selected_deck, DeckEntry(2, "AnKing::Step 1"))
+        self.assertIn("3 cards", popup.selection_label.text())
+        self.assertIn("Step 1", popup.selection_label.text())
+
+        emitted = []
+        popup.applied.connect(emitted.append)
+        popup._apply()
+        self.assertEqual(emitted, [DeckEntry(2, "AnKing::Step 1")])
+        popup.deleteLater()
+
+    def test_destination_picker_current_filter_and_return_are_keyboard_friendly(self) -> None:
+        popup = DeckDestinationPopup()
+        popup.set_target_count(1)
+        popup.set_catalog(self.catalog())
+        popup.current_button.click()
+        self.assertEqual(popup.selected_deck, DeckEntry(3, "AnKing::Step 2"))
+
+        popup._selected_id = 0
+        popup._show_selected_item()
+        popup._update_summary()
+        popup.filter_edit.setText("personal")
+        emitted = []
+        popup.applied.connect(emitted.append)
+        QTest.keyClick(popup.filter_edit, Qt.Key.Key_Return)
+        self.assertEqual(emitted, [DeckEntry(4, "Personal")])
+        popup.deleteLater()
+
+    def test_destination_picker_return_chooses_matching_nested_deck(self) -> None:
+        popup = DeckDestinationPopup()
+        popup.set_target_count(1)
+        popup.set_catalog(self.catalog())
+        popup.filter_edit.setText("Step 2")
+        emitted = []
+        popup.applied.connect(emitted.append)
+
+        QTest.keyClick(popup.filter_edit, Qt.Key.Key_Return)
+
+        self.assertEqual(emitted, [DeckEntry(3, "AnKing::Step 2")])
+        popup.deleteLater()
+
+    def test_destination_picker_refresh_error_restores_cached_choices(self) -> None:
+        popup = DeckDestinationPopup()
+        popup.set_target_count(2)
+        popup.set_catalog(self.catalog())
+        popup.tree.setCurrentItem(popup._items["Personal"])
+        self.app.processEvents()
+        self.assertEqual(popup.selected_deck, DeckEntry(4, "Personal"))
+
+        popup.set_loading()
+        popup.set_refresh_error("temporary collection failure")
+
+        self.assertIn("AnKing::Step 2", popup._items)
+        self.assertIn("Personal", popup._items)
+        self.assertTrue(popup._ready)
+        self.assertFalse(popup.retry_button.isHidden())
+        self.assertIn("last loaded", popup.message_label.text())
+        self.assertEqual(
+            popup.message_label.toolTip(),
+            "temporary collection failure",
+        )
+        popup.tree.setCurrentItem(popup._items["AnKing::Step 2"])
+        self.app.processEvents()
+        self.assertEqual(popup.selected_deck, DeckEntry(3, "AnKing::Step 2"))
+        self.assertTrue(popup.apply_button.isEnabled())
+        popup.deleteLater()
 
     def test_hierarchy_multi_select_and_parent_inheritance(self) -> None:
         popup = DeckPickerPopup()
@@ -241,10 +333,12 @@ class DeckPickerTests(unittest.TestCase):
             popup.set_query("")
         popup.set_catalog(self.catalog())
         popup.show()
+        popup.set_loading()
         popup.set_refresh_error("temporary collection failure")
         self.app.processEvents()
 
         self.assertTrue(popup.tree.isVisibleTo(popup))
+        self.assertIn("AnKing::Step 2", popup._items)
         self.assertTrue(popup.apply_button.isEnabled())
         self.assertTrue(popup.retry_button.isVisibleTo(popup))
         self.assertIn("last loaded", popup.message_label.text())

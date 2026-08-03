@@ -40,12 +40,12 @@ content first.
 
 - Smart Search is an Anki Desktop add-on and cannot run inside AnkiMobile or
   AnkiDroid.
-- v1.0.22 supports Anki Desktop 24.11 through 26.08, including the 25.02,
+- v1.0.23 supports Anki Desktop 24.11 through 26.08, including the 25.02,
   25.07, 25.09, 26.05, and 26.08 release families.
 - The supported-version matrix is integration-tested on macOS with Apple
   silicon.
 - Semantic Search supports **macOS 14 or later on Apple-silicon Macs only**.
-- Windows, Linux, and Intel Mac integration testing is not part of the v1.0.22
+- Windows, Linux, and Intel Mac integration testing is not part of the v1.0.23
   support claim.
 - Smart and Exact do not require Semantic Search and remain available while its
   separate index is preparing.
@@ -53,10 +53,11 @@ content first.
 
 ## Collection safety
 
-The add-on's indexes are disposable and profile-scoped. Flags, suspension, and
-tags use Anki's supported undoable operations. If reporting a data-integrity
-concern, stop using the affected profile, make a normal Anki backup, and report
-the exact action sequence. Do not upload the collection with the report.
+The add-on's indexes are disposable and profile-scoped. Flags, suspension,
+burial, deck moves, and tags use Anki's supported undoable operations. If
+reporting a data-integrity concern, stop using the affected profile, make a
+normal Anki backup, and report the exact action sequence. Do not upload the
+collection with the report.
 
 ## Security reports
 

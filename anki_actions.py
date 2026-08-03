@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import enum
 import re
+from collections.abc import Mapping
 from typing import Any, Callable, Iterable, Sequence
 
 try:  # installed add-on package
@@ -21,6 +22,9 @@ class ActionKind(enum.Enum):
     FLAG = "flag"
     SUSPEND = "suspend"
     UNSUSPEND = "unsuspend"
+    BURY = "bury"
+    UNBURY = "unbury"
+    CHANGE_DECK = "change_deck"
     ADD_TAGS = "add_tags"
     REMOVE_TAGS = "remove_tags"
 
@@ -68,6 +72,8 @@ class CollectionAction:
     card_ids: tuple[int, ...] = ()
     flag: int | None = None
     tags: str = ""
+    deck_id: int | None = None
+    deck_name: str = ""
 
     def __post_init__(self) -> None:
         kind = self.kind
@@ -77,6 +83,11 @@ class CollectionAction:
         object.__setattr__(self, "note_ids", normalize_ids(self.note_ids))
         object.__setattr__(self, "card_ids", normalize_ids(self.card_ids))
         object.__setattr__(self, "tags", normalize_tag_text(self.tags))
+        object.__setattr__(
+            self,
+            "deck_name",
+            str(self.deck_name or "").strip(),
+        )
 
         if kind is ActionKind.FLAG:
             if self.flag is None or not 0 <= int(self.flag) <= 7:
@@ -85,6 +96,14 @@ class CollectionAction:
         elif kind in (ActionKind.ADD_TAGS, ActionKind.REMOVE_TAGS):
             if not self.tags:
                 raise ValueError("Enter at least one tag.")
+        elif kind is ActionKind.CHANGE_DECK:
+            try:
+                deck_id = int(self.deck_id or 0)
+            except (TypeError, ValueError) as error:
+                raise ValueError("Choose a destination deck.") from error
+            if deck_id <= 0:
+                raise ValueError("Choose a destination deck.")
+            object.__setattr__(self, "deck_id", deck_id)
 
     @property
     def requested_count(self) -> int:
@@ -106,6 +125,7 @@ class ActionOutcome:
     stale: int
     skipped: int
     note_count: int
+    changed_card_ids: tuple[int, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +197,45 @@ def _suspended_queue() -> int:
         return -1
 
 
+def _buried_queues() -> set[int]:
+    try:
+        from anki.consts import (
+            QUEUE_TYPE_MANUALLY_BURIED,
+            QUEUE_TYPE_SIBLING_BURIED,
+        )
+
+        return {
+            int(QUEUE_TYPE_MANUALLY_BURIED),
+            int(QUEUE_TYPE_SIBLING_BURIED),
+        }
+    except ImportError:
+        return {-3, -2}
+
+
+def _home_deck_id(card: Any) -> int:
+    original = int(getattr(card, "odid", 0) or 0)
+    return original if original > 0 else int(getattr(card, "did", 0) or 0)
+
+
+def _normal_deck_ids(collection: Any) -> set[int]:
+    """Return current non-filtered deck IDs through Anki's public API."""
+
+    output: set[int] = set()
+    for item in collection.decks.all_names_and_ids(include_filtered=False):
+        raw_id = (
+            item.get("id", 0)
+            if isinstance(item, Mapping)
+            else getattr(item, "id", 0)
+        )
+        try:
+            deck_id = int(raw_id or 0)
+        except (TypeError, ValueError):
+            continue
+        if deck_id > 0:
+            output.add(deck_id)
+    return output
+
+
 def _user_flag(card: Any) -> int | None:
     getter = getattr(card, "user_flag", None)
     if callable(getter):
@@ -203,9 +262,22 @@ def execute_collection_action(
         ActionKind.FLAG,
         ActionKind.SUSPEND,
         ActionKind.UNSUSPEND,
+        ActionKind.BURY,
+        ActionKind.UNBURY,
+        ActionKind.CHANGE_DECK,
     ):
         live, stale = _live_cards(collection, action.card_ids)
         suspended = _suspended_queue()
+        buried = _buried_queues()
+
+        if (
+            action.kind is ActionKind.CHANGE_DECK
+            and int(action.deck_id or 0) not in _normal_deck_ids(collection)
+        ):
+            raise ValueError(
+                "That destination deck is no longer available. "
+                "Choose another deck."
+            )
 
         if action.kind is ActionKind.FLAG:
             eligible = [
@@ -219,13 +291,35 @@ def execute_collection_action(
                 for card_id, card in live
                 if int(getattr(card, "queue", 0)) != suspended
             ]
-        else:
+        elif action.kind is ActionKind.UNSUSPEND:
             # Anki's backend operation is "unbury or unsuspend". Filtering is
             # essential so the Smart Search action can never unbury a card.
             eligible = [
                 (card_id, card)
                 for card_id, card in live
                 if int(getattr(card, "queue", 0)) == suspended
+            ]
+        elif action.kind is ActionKind.BURY:
+            eligible = [
+                (card_id, card)
+                for card_id, card in live
+                if int(getattr(card, "queue", 0)) not in buried
+                and int(getattr(card, "queue", 0)) != suspended
+            ]
+        elif action.kind is ActionKind.UNBURY:
+            # ``unbury_cards()`` shares Anki's restore operation with
+            # unsuspension, so suspended cards must never be passed here.
+            eligible = [
+                (card_id, card)
+                for card_id, card in live
+                if int(getattr(card, "queue", 0)) in buried
+            ]
+        else:
+            target_deck_id = int(action.deck_id or 0)
+            eligible = [
+                (card_id, card)
+                for card_id, card in live
+                if _home_deck_id(card) != target_deck_id
             ]
 
         eligible_ids = [card_id for card_id, _card in eligible]
@@ -247,6 +341,7 @@ def execute_collection_action(
                 stale=stale,
                 skipped=len(live),
                 note_count=0,
+                changed_card_ids=(),
             )
 
         if action.kind is ActionKind.FLAG:
@@ -256,8 +351,14 @@ def execute_collection_action(
             )
         elif action.kind is ActionKind.SUSPEND:
             result = collection.sched.suspend_cards(eligible_ids)
-        else:
+        elif action.kind is ActionKind.UNSUSPEND:
             result = collection.sched.unsuspend_cards(eligible_ids)
+        elif action.kind is ActionKind.BURY:
+            result = collection.sched.bury_cards(eligible_ids)
+        elif action.kind is ActionKind.UNBURY:
+            result = collection.sched.unbury_cards(eligible_ids)
+        else:
+            result = collection.set_deck(eligible_ids, int(action.deck_id or 0))
         changes, changed = _changes_and_count(result, len(eligible_ids))
         return ActionOutcome(
             changes=changes,
@@ -269,6 +370,7 @@ def execute_collection_action(
             stale=stale,
             skipped=len(live) - len(eligible_ids),
             note_count=note_count,
+            changed_card_ids=tuple(eligible_ids),
         )
 
     live_notes, stale = _live_notes(collection, action.note_ids)
@@ -372,6 +474,20 @@ def format_action_message(
             message = f"Unsuspended {_count_label(outcome.changed, 'card')}"
             if outcome.note_count:
                 message += f" from {_count_label(outcome.note_count, 'note')}"
+        elif action.kind is ActionKind.BURY:
+            message = f"Buried {_count_label(outcome.changed, 'card')}"
+            if outcome.note_count:
+                message += f" from {_count_label(outcome.note_count, 'note')}"
+        elif action.kind is ActionKind.UNBURY:
+            message = f"Unburied {_count_label(outcome.changed, 'card')}"
+            if outcome.note_count:
+                message += f" from {_count_label(outcome.note_count, 'note')}"
+        elif action.kind is ActionKind.CHANGE_DECK:
+            destination = action.deck_name or f"deck {action.deck_id}"
+            message = f"Moved {_count_label(outcome.changed, 'card')}"
+            if outcome.note_count:
+                message += f" from {_count_label(outcome.note_count, 'note')}"
+            message += f" to “{destination}”"
         elif action.kind is ActionKind.ADD_TAGS:
             message = (
                 f"Added “{action.tags}” to "
@@ -401,6 +517,14 @@ def format_action_message(
             details.append(f"{outcome.skipped:,} not suspended")
         elif action.kind is ActionKind.FLAG:
             details.append(f"{outcome.skipped:,} already had that flag")
+        elif action.kind is ActionKind.BURY:
+            details.append(
+                f"{outcome.skipped:,} already buried or suspended"
+            )
+        elif action.kind is ActionKind.UNBURY:
+            details.append(f"{outcome.skipped:,} not buried")
+        elif action.kind is ActionKind.CHANGE_DECK:
+            details.append(f"{outcome.skipped:,} already in that deck")
     if details:
         message += " · " + " · ".join(details)
     return message

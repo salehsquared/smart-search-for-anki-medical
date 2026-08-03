@@ -1,7 +1,7 @@
 # Privacy
 
 **Effective date:** July 29, 2026
-**Applies to:** Smart Search for Anki — Medical 1.0.22
+**Applies to:** Smart Search for Anki — Medical 1.0.23
 
 ## Plain-language summary
 
@@ -33,8 +33,8 @@ supported collection interfaces:
 - note and card identifiers;
 - tags, deck names, and note-type names;
 - note modification metadata and note GUIDs needed to detect changes; and
-- current card flags and suspension state when displaying or acting on search
-  results.
+- current card flags, suspension state, and burial state when displaying or
+  acting on search results.
 
 The add-on does not need or persist review answers, review timing, ease
 ratings, or scheduling history in its own search indexes.

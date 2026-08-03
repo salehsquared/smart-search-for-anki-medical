@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.0.23] — 2026-08-03
+
+### Added
+
+- Result menus can now move the exact selected cards to another deck through a
+  searchable, single-destination version of the hierarchical deck picker.
+  Filtered decks remain available as search filters but are never offered as
+  move destinations.
+- Result menus can now bury or unbury cards, including mixed selections. The
+  operation distinguishes both native buried queues from suspension and uses
+  one undoable Anki collection action.
+
+### Fixed
+
+- Deck changes now preserve Anki's timestamp-sized 64-bit deck IDs across the
+  Qt interface, so valid decks are no longer rejected as unavailable.
+- Filtering the move destination list and pressing Return now chooses the
+  matching nested deck instead of a visible ancestor. A failed deck-list
+  refresh also keeps the last usable choices available.
+
 ## [1.0.22] — 2026-08-03
 
 ### Added

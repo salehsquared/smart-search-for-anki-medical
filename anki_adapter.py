@@ -12,7 +12,7 @@ from typing import Any, NamedTuple
 from .backend.models import IndexedNote
 from .ui.contracts import DeckCatalog, DeckEntry
 
-CardStateSnapshot = tuple[int, int, bool]  # card_id, flag, suspended
+CardStateSnapshot = tuple[int, int, bool, bool]  # id, flag, suspended, buried
 CardIdsByNote = dict[int, tuple[int, ...]]
 DEFAULT_HYDRATION_BATCH_SIZE = 250
 
@@ -325,6 +325,19 @@ class AnkiCollectionReader:
         deck_manager = collection.decks
         decks: list[DeckEntry] = []
         seen_ids: set[int] = set()
+        normal_ids: set[int] = set()
+        for item in deck_manager.all_names_and_ids(include_filtered=False):
+            try:
+                raw_id = (
+                    item.get("id", 0)
+                    if isinstance(item, Mapping)
+                    else getattr(item, "id", 0)
+                )
+                deck_id = int(raw_id or 0)
+            except (TypeError, ValueError):
+                continue
+            if deck_id > 0:
+                normal_ids.add(deck_id)
         for item in deck_manager.all_names_and_ids(include_filtered=True):
             try:
                 if isinstance(item, Mapping):
@@ -337,7 +350,13 @@ class AnkiCollectionReader:
                 continue
             if deck_id <= 0 or not name or deck_id in seen_ids:
                 continue
-            decks.append(DeckEntry(deck_id=deck_id, name=name))
+            decks.append(
+                DeckEntry(
+                    deck_id=deck_id,
+                    name=name,
+                    filtered=deck_id not in normal_ids,
+                )
+            )
             seen_ids.add(deck_id)
 
         current_deck_id: int | None = None
@@ -880,7 +899,7 @@ class AnkiCollectionReader:
         *,
         card_ids_by_note: Mapping[int, Iterable[int]] | None = None,
     ) -> dict[int, tuple[CardStateSnapshot, ...]]:
-        """Read current sibling IDs, flags, and suspension through public APIs.
+        """Read current sibling IDs, flags, suspension, and burial state.
 
         Card scheduling state deliberately stays out of the disposable text
         index. This method is called in a serialized ``QueryOp`` for only the
@@ -888,11 +907,20 @@ class AnkiCollectionReader:
         """
 
         try:
-            from anki.consts import QUEUE_TYPE_SUSPENDED
+            from anki.consts import (
+                QUEUE_TYPE_MANUALLY_BURIED,
+                QUEUE_TYPE_SIBLING_BURIED,
+                QUEUE_TYPE_SUSPENDED,
+            )
 
             suspended_queue = int(QUEUE_TYPE_SUSPENDED)
+            buried_queues = {
+                int(QUEUE_TYPE_MANUALLY_BURIED),
+                int(QUEUE_TYPE_SIBLING_BURIED),
+            }
         except ImportError:  # plain-Python tests use Anki's historical value
             suspended_queue = -1
+            buried_queues = {-3, -2}
 
         output: dict[int, tuple[CardStateSnapshot, ...]] = {}
         seen_notes: set[int] = set()
@@ -944,11 +972,13 @@ class AnkiCollectionReader:
                     if callable(user_flag)
                     else int(getattr(card, "flags", 0)) & 0b111
                 )
+                queue = int(getattr(card, "queue", 0))
                 states.append(
                     (
                         card_id,
                         min(7, max(0, flag)),
-                        int(getattr(card, "queue", 0)) == suspended_queue,
+                        queue == suspended_queue,
+                        queue in buried_queues,
                     )
                 )
             output[note_id] = tuple(states)

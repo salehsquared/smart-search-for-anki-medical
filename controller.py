@@ -1284,7 +1284,7 @@ class AnkiSearchBackend:
             return
 
         def success(
-            states_by_note: dict[int, tuple[tuple[int, int, bool], ...]],
+            states_by_note: dict[int, tuple[tuple[int, int, bool, bool], ...]],
         ) -> None:
             if token != self._profile_token:
                 return
@@ -1438,7 +1438,7 @@ class AnkiSearchBackend:
             return
 
         def deliver(
-            states_by_note: dict[int, tuple[tuple[int, int, bool], ...]],
+            states_by_note: dict[int, tuple[tuple[int, int, bool, bool], ...]],
         ) -> None:
             if self._cancelled(event, token):
                 self._forget_cancellation(event)
@@ -4336,6 +4336,10 @@ class SmartSearchAddonController:
             ui_controller.suspensionRequested.connect(
                 self._set_results_suspended
             )
+            ui_controller.burialRequested.connect(self._set_results_buried)
+            ui_controller.deckChangeRequested.connect(
+                self._change_results_deck
+            )
             ui_controller.tagActionRequested.connect(self._change_result_tags)
             ui_controller.previewPreferenceChanged.connect(
                 self._preview_preference_changed
@@ -4864,6 +4868,39 @@ class SmartSearchAddonController:
         )
         self._run_collection_action(action)
 
+    def _set_results_buried(
+        self,
+        results: Sequence[object],
+        bury: bool,
+    ) -> None:
+        note_ids, card_ids = result_ids(results)
+        action = CollectionAction(
+            ActionKind.BURY if bury else ActionKind.UNBURY,
+            note_ids=note_ids,
+            card_ids=card_ids,
+        )
+        self._run_collection_action(action)
+
+    def _change_results_deck(
+        self,
+        results: Sequence[object],
+        deck_id: int,
+        deck_name: str,
+    ) -> None:
+        note_ids, card_ids = result_ids(results)
+        try:
+            action = CollectionAction(
+                ActionKind.CHANGE_DECK,
+                note_ids=note_ids,
+                card_ids=card_ids,
+                deck_id=deck_id,
+                deck_name=deck_name,
+            )
+        except ValueError as error:
+            self._show_error(str(error))
+            return
+        self._run_collection_action(action)
+
     def _change_result_tags(
         self,
         results: Sequence[object],
@@ -4955,20 +4992,42 @@ class SmartSearchAddonController:
         dialog = self._dialog
         if dialog is not None:
             try:
+                outcome_card_ids = getattr(
+                    outcome,
+                    "changed_card_ids",
+                    None,
+                )
+                changed_card_ids = (
+                    action.card_ids
+                    if outcome_card_ids is None
+                    else outcome_card_ids
+                )
                 if action.kind is ActionKind.FLAG:
                     dialog.apply_card_state_change(
-                        action.card_ids,
+                        changed_card_ids,
                         flag=action.flag,
                     )
                 elif action.kind is ActionKind.SUSPEND:
                     dialog.apply_card_state_change(
-                        action.card_ids,
+                        changed_card_ids,
                         suspended=True,
+                        buried=False,
                     )
                 elif action.kind is ActionKind.UNSUSPEND:
                     dialog.apply_card_state_change(
-                        action.card_ids,
+                        changed_card_ids,
                         suspended=False,
+                    )
+                elif action.kind is ActionKind.BURY:
+                    dialog.apply_card_state_change(
+                        changed_card_ids,
+                        suspended=False,
+                        buried=True,
+                    )
+                elif action.kind is ActionKind.UNBURY:
+                    dialog.apply_card_state_change(
+                        changed_card_ids,
+                        buried=False,
                     )
                 dialog.finish_batch_action(True, message)
             except RuntimeError:
@@ -5687,7 +5746,7 @@ class SmartSearchAddonController:
             self._captured_deleted_ids.clear()
 
     def _on_operation(self, changes: Any, handler: object | None) -> None:
-        # Owned flag/suspension operations update their exact targets in the
+        # Owned card-state operations update their exact targets in the
         # success callback. Keep the visible result set stable until the user
         # explicitly searches again, and avoid a redundant state refresh.
         if bool(getattr(changes, "card", False)) and not isinstance(
@@ -5700,7 +5759,11 @@ class SmartSearchAddonController:
             if context is None or handler.profile_token != context.token:
                 return
             action = handler.action
-            if action.kind in (ActionKind.ADD_TAGS, ActionKind.REMOVE_TAGS):
+            if action.kind in (
+                ActionKind.ADD_TAGS,
+                ActionKind.REMOVE_TAGS,
+                ActionKind.CHANGE_DECK,
+            ):
                 self.schedule_reconcile(
                     note_ids=action.note_ids,
                 )
@@ -6166,7 +6229,7 @@ def _open_results_in_browser(results: Sequence[object]) -> None:
 
 def _with_live_card_states(
     response: SearchResponse,
-    states_by_note: dict[int, tuple[tuple[int, int, bool], ...]],
+    states_by_note: dict[int, tuple[tuple[int, int, bool, bool], ...]],
 ) -> SearchResponse:
     """Return a response whose card IDs and state reflect the live collection."""
 
@@ -6178,7 +6241,7 @@ def _with_live_card_states(
 
 def _results_with_live_card_states(
     visible: Sequence[SearchResult],
-    states_by_note: dict[int, tuple[tuple[int, int, bool], ...]],
+    states_by_note: dict[int, tuple[tuple[int, int, bool, bool], ...]],
 ) -> tuple[SearchResult, ...]:
     results: list[SearchResult] = []
     for result in visible:
@@ -6187,8 +6250,13 @@ def _results_with_live_card_states(
             results.append(result)
             continue
         card_states = tuple(
-            CardState(card_id=card_id, flag=flag, suspended=suspended)
-            for card_id, flag, suspended in snapshots
+            CardState(
+                card_id=card_id,
+                flag=flag,
+                suspended=suspended,
+                buried=buried,
+            )
+            for card_id, flag, suspended, buried in snapshots
         )
         card_ids = tuple(state.card_id for state in card_states)
         results.append(

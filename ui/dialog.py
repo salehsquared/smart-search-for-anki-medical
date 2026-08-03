@@ -26,7 +26,7 @@ from .contracts import (
     SemanticState,
     SemanticStatus,
 )
-from .deck_picker import DeckPickerPopup, DeckScopeButton
+from .deck_picker import DeckDestinationPopup, DeckPickerPopup, DeckScopeButton
 from .deck_query import apply_deck_selection
 from .results import ResultsView
 from .theme import chrome_colors, semantic_icon_pixmap
@@ -109,7 +109,7 @@ Smart and Exact while Semantic is being prepared.</p>
 <li><b>Ctrl+Shift+P</b> — toggle the card preview pane</li>
 <li><b>Shift+Space</b> — check or uncheck the highlighted result for bulk actions</li>
 <li><b>Shift+click</b> — check a range of results</li>
-<li><b>Right-click</b> — open, flag, suspend, or tag the clicked/checked results</li>
+<li><b>Right-click</b> — move, bury, flag, suspend, or tag clicked/checked results</li>
 <li><b>{_PRIMARY_KEY}+Return</b> — open checked results, or all shown if none are checked</li>
 <li><b>{_PRIMARY_KEY}+1 / 2 / 3</b> — Smart, Exact, Semantic mode</li>
 <li><b>{_PRIMARY_KEY}+L</b> — jump back to the search field</li>
@@ -462,6 +462,11 @@ class SearchDialog(QDialog):
     settingsChanged = pyqtSignal(object, int, bool)  # mode, limit, preview?
     flagRequested = pyqtSignal(object, int)  # tuple[SearchResult, ...], 0..7
     suspensionRequested = pyqtSignal(object, bool)  # results, suspend?
+    burialRequested = pyqtSignal(object, bool)  # results, bury?
+    # Anki deck IDs are timestamp-sized 64-bit integers.  A Qt ``int`` signal
+    # is only 32-bit and silently wraps them, so keep the ID as a Python object
+    # until CollectionAction validates it at the collection boundary.
+    deckChangeRequested = pyqtSignal(object, object, str)  # results, deck id/name
     tagActionRequested = pyqtSignal(object, bool)  # results, add?
     deckPickerRequested = pyqtSignal()
     dialogClosed = pyqtSignal()
@@ -492,6 +497,7 @@ class SearchDialog(QDialog):
         self._result_limit = 50
         self._preview_enabled = True
         self._deck_catalog: Optional[DeckCatalog] = None
+        self._pending_deck_move_results: tuple = ()
         self._close_notified = False
         self._batch_busy = False
         self._batch_results_available = False
@@ -535,6 +541,16 @@ class SearchDialog(QDialog):
         self.deck_picker = DeckPickerPopup(self)
         self.deck_picker.applied.connect(self._apply_deck_selection)
         self.deck_picker.retryRequested.connect(self._reload_deck_picker)
+        self.deck_destination_picker = DeckDestinationPopup(self)
+        self.deck_destination_picker.applied.connect(
+            self._apply_deck_destination
+        )
+        self.deck_destination_picker.retryRequested.connect(
+            self._reload_deck_destination_picker
+        )
+        self.deck_destination_picker.finished.connect(
+            lambda _result: self._clear_pending_deck_move()
+        )
 
         self.segmented = SegmentedModeControl(self)
         self.segmented.modeChanged.connect(self._on_mode_changed)
@@ -1051,14 +1067,19 @@ class SearchDialog(QDialog):
 
         self._deck_catalog = catalog
         self.deck_picker.set_catalog(catalog)
+        self.deck_destination_picker.set_catalog(catalog)
 
     def show_deck_picker_error(self, message: str) -> None:
         """Show a local picker error without interrupting normal searching."""
 
-        if self._deck_catalog is None:
-            self.deck_picker.set_error(message)
-        else:
-            self.deck_picker.set_refresh_error(message)
+        pickers = (self.deck_picker, self.deck_destination_picker)
+        for picker in pickers:
+            if not picker.isVisible():
+                continue
+            if self._deck_catalog is None:
+                picker.set_error(message)
+            else:
+                picker.set_refresh_error(message)
 
     def mode(self) -> SearchMode:
         return self.segmented.mode()
@@ -1274,7 +1295,41 @@ class SearchDialog(QDialog):
         values = {states[card_id] for card_id in card_ids}
         return False in values, True in values
 
-    def _build_result_context_menu(self, results) -> QMenu:
+    @staticmethod
+    def _context_burial_actions(results) -> tuple[bool, bool]:
+        """Return whether Bury and Unbury should be offered."""
+
+        card_ids = {
+            int(card_id)
+            for result in results
+            for card_id in result.card_ids
+            if int(card_id) > 0
+        }
+        states = {
+            int(state.card_id): (
+                bool(state.suspended),
+                bool(state.buried),
+            )
+            for result in results
+            for state in result.card_states
+            if int(state.card_id) > 0
+        }
+        if not card_ids:
+            return False, False
+        if not card_ids.issubset(states):
+            return True, True
+        offer_bury = any(
+            not states[card_id][0] and not states[card_id][1]
+            for card_id in card_ids
+        )
+        offer_unbury = any(states[card_id][1] for card_id in card_ids)
+        return offer_bury, offer_unbury
+
+    def _build_result_context_menu(
+        self,
+        results,
+        global_position=None,
+    ) -> QMenu:
         """Build the selection-aware result menu using existing batch intents."""
 
         menu = QMenu(self.results)
@@ -1295,6 +1350,36 @@ class SearchDialog(QDialog):
         open_action.triggered.connect(
             lambda _checked=False: self._open_selected_results()
         )
+        menu.addSeparator()
+
+        move_action = menu.addAction("Change Deck…")
+        move_action.setEnabled(bool(card_ids))
+        frozen_results = tuple(results)
+
+        def open_destination(_checked=False) -> None:
+            self._open_deck_destination_picker(
+                frozen_results,
+                global_position,
+            )
+
+        move_action.triggered.connect(open_destination)
+
+        offer_bury, offer_unbury = self._context_burial_actions(results)
+        if offer_bury:
+            bury_action = menu.addAction("Bury")
+            bury_action.triggered.connect(
+                lambda _checked=False, targets=frozen_results: (
+                    self._emit_burial(True, targets)
+                )
+            )
+        if offer_unbury:
+            unbury_action = menu.addAction("Unbury")
+            unbury_action.triggered.connect(
+                lambda _checked=False, targets=frozen_results: (
+                    self._emit_burial(False, targets)
+                )
+            )
+
         menu.addSeparator()
 
         flag_menu = menu.addMenu("Flag")
@@ -1344,7 +1429,7 @@ class SearchDialog(QDialog):
         results = self._prepare_result_context_selection(row)
         if not results:
             return
-        menu = self._build_result_context_menu(results)
+        menu = self._build_result_context_menu(results, global_position)
         menu.exec(global_position)
         menu.deleteLater()
 
@@ -1378,6 +1463,20 @@ class SearchDialog(QDialog):
         label = "Suspend" if suspend else "Unsuspend"
         if results and cards and self._confirm_large_batch(label, cards, "cards"):
             self.suspensionRequested.emit(results, suspend)
+
+    def _emit_burial(self, bury: bool, results=None) -> None:
+        results = tuple(results) if results is not None else self._selected_results()
+        cards = len(
+            {
+                int(card_id)
+                for result in results
+                for card_id in result.card_ids
+                if int(card_id) > 0
+            }
+        )
+        label = "Bury" if bury else "Unbury"
+        if results and cards and self._confirm_large_batch(label, cards, "cards"):
+            self.burialRequested.emit(results, bury)
 
     def _emit_tag_action(self, add: bool) -> None:
         results = self._selected_results()
@@ -1420,6 +1519,7 @@ class SearchDialog(QDialog):
         *,
         flag: Optional[int] = None,
         suspended: Optional[bool] = None,
+        buried: Optional[bool] = None,
     ) -> None:
         """Refresh wordless row indicators after a successful card operation."""
 
@@ -1427,6 +1527,7 @@ class SearchDialog(QDialog):
             card_ids,
             flag=flag,
             suspended=suspended,
+            buried=buried,
         )
 
     def refresh_card_states(self, results: Sequence) -> bool:
@@ -1968,6 +2069,59 @@ class SearchDialog(QDialog):
         self.deck_picker.set_loading()
         self.deckPickerRequested.emit()
 
+    def _open_deck_destination_picker(
+        self,
+        results: Sequence,
+        global_position=None,
+    ) -> None:
+        """Open a single-target picker for a frozen card selection."""
+
+        frozen = tuple(results)
+        card_ids = {
+            int(card_id)
+            for result in frozen
+            for card_id in result.card_ids
+            if int(card_id) > 0
+        }
+        if not frozen or not card_ids or self._batch_busy:
+            return
+        self._pending_deck_move_results = frozen
+        self.deck_destination_picker.set_target_count(len(card_ids))
+        if self._deck_catalog is None:
+            self.deck_destination_picker.set_loading()
+        else:
+            self.deck_destination_picker.set_catalog(self._deck_catalog)
+        if global_position is None:
+            viewport = self.results.viewport()
+            global_position = viewport.mapToGlobal(viewport.rect().center())
+        self.deck_destination_picker.open_near(global_position)
+        self.deckPickerRequested.emit()
+
+    def _reload_deck_destination_picker(self) -> None:
+        self.deck_destination_picker.set_loading()
+        self.deckPickerRequested.emit()
+
+    def _apply_deck_destination(self, entry) -> None:
+        results = self._pending_deck_move_results
+        card_ids = {
+            int(card_id)
+            for result in results
+            for card_id in result.card_ids
+            if int(card_id) > 0
+        }
+        if not results or not card_ids:
+            return
+        if not self._confirm_large_batch("Move", len(card_ids), "cards"):
+            return
+        self.deckChangeRequested.emit(
+            results,
+            int(entry.deck_id),
+            str(entry.name),
+        )
+
+    def _clear_pending_deck_move(self) -> None:
+        self._pending_deck_move_results = ()
+
     def _apply_deck_selection(
         self,
         selection: object,
@@ -2174,6 +2328,8 @@ class SearchDialog(QDialog):
         self._debounce.stop()
         if self.deck_picker.isVisible():
             self.deck_picker.reject()
+        if self.deck_destination_picker.isVisible():
+            self.deck_destination_picker.reject()
         self.dialogClosed.emit()
 
     def showEvent(self, event) -> None:

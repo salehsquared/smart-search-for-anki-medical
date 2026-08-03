@@ -30,12 +30,12 @@ approximate collection size, and whether Semantic preparation was active.
 
 - Smart Search is an Anki Desktop add-on; it does not run inside AnkiMobile or
   AnkiDroid.
-- v1.0.22 supports Anki Desktop 24.11 through 26.08, including the 25.02,
+- v1.0.23 supports Anki Desktop 24.11 through 26.08, including the 25.02,
   25.07, 25.09, 26.05, and 26.08 release families.
 - The supported-version matrix is integration-tested on macOS with Apple
   silicon.
 - Semantic Search supports macOS 14 or later on Apple-silicon Macs only.
-- Windows, Linux, and Intel Mac integration testing is not part of the v1.0.22
+- Windows, Linux, and Intel Mac integration testing is not part of the v1.0.23
   support claim.
 - Smart and Exact remain available while the separate Semantic index prepares.
 
