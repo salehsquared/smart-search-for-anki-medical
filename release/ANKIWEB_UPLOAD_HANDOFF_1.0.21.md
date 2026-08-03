@@ -11,7 +11,7 @@
 - Human version: `1.0.21`
 - Minimum Anki version: `241100` (24.11)
 - Maximum Anki version: `-260800` (hard maximum at 26.08)
-- SHA-256: `222b450c75ec040143f311c1544be50ad23121f943a742f57d08d56efa41ac48`
+- SHA-256: `9f3640fffaa964cd2fd1b530d6626ba7ce2fe32c1f07c4b572a731b2dc95375a`
 - Size: `58,084,711` bytes
 - Files: `66`
 

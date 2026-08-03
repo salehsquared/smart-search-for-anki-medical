@@ -19,7 +19,7 @@ at the end of this record.
 - File: `Smart_Search_Medical_1.0.21.ankiaddon`
 - Bytes: `58,084,711`
 - Files: `66` unique members
-- SHA-256: `222b450c75ec040143f311c1544be50ad23121f943a742f57d08d56efa41ac48`
+- SHA-256: `9f3640fffaa964cd2fd1b530d6626ba7ce2fe32c1f07c4b572a731b2dc95375a`
 - Independent deterministic rebuild: three byte-identical builds
 - Archive validation: CRC, duplicate-name, path, privacy, runtime-hash,
   executable-mode, and source/manifest parity checks passed
