@@ -4337,6 +4337,9 @@ class SmartSearchAddonController:
                 self._set_results_suspended
             )
             ui_controller.burialRequested.connect(self._set_results_buried)
+            ui_controller.createCopyRequested.connect(
+                self._create_result_copy
+            )
             ui_controller.deckChangeRequested.connect(
                 self._change_results_deck
             )
@@ -4854,6 +4857,114 @@ class SmartSearchAddonController:
             self._show_error(str(error))
             return
         self._run_collection_action(action)
+
+    def _create_result_copy(self, results: Sequence[object]) -> None:
+        """Open Anki's native Add Cards editor with one note prefilled."""
+
+        note_ids, card_ids = result_ids(results)
+        if len(note_ids) != 1 or not card_ids:
+            self._show_error("Select one note to create a copy.")
+            return
+        note_id = note_ids[0]
+        self._with_preview_saved(
+            lambda: self._create_result_copy_after_save(note_id, card_ids),
+            detach_editor=False,
+        )
+
+    def _create_result_copy_after_save(
+        self,
+        note_id: int,
+        card_ids: Sequence[int],
+    ) -> None:
+        """Revalidate the source, then mirror Anki's Create Copy action."""
+
+        collection = getattr(self.mw, "col", None)
+        if collection is None:
+            self._show_error("Open an Anki profile before creating a copy.")
+            return
+
+        try:
+            note = collection.get_note(int(note_id))
+            if note is None:
+                raise LookupError("The source note is no longer available.")
+            source_card = None
+            for card_id in card_ids:
+                try:
+                    candidate = collection.get_card(int(card_id))
+                except Exception as error:
+                    if error.__class__.__name__ in {
+                        "NotFoundError",
+                        "KeyError",
+                    }:
+                        continue
+                    raise
+                if candidate is not None and int(
+                    getattr(candidate, "nid", 0) or 0
+                ) == int(note_id):
+                    source_card = candidate
+                    break
+            if source_card is None:
+                raise LookupError("The source card is no longer available.")
+
+            current_deck_id = getattr(source_card, "current_deck_id", None)
+            if callable(current_deck_id):
+                deck_id = int(current_deck_id())
+            else:
+                original = int(getattr(source_card, "odid", 0) or 0)
+                deck_id = original or int(getattr(source_card, "did", 0) or 0)
+            if deck_id <= 0:
+                raise LookupError("The source deck is no longer available.")
+
+            modern_opener = getattr(
+                self.mw,
+                "_open_new_or_legacy_dialog",
+                None,
+            )
+            if callable(modern_opener):
+                add_cards = modern_opener("AddCards")
+            else:
+                import aqt
+
+                add_cards = aqt.dialogs.open("AddCards", self.mw)
+            if add_cards is None or not callable(
+                getattr(add_cards, "set_note", None)
+            ):
+                raise RuntimeError("Anki could not open Add Cards.")
+            editor = getattr(add_cards, "editor", None)
+            if getattr(editor, "note", None) is not None:
+                sanitized_fields = (
+                    self._copy_fields_without_external_identity(note)
+                )
+                if sanitized_fields is not None:
+                    # Legacy Add Cards copies this detached Note object. This
+                    # mirrors AnkiHub's native Browser integration without
+                    # ever flushing the change back to the source note.
+                    note.fields = list(sanitized_fields)
+            add_cards.set_note(note, deck_id)
+        except Exception as error:
+            if error.__class__.__name__ in {"NotFoundError", "KeyError"}:
+                message = "The source note is no longer available."
+            else:
+                message = str(error) or "The source note is no longer available."
+            self._show_error(f"Could not create a copy: {message}")
+
+    @staticmethod
+    def _copy_fields_without_external_identity(
+        note: Any,
+    ) -> tuple[str, ...] | None:
+        """Avoid cloning AnkiHub's source-note identity into a local copy."""
+
+        try:
+            names = tuple(str(name) for name in note.keys())
+            fields = [str(value) for value in note.fields]
+        except (AttributeError, TypeError):
+            return None
+        changed = False
+        for index, name in enumerate(names):
+            if name.casefold() == "ankihub_id" and index < len(fields):
+                fields[index] = ""
+                changed = True
+        return tuple(fields) if changed else None
 
     def _set_results_suspended(
         self,
