@@ -369,8 +369,33 @@ class SemanticWorkerClientTests(unittest.TestCase):
         process = client._process
         self.assertIsNotNone(process)
 
-        self.assertTrue(client.terminate_now())
-        self.assertTrue(client.terminate_and_wait())
+        reaper_entered = threading.Event()
+        release_reaper = threading.Event()
+        real_reap = client._reap
+
+        def blocked_reap(worker) -> None:
+            reaper_entered.set()
+            self.assertTrue(release_reaper.wait(timeout=5))
+            real_reap(worker)
+
+        with patch.object(client, "_reap", side_effect=blocked_reap):
+            self.assertTrue(client.terminate_now())
+            self.assertTrue(reaper_entered.wait(timeout=5))
+            with client._state_lock:
+                reapers = tuple(client._reaper_threads)
+            self.assertEqual(len(reapers), 1)
+            reaper = reapers[0]
+            real_join = reaper.join
+
+            def release_then_join(timeout=None) -> None:
+                release_reaper.set()
+                real_join(timeout=timeout)
+
+            try:
+                with patch.object(reaper, "join", side_effect=release_then_join):
+                    self.assertTrue(client.terminate_and_wait())
+            finally:
+                release_reaper.set()
 
         assert process is not None
         self.assertIsNotNone(process.poll())
