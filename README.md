@@ -172,15 +172,20 @@ The builder:
 
 ## Architecture and safety
 
-The add-on reads bounded collection snapshots through Anki while Anki owns the
-collection connection. External SQLite work, text processing, spelling
-vocabulary construction, model inference, profile initialization, and cleanup
-run outside Anki's graphical interface thread.
+The add-on reads exact changed notes and compact metadata manifests through
+Anki while Anki owns the collection connection. External SQLite work, text
+processing, spelling vocabulary construction, model inference, profile
+initialization, and cleanup run outside Anki's graphical interface thread.
+
+Reviewing has an explicit performance embargo: card answers schedule no search
+maintenance, and pending edit/sync work resumes only after the reviewer closes
+and the interface has settled. Semantic and typo-matching runtimes load on
+demand instead of at profile startup.
 
 Adds, edits, and deletes normally refresh only affected notes. Operations for
 which Anki does not expose stable affected IDs—such as sync, imports, native
-bulk edits, undo/redo, and structural deck/note-type changes—schedule a
-debounced reconciliation for correctness.
+bulk edits, undo/redo, and structural deck/note-type changes—schedule a compact
+manifest audit, then hydrate only the affected notes in bounded batches.
 
 Indexes are disposable and profile-scoped under `user_files/`. They are not
 added to `collection.anki2` and are not synced by Smart Search.

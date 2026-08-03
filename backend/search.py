@@ -69,10 +69,14 @@ class SearchEngine:
         self._vocabulary_generation = -1
         self._vocabulary_refresh_deferred = False
 
-    def warmup(self) -> dict[str, int]:
+    def warmup(
+        self,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> dict[str, int]:
         """Build fuzzy lookup structures before the first interactive query."""
 
-        vocabulary = self._ensure_vocabulary()
+        vocabulary = self._ensure_vocabulary(cancel_check=cancel_check)
         return {
             "generation": self._vocabulary_generation,
             "terms": len(vocabulary.frequencies),
@@ -179,7 +183,7 @@ class SearchEngine:
         effective_terms = positive_terms
         alias_expansions: list[AliasExpansion] = []
         if normalized_mode in {"smart", "semantic"}:
-            vocabulary = self._ensure_vocabulary()
+            vocabulary = self._ensure_vocabulary(cancel_check=checkpoint)
             checkpoint()
             corrections = self._corrections(
                 parsed,
@@ -421,7 +425,11 @@ class SearchEngine:
             filters_applied=filters_applied,
         )
 
-    def _ensure_vocabulary(self) -> Vocabulary:
+    def _ensure_vocabulary(
+        self,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> Vocabulary:
         generation = self.index.generation
         if self._vocabulary_refresh_deferred and self._vocabulary is not None:
             return self._vocabulary
@@ -429,6 +437,7 @@ class SearchEngine:
             self._vocabulary = Vocabulary(
                 self.index.vocabulary_entries(),
                 self.index.alias_map(),
+                cancel_check=cancel_check,
             )
             self._vocabulary_generation = generation
         return self._vocabulary

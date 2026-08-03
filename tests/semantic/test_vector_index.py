@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import closing
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -64,9 +65,93 @@ class VectorIndexTests(unittest.TestCase):
             known = index.known_hashes(note_ids)
             self.assertEqual(len(known), count)
             self.assertEqual(known[count], f"hash-{count}")
+            self.assertEqual(index.known_hashes([]), {})
 
             index.delete(note_ids)
             self.assertEqual(index.count(), 0)
+
+    def test_hash_and_delete_batches_honor_cancellation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            index = VectorIndex(Path(directory), dimension=2)
+            count = 1_050
+            note_ids = list(range(1, count + 1))
+            index.upsert_many(
+                note_ids,
+                [f"hash-{note_id}" for note_id in note_ids],
+                np.tile(
+                    np.asarray([[1.0, 0.0]], dtype=np.float32),
+                    (count, 1),
+                ),
+            )
+
+            checkpoints = 0
+
+            def cancel_hashes() -> None:
+                nonlocal checkpoints
+                checkpoints += 1
+                if checkpoints == 2:
+                    raise RuntimeError("cancelled hashes")
+
+            with self.assertRaisesRegex(RuntimeError, "cancelled hashes"):
+                index.known_hashes(
+                    note_ids,
+                    cancel_check=cancel_hashes,
+                )
+
+            delete_checkpoints = 0
+
+            def cancel_delete() -> None:
+                nonlocal delete_checkpoints
+                delete_checkpoints += 1
+                if delete_checkpoints == 3:
+                    raise RuntimeError("cancelled delete")
+
+            with self.assertRaisesRegex(RuntimeError, "cancelled delete"):
+                index.delete(note_ids, cancel_check=cancel_delete)
+            self.assertEqual(index.count(), count)
+
+    def test_top_k_is_global_across_scan_chunks_and_ties_use_note_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            index = VectorIndex(Path(directory), dimension=2)
+            count = 4_100
+            note_ids = list(range(count, 0, -1))
+            vectors = np.tile(
+                np.asarray([[1.0, 0.0]], dtype=np.float32),
+                (count, 1),
+            )
+            index.upsert_many(
+                note_ids,
+                [f"hash-{note_id}" for note_id in note_ids],
+                vectors,
+            )
+
+            hits = index.search([1.0, 0.0], limit=3)
+
+            self.assertEqual([hit.note_id for hit in hits], [1, 2, 3])
+
+    def test_large_allowed_id_filter_is_queried_in_portable_chunks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            index = VectorIndex(Path(directory), dimension=2)
+            count = 1_050
+            note_ids = list(range(1, count + 1))
+            vectors = np.tile(
+                np.asarray([[1.0, 0.0]], dtype=np.float32),
+                (count, 1),
+            )
+            index.upsert_many(
+                note_ids,
+                [f"hash-{note_id}" for note_id in note_ids],
+                vectors,
+            )
+
+            allowed = set(range(901, count + 1)) | set(range(20_000, 21_000))
+            hits = index.search(
+                [1.0, 0.0],
+                limit=5,
+                allowed_note_ids=allowed,
+            )
+
+            self.assertEqual([hit.note_id for hit in hits], [901, 902, 903, 904, 905])
 
     def test_large_vector_scan_honors_cancellation_between_chunks(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -126,11 +211,12 @@ class VectorIndexTests(unittest.TestCase):
             root = Path(directory)
             index = VectorIndex(root, dimension=2)
             index.mark_source_generation(7)
-            with sqlite3.connect(index.db_path) as connection:
+            with closing(sqlite3.connect(index.db_path)) as connection:
                 connection.execute(
                     "UPDATE meta SET value = 'not-a-generation' "
                     "WHERE key = 'source_generation'"
                 )
+                connection.commit()
 
             with self.assertRaisesRegex(RuntimeError, "source_generation"):
                 VectorIndex(root, dimension=2)
@@ -175,11 +261,12 @@ class VectorIndexTests(unittest.TestCase):
                     ["hash-10"],
                     np.asarray([[1.0, 0.0]], dtype=np.float32),
                 )
-                with sqlite3.connect(index.db_path) as connection:
+                with closing(sqlite3.connect(index.db_path)) as connection:
                     connection.execute(
                         "UPDATE meta SET value = ? WHERE key = 'next_slot'",
                         (str(invalid),),
                     )
+                    connection.commit()
 
                 with self.assertRaisesRegex(RuntimeError, "next_slot"):
                     VectorIndex(root, dimension=2)
@@ -194,11 +281,12 @@ class VectorIndexTests(unittest.TestCase):
                     ["hash-10"],
                     np.asarray([[1.0, 0.0]], dtype=np.float32),
                 )
-                with sqlite3.connect(index.db_path) as connection:
+                with closing(sqlite3.connect(index.db_path)) as connection:
                     connection.execute(
                         "UPDATE vectors SET slot = ? WHERE note_id = 10",
                         (invalid,),
                     )
+                    connection.commit()
 
                 with self.assertRaisesRegex(RuntimeError, "occupied slots"):
                     VectorIndex(root, dimension=2)
@@ -213,11 +301,12 @@ class VectorIndexTests(unittest.TestCase):
                     ["hash-10"],
                     np.asarray([[1.0, 0.0]], dtype=np.float32),
                 )
-                with sqlite3.connect(index.db_path) as connection:
+                with closing(sqlite3.connect(index.db_path)) as connection:
                     connection.execute(
                         "INSERT INTO free_slots(slot) VALUES (?)",
                         (invalid,),
                     )
+                    connection.commit()
 
                 with self.assertRaisesRegex(RuntimeError, message):
                     VectorIndex(root, dimension=2)

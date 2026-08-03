@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import contextmanager
 import hashlib
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -33,6 +34,7 @@ from .text import (
 
 SCHEMA_VERSION = 2
 _PAYLOAD_VERSION = 1
+_CONTENT_HASH_REVISION = "2"
 _UNSAFE_COLLECTION_NAMES = frozenset(
     {"collection.anki2", "collection.anki21", "collection.media"}
 )
@@ -77,12 +79,18 @@ class NoteChangePlan:
     changed: tuple[tuple[IndexedNote, bytes], ...]
     unchanged: int
     existing_note_ids: frozenset[int]
+    card_scope_updates: tuple[tuple[int, tuple[int, ...], bytes], ...] = ()
 
 
 class SmartSearchIndex:
     """Own an add-on-local FTS database with atomic rebuilds."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> None:
         self._memory = str(path) == ":memory:"
         self.path = Path(path) if not self._memory else Path(":memory:")
         _validate_index_path(self.path, self._memory)
@@ -90,6 +98,9 @@ class SmartSearchIndex:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._connection: sqlite3.Connection | None = None
+        self._open_cancel_check = cancel_check
+        if cancel_check is not None:
+            cancel_check()
         try:
             self._connect()
         except IncompatibleIndex:
@@ -113,15 +124,17 @@ class SmartSearchIndex:
             isolation_level=None,
             check_same_thread=False,
         )
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA busy_timeout=8000")
-        connection.execute("PRAGMA temp_store=MEMORY")
-        if not self._memory:
-            connection.execute("PRAGMA journal_mode=WAL")
-            connection.execute("PRAGMA synchronous=NORMAL")
+        # Own the connection before any PRAGMA. Damaged derived databases may
+        # fail on the first statement, and recovery must not leak that handle.
         self._connection = connection
         try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            connection.execute("PRAGMA busy_timeout=8000")
+            connection.execute("PRAGMA temp_store=MEMORY")
+            if not self._memory:
+                connection.execute("PRAGMA journal_mode=WAL")
+                connection.execute("PRAGMA synchronous=NORMAL")
             self._initialize_schema()
         except IncompatibleIndex:
             # The constructor reads recoverable alias state before archiving
@@ -139,6 +152,8 @@ class SmartSearchIndex:
         return self._connection
 
     def _initialize_schema(self) -> None:
+        if self._open_cancel_check is not None:
+            self._open_cancel_check()
         existing_version = self._existing_schema_version()
         if existing_version is not None and existing_version != SCHEMA_VERSION:
             raise IncompatibleIndex(
@@ -156,7 +171,8 @@ class SmartSearchIndex:
                     note_id INTEGER PRIMARY KEY,
                     title TEXT NOT NULL,
                     payload BLOB NOT NULL,
-                    content_hash BLOB NOT NULL
+                    content_hash BLOB NOT NULL,
+                    card_scope_hash BLOB
                 );
                 CREATE TABLE IF NOT EXISTS vocabulary (
                     term TEXT PRIMARY KEY,
@@ -192,10 +208,70 @@ class SmartSearchIndex:
                     "This Python/Anki build does not provide SQLite FTS5."
                 ) from error
             raise
+        self._ensure_card_scope_hashes()
         with self.transaction():
             self._set_metadata("schema_version", str(SCHEMA_VERSION))
             if self._metadata("generation") is None:
                 self._set_metadata("generation", "0")
+
+    def _ensure_card_scope_hashes(self) -> None:
+        """Backfill stable content/card hashes without rebuilding FTS.
+
+        Version 1 payloads already contain card IDs. Older v2 indexes therefore
+        migrate in place and remain readable by the previous add-on release.
+        The one-time backfill is streamed in small batches and never touches
+        the Anki collection.
+        """
+
+        columns = {
+            str(row[1])
+            for row in self.connection.execute("PRAGMA table_info(notes)")
+        }
+        if "card_scope_hash" not in columns:
+            self.connection.execute(
+                "ALTER TABLE notes ADD COLUMN card_scope_hash BLOB"
+            )
+
+        content_hash_outdated = (
+            self._metadata("content_hash_revision") != _CONTENT_HASH_REVISION
+        )
+        where = "" if content_hash_outdated else " WHERE card_scope_hash IS NULL"
+        cursor = self.connection.execute(
+            "SELECT note_id, payload, content_hash FROM notes" + where
+        )
+        while True:
+            if self._open_cancel_check is not None:
+                self._open_cancel_check()
+            rows = cursor.fetchmany(250)
+            if not rows:
+                break
+            updates: list[tuple[bytes, bytes, int]] = []
+            for row in rows:
+                if self._open_cancel_check is not None:
+                    self._open_cancel_check()
+                payload = _unpack_payload(row["payload"])
+                card_ids = tuple(int(value) for value in payload.get("c", ()))
+                content_hash = (
+                    _content_hash_from_payload(int(row["note_id"]), payload)
+                    if content_hash_outdated
+                    else bytes(row["content_hash"])
+                )
+                updates.append(
+                    (content_hash, _card_scope_hash(card_ids), int(row["note_id"]))
+                )
+            with self.transaction():
+                self.connection.executemany(
+                    """
+                    UPDATE notes
+                    SET content_hash=?, card_scope_hash=?
+                    WHERE note_id=?
+                    """,
+                    updates,
+                )
+        if self._open_cancel_check is not None:
+            self._open_cancel_check()
+        with self.transaction():
+            self._set_metadata("content_hash_revision", _CONTENT_HASH_REVISION)
 
     def _existing_schema_version(self) -> int | None:
         metadata_exists = self.connection.execute(
@@ -308,6 +384,7 @@ class SmartSearchIndex:
         notes: Iterable[IndexedNote],
         *,
         progress: Callable[[int], None] | None = None,
+        cancel_check: Callable[[], None] | None = None,
     ) -> int:
         """Build a complete replacement and atomically swap it into place."""
 
@@ -315,9 +392,18 @@ class SmartSearchIndex:
             with self.transaction():
                 aliases = self._alias_rows()
                 self._clear_note_data()
-                count = self._bulk_insert(notes, progress=progress)
-                self._restore_alias_rows(aliases)
+                count = self._bulk_insert(
+                    notes,
+                    progress=progress,
+                    cancel_check=cancel_check,
+                )
+                self._restore_alias_rows(
+                    aliases,
+                    cancel_check=cancel_check,
+                )
                 self._increment_generation()
+                if cancel_check is not None:
+                    cancel_check()
             return count
 
         aliases = self._alias_rows()
@@ -335,11 +421,22 @@ class SmartSearchIndex:
             temporary = SmartSearchIndex(temporary_path)
             with temporary.transaction():
                 temporary._clear_note_data()
-                count = temporary._bulk_insert(notes, progress=progress)
-                temporary._restore_alias_rows(aliases)
+                count = temporary._bulk_insert(
+                    notes,
+                    progress=progress,
+                    cancel_check=cancel_check,
+                )
+                temporary._restore_alias_rows(
+                    aliases,
+                    cancel_check=cancel_check,
+                )
                 temporary._set_metadata("generation", str(next_generation))
+                if cancel_check is not None:
+                    cancel_check()
             temporary.close()
             temporary = None
+            if cancel_check is not None:
+                cancel_check()
             self.close()
             _remove_sqlite_sidecars(self.path)
             os.replace(temporary_path, self.path)
@@ -379,12 +476,17 @@ class SmartSearchIndex:
         notes: Iterable[IndexedNote],
         *,
         progress: Callable[[int], None] | None = None,
+        cancel_check: Callable[[], None] | None = None,
     ) -> int:
         vocabulary: Counter[str] = Counter()
         field_counts: Counter[str] = Counter()
         field_display_names: dict[str, str] = {}
         count = 0
         for count, note in enumerate(notes, start=1):
+            if cancel_check is not None and (
+                count == 1 or count % 64 == 0
+            ):
+                cancel_check()
             prepared = _prepare_note(note)
             term_counts = self._insert_note(
                 note,
@@ -397,20 +499,38 @@ class SmartSearchIndex:
                 field_display_names.setdefault(normalized_name, display_name)
             if progress and (count == 1 or count % 250 == 0):
                 progress(count)
-        self.connection.executemany(
-            "INSERT INTO vocabulary(term, frequency) VALUES(?, ?)",
-            sorted(vocabulary.items()),
+        if cancel_check is not None:
+            cancel_check()
+        vocabulary_rows = iter(vocabulary.items())
+        while True:
+            batch = tuple(islice(vocabulary_rows, 500))
+            if not batch:
+                break
+            if cancel_check is not None:
+                cancel_check()
+            self.connection.executemany(
+                "INSERT INTO vocabulary(term, frequency) VALUES(?, ?)",
+                batch,
+            )
+        field_rows = (
+            (normalized_name, field_display_names[normalized_name], frequency)
+            for normalized_name, frequency in field_counts.items()
         )
-        self.connection.executemany(
-            """
-            INSERT INTO field_names(normalized_name, display_name, note_count)
-            VALUES(?, ?, ?)
-            """,
-            (
-                (normalized_name, field_display_names[normalized_name], frequency)
-                for normalized_name, frequency in sorted(field_counts.items())
-            ),
-        )
+        while True:
+            batch = tuple(islice(field_rows, 500))
+            if not batch:
+                break
+            if cancel_check is not None:
+                cancel_check()
+            self.connection.executemany(
+                """
+                INSERT INTO field_names(normalized_name, display_name, note_count)
+                VALUES(?, ?, ?)
+                """,
+                batch,
+            )
+        if cancel_check is not None:
+            cancel_check()
         if progress:
             progress(count)
         return count
@@ -431,19 +551,31 @@ class SmartSearchIndex:
 
         with self._lock:
             existing = {
-                int(row["note_id"]): bytes(row["content_hash"])
+                int(row["note_id"]): (
+                    bytes(row["content_hash"]),
+                    bytes(row["card_scope_hash"])
+                    if row["card_scope_hash"] is not None
+                    else b"",
+                )
                 for row in self.connection.execute(
-                    "SELECT note_id, content_hash FROM notes"
+                    "SELECT note_id, content_hash, card_scope_hash FROM notes"
                 )
             }
         changed: list[tuple[IndexedNote, bytes]] = []
+        card_scope_updates: list[tuple[int, tuple[int, ...], bytes]] = []
         unchanged = 0
         for index, note in enumerate(notes, start=1):
             if cancel_check is not None and (index == 1 or index % 128 == 0):
                 cancel_check()
             content_hash = _content_hash(note)
-            if existing.get(note.note_id) == content_hash:
+            existing_hashes = existing.get(note.note_id)
+            if existing_hashes is not None and existing_hashes[0] == content_hash:
                 unchanged += 1
+                scope_hash = _card_scope_hash(note.card_ids)
+                if existing_hashes[1] != scope_hash:
+                    card_scope_updates.append(
+                        (note.note_id, note.card_ids, scope_hash)
+                    )
             else:
                 changed.append((note, content_hash))
         if cancel_check is not None:
@@ -452,6 +584,7 @@ class SmartSearchIndex:
             changed=tuple(changed),
             unchanged=unchanged,
             existing_note_ids=frozenset(existing),
+            card_scope_updates=tuple(card_scope_updates),
         )
 
     def plan_targeted_upsert(
@@ -475,10 +608,15 @@ class SmartSearchIndex:
             if requested_ids:
                 self._prepare_allowed_ids(requested_ids)
                 existing = {
-                    int(row["note_id"]): bytes(row["content_hash"])
+                    int(row["note_id"]): (
+                        bytes(row["content_hash"]),
+                        bytes(row["card_scope_hash"])
+                        if row["card_scope_hash"] is not None
+                        else b"",
+                    )
                     for row in self.connection.execute(
                         """
-                        SELECT n.note_id, n.content_hash
+                        SELECT n.note_id, n.content_hash, n.card_scope_hash
                         FROM notes n
                         JOIN temp.smart_search_allowed a
                           ON a.note_id=n.note_id
@@ -488,13 +626,20 @@ class SmartSearchIndex:
             else:
                 existing = {}
         changed: list[tuple[IndexedNote, bytes]] = []
+        card_scope_updates: list[tuple[int, tuple[int, ...], bytes]] = []
         unchanged = 0
         for index, note in enumerate(snapshots, start=1):
             if cancel_check is not None and (index == 1 or index % 128 == 0):
                 cancel_check()
             content_hash = _content_hash(note)
-            if existing.get(note.note_id) == content_hash:
+            existing_hashes = existing.get(note.note_id)
+            if existing_hashes is not None and existing_hashes[0] == content_hash:
                 unchanged += 1
+                scope_hash = _card_scope_hash(note.card_ids)
+                if existing_hashes[1] != scope_hash:
+                    card_scope_updates.append(
+                        (note.note_id, note.card_ids, scope_hash)
+                    )
             else:
                 changed.append((note, content_hash))
         if cancel_check is not None:
@@ -503,6 +648,7 @@ class SmartSearchIndex:
             changed=tuple(changed),
             unchanged=unchanged,
             existing_note_ids=frozenset(existing),
+            card_scope_updates=tuple(card_scope_updates),
         )
 
     def apply_upsert(
@@ -528,6 +674,31 @@ class SmartSearchIndex:
                 counts = self._insert_note(note, prepared=prepared)
                 self._increase_vocabulary(counts)
                 changed += 1
+            for index, (note_id, card_ids, scope_hash) in enumerate(
+                plan.card_scope_updates,
+                start=1,
+            ):
+                if cancel_check is not None and (index == 1 or index % 32 == 0):
+                    cancel_check()
+                row = self.connection.execute(
+                    "SELECT payload, card_scope_hash FROM notes WHERE note_id=?",
+                    (note_id,),
+                ).fetchone()
+                if row is None or (
+                    row["card_scope_hash"] is not None
+                    and bytes(row["card_scope_hash"]) == scope_hash
+                ):
+                    continue
+                payload = _unpack_payload(row["payload"])
+                payload["c"] = list(card_ids)
+                self.connection.execute(
+                    """
+                    UPDATE notes
+                    SET payload=?, card_scope_hash=?
+                    WHERE note_id=?
+                    """,
+                    (_pack_payload(payload), scope_hash, note_id),
+                )
             if changed:
                 self._increment_generation()
         if cancel_check is not None:
@@ -546,10 +717,22 @@ class SmartSearchIndex:
         changed = self.apply_upsert(plan, cancel_check=cancel_check)
         return changed, plan.unchanged + (len(plan.changed) - changed)
 
-    def delete_notes(self, note_ids: Iterable[int]) -> int:
+    def delete_notes(
+        self,
+        note_ids: Iterable[int],
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> int:
         deleted = 0
         with self.transaction():
-            for note_id in dict.fromkeys(int(value) for value in note_ids):
+            for index, note_id in enumerate(
+                dict.fromkeys(int(value) for value in note_ids),
+                start=1,
+            ):
+                if cancel_check is not None and (
+                    index == 1 or index % 32 == 0
+                ):
+                    cancel_check()
                 exists = self.connection.execute(
                     "SELECT 1 FROM notes WHERE note_id=?", (note_id,)
                 ).fetchone()
@@ -559,6 +742,8 @@ class SmartSearchIndex:
                 deleted += 1
             if deleted:
                 self._increment_generation()
+            if cancel_check is not None:
+                cancel_check()
         return deleted
 
     def _insert_note(
@@ -571,14 +756,17 @@ class SmartSearchIndex:
         data = prepared or _prepare_note(note)
         self.connection.execute(
             """
-            INSERT INTO notes(note_id, title, payload, content_hash)
-            VALUES(?, ?, ?, ?)
+            INSERT INTO notes(
+                note_id, title, payload, content_hash, card_scope_hash
+            )
+            VALUES(?, ?, ?, ?, ?)
             """,
             (
                 note.note_id,
                 data["title"],
                 data["payload"],
                 data["content_hash"],
+                _card_scope_hash(note.card_ids),
             ),
         )
         fts_values = _fts_values(data["title"], data["payload_data"])
@@ -759,14 +947,22 @@ class SmartSearchIndex:
                 )
             ]
 
-    def _restore_alias_rows(self, rows: Sequence[tuple[str, str, float, str]]) -> None:
-        self.connection.executemany(
-            """
+    def _restore_alias_rows(
+        self,
+        rows: Sequence[tuple[str, str, float, str]],
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> None:
+        sql = """
             INSERT OR REPLACE INTO aliases(alias, canonical, weight, source)
             VALUES(?, ?, ?, ?)
-            """,
-            rows,
-        )
+        """
+        for offset in range(0, len(rows), 500):
+            if cancel_check is not None:
+                cancel_check()
+            self.connection.executemany(sql, rows[offset : offset + 500])
+        if cancel_check is not None:
+            cancel_check()
 
     def field_names(self) -> tuple[str, ...]:
         with self._lock:
@@ -951,11 +1147,26 @@ def _content_hash(note: IndexedNote) -> bytes:
         "tags": note.tags,
         "decks": note.decks,
         "note_type": note.note_type,
-        "card_ids": note.card_ids,
-        "modified_seconds": note.modified_seconds,
-        "guid": note.guid,
-        "title": note.title,
     }
+    return _hash_json_payload(content_payload)
+
+
+def _content_hash_from_payload(
+    note_id: int,
+    payload: Mapping[str, Any],
+) -> bytes:
+    return _hash_json_payload(
+        {
+            "note_id": int(note_id),
+            "fields": dict(payload.get("f", {})),
+            "tags": tuple(payload.get("t", ())),
+            "decks": tuple(payload.get("d", ())),
+            "note_type": str(payload.get("n", "")),
+        }
+    )
+
+
+def _hash_json_payload(content_payload: Mapping[str, Any]) -> bytes:
     return hashlib.sha256(
         json.dumps(
             content_payload,
@@ -964,6 +1175,11 @@ def _content_hash(note: IndexedNote) -> bytes:
             separators=(",", ":"),
         ).encode("utf-8")
     ).digest()
+
+
+def _card_scope_hash(card_ids: Iterable[int]) -> bytes:
+    payload = ",".join(str(int(card_id)) for card_id in card_ids).encode("ascii")
+    return hashlib.sha256(payload).digest()
 
 
 def _prepare_note(

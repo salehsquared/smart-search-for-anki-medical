@@ -7,13 +7,68 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 import hashlib
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, NamedTuple
 
 from .backend.models import IndexedNote
 from .ui.contracts import DeckCatalog, DeckEntry
 
 CardStateSnapshot = tuple[int, int, bool]  # card_id, flag, suspended
 CardIdsByNote = dict[int, tuple[int, ...]]
+DEFAULT_HYDRATION_BATCH_SIZE = 250
+
+
+class NoteManifestEntry(NamedTuple):
+    """Compact note identity used to find likely changes before hydration.
+
+    The fixed-size digest is computed while each bounded collection page is in
+    memory; note text is never retained in the manifest. Exact operation hooks
+    remain the primary source of changed IDs, while the digest closes the
+    same-second/same-length edit gap for sync/import/undo safety audits.
+    """
+
+    note_id: int
+    modified_seconds: int
+    usn: int
+    note_type_id: int
+    fields_length: int
+    tags_length: int
+    field_checksum: int
+    fields_digest: bytes
+    tags_digest: bytes
+
+    @property
+    def signature(self) -> tuple[int, int, int, int, int, int, bytes, bytes]:
+        return self[1:]
+
+    # Descriptive aliases for callers that do not use MaintenanceJournal's
+    # persisted field vocabulary.
+    @property
+    def update_sequence(self) -> int:
+        return self.usn
+
+    @property
+    def field_bytes(self) -> int:
+        return self.fields_length
+
+    @property
+    def tag_bytes(self) -> int:
+        return self.tags_length
+
+    @property
+    def checksum(self) -> int:
+        return self.field_checksum
+
+
+class CardManifestEntry(NamedTuple):
+    """Compact stable card scope, excluding all scheduling state."""
+
+    card_id: int
+    note_id: int
+    home_deck_id: int
+
+    @property
+    def signature(self) -> tuple[int, int]:
+        return self[1:]
 
 
 def profile_key(profile_name: str, collection_path: str) -> str:
@@ -326,88 +381,146 @@ class AnkiCollectionReader:
         collection: Any,
         *,
         progress: Callable[[int, int], None] | None = None,
+        cancel_check: Callable[[], None] | None = None,
+        page_size: int = 500,
     ) -> list[IndexedNote]:
+        """Read a full immutable profile snapshot in cancellable pages.
+
+        Full rebuilds are intentionally rare, but they must still yield when
+        Anki enters the reviewer. Keyset paging avoids one uninterruptible
+        ``all()`` call containing every note field or card in the collection.
+        """
+
         from anki.utils import split_fields
 
-        note_rows = collection.db.all(
-            """
-            SELECT id, guid, mid, mod, tags, flds
-            FROM notes
-            ORDER BY id
-            """
-        )
-        card_rows = collection.db.all(
-            """
-            SELECT id, nid, did, odid
-            FROM cards
-            ORDER BY nid, id
-            """
-        )
+        size = max(1, min(5_000, int(page_size)))
+        if cancel_check is not None:
+            cancel_check()
+        count_row = collection.db.first("SELECT count(*) FROM notes")
+        total = int(count_row[0] if count_row is not None else 0)
 
-        model_ids = {int(row[2]) for row in note_rows}
         models: dict[int, tuple[str, tuple[str, ...]]] = {}
-        for model_id in model_ids:
-            model = collection.models.get(model_id)
-            if model:
-                models[model_id] = (
-                    str(model.get("name", "")),
-                    tuple(str(field.get("name", "")) for field in model.get("flds", ())),
-                )
-            else:
-                models[model_id] = ("", ())
-
+        if cancel_check is not None:
+            cancel_check()
         deck_names = {
             int(item.id): str(item.name)
             for item in collection.decks.all_names_and_ids(include_filtered=True)
         }
         cards_by_note: dict[int, list[int]] = defaultdict(list)
         decks_by_note: dict[int, list[str]] = defaultdict(list)
-        for card_id, note_id, deck_id, original_deck_id in card_rows:
-            note_id = int(note_id)
-            cards_by_note[note_id].append(int(card_id))
-            for candidate in (int(deck_id), int(original_deck_id or 0)):
-                name = deck_names.get(candidate)
+        after_card_id = 0
+        while True:
+            if cancel_check is not None:
+                cancel_check()
+            card_rows = collection.db.all(
+                """
+                SELECT id, nid, did, odid
+                FROM cards
+                WHERE id > ?
+                ORDER BY id
+                LIMIT ?
+                """,
+                after_card_id,
+                size,
+            )
+            if not card_rows:
+                break
+            for card_id, note_id, deck_id, original_deck_id in card_rows:
+                note_id = int(note_id)
+                cards_by_note[note_id].append(int(card_id))
+                # While a card is in a filtered deck, ``did`` is temporary and
+                # ``odid`` is its canonical home. Index only that stable identity
+                # so ordinary filtered-deck reviews cannot churn the text index.
+                home_deck_id = _canonical_home_deck_id(
+                    deck_id,
+                    original_deck_id,
+                )
+                name = deck_names.get(home_deck_id)
                 if name and name not in decks_by_note[note_id]:
                     decks_by_note[note_id].append(name)
+            after_card_id = int(card_rows[-1][0])
+            if len(card_rows) < size:
+                break
 
         snapshots: list[IndexedNote] = []
-        total = len(note_rows)
-        for index, (note_id, guid, model_id, modified, tags, fields_blob) in enumerate(
-            note_rows, start=1
-        ):
-            note_type, field_names = models.get(int(model_id), ("", ()))
-            values = list(split_fields(str(fields_blob)))
-            if len(field_names) < len(values):
-                field_names = field_names + tuple(
-                    f"Field {offset + 1}"
-                    for offset in range(len(field_names), len(values))
-                )
-            fields = {
-                field_names[offset]: value
-                for offset, value in enumerate(values)
-                if offset < len(field_names)
-            }
-            snapshots.append(
-                IndexedNote(
-                    note_id=int(note_id),
-                    guid=str(guid),
-                    modified_seconds=int(modified),
-                    fields=fields,
-                    tags=tuple(collection.tags.split(str(tags))),
-                    decks=tuple(decks_by_note.get(int(note_id), ())),
-                    note_type=note_type,
-                    card_ids=tuple(cards_by_note.get(int(note_id), ())),
-                    title=values[0] if values else "",
-                )
+        after_note_id = 0
+        while True:
+            if cancel_check is not None:
+                cancel_check()
+            note_rows = collection.db.all(
+                """
+                SELECT id, guid, mid, mod, tags, flds
+                FROM notes
+                WHERE id > ?
+                ORDER BY id
+                LIMIT ?
+                """,
+                after_note_id,
+                size,
             )
-            if progress and (index == 1 or index % 250 == 0 or index == total):
-                progress(index, total)
+            if not note_rows:
+                break
+            for note_id, guid, model_id, modified, tags, fields_blob in note_rows:
+                index = len(snapshots) + 1
+                if cancel_check is not None and (
+                    index == 1 or index % 128 == 0
+                ):
+                    cancel_check()
+                model_key = int(model_id)
+                if model_key not in models:
+                    model = collection.models.get(model_key)
+                    if model:
+                        models[model_key] = (
+                            str(model.get("name", "")),
+                            tuple(
+                                str(field.get("name", ""))
+                                for field in model.get("flds", ())
+                            ),
+                        )
+                    else:
+                        models[model_key] = ("", ())
+                note_type, field_names = models[model_key]
+                values = list(split_fields(str(fields_blob)))
+                if len(field_names) < len(values):
+                    field_names = field_names + tuple(
+                        f"Field {offset + 1}"
+                        for offset in range(len(field_names), len(values))
+                    )
+                fields = {
+                    field_names[offset]: value
+                    for offset, value in enumerate(values)
+                    if offset < len(field_names)
+                }
+                snapshots.append(
+                    IndexedNote(
+                        note_id=int(note_id),
+                        guid=str(guid),
+                        modified_seconds=int(modified),
+                        fields=fields,
+                        tags=tuple(collection.tags.split(str(tags))),
+                        decks=tuple(decks_by_note.get(int(note_id), ())),
+                        note_type=note_type,
+                        card_ids=tuple(cards_by_note.get(int(note_id), ())),
+                        title=values[0] if values else "",
+                    )
+                )
+                if progress and (
+                    index == 1 or index % 250 == 0 or index == total
+                ):
+                    progress(index, total)
+            after_note_id = int(note_rows[-1][0])
+            if len(note_rows) < size:
+                break
+        if cancel_check is not None:
+            cancel_check()
         return snapshots
 
     def snapshot_note_ids(
         self,
         collection: Any,
         note_ids: Iterable[int],
+        *,
+        cancel_check: Callable[[], None] | None = None,
     ) -> list[IndexedNote]:
         """Snapshot only the requested live notes through Anki's public APIs.
 
@@ -431,6 +544,8 @@ class AnkiCollectionReader:
         deck_names: dict[int, str] = {}
         snapshots: list[IndexedNote] = []
         for note_id in requested_ids:
+            if cancel_check is not None:
+                cancel_check()
             try:
                 note = collection.get_note(note_id)
             except Exception as error:
@@ -456,6 +571,8 @@ class AnkiCollectionReader:
                     raise
 
             for value in raw_card_ids:
+                if cancel_check is not None:
+                    cancel_check()
                 try:
                     card_id = int(value)
                 except (TypeError, ValueError):
@@ -472,28 +589,24 @@ class AnkiCollectionReader:
                 if card is None:
                     continue
 
-                candidate_deck_ids: list[int] = []
-                for attribute in ("did", "odid"):
-                    try:
-                        deck_id = int(getattr(card, attribute, 0) or 0)
-                    except (TypeError, ValueError):
-                        continue
-                    if deck_id > 0 and deck_id not in candidate_deck_ids:
-                        candidate_deck_ids.append(deck_id)
-                if not candidate_deck_ids:
+                home_deck_id = _canonical_home_deck_id(
+                    getattr(card, "did", 0),
+                    getattr(card, "odid", 0),
+                )
+                if home_deck_id <= 0:
                     current_deck_id = getattr(card, "current_deck_id", None)
                     if callable(current_deck_id):
                         try:
-                            deck_id = int(current_deck_id() or 0)
+                            home_deck_id = int(current_deck_id() or 0)
                         except (TypeError, ValueError):
-                            deck_id = 0
-                        if deck_id > 0:
-                            candidate_deck_ids.append(deck_id)
+                            home_deck_id = 0
 
-                for deck_id in candidate_deck_ids:
-                    if deck_id not in deck_names:
-                        deck_names[deck_id] = str(collection.decks.name(deck_id) or "")
-                    deck_name = deck_names[deck_id]
+                if home_deck_id > 0:
+                    if home_deck_id not in deck_names:
+                        deck_names[home_deck_id] = str(
+                            collection.decks.name(home_deck_id) or ""
+                        )
+                    deck_name = deck_names[home_deck_id]
                     if deck_name and deck_name not in decks:
                         decks.append(deck_name)
 
@@ -510,7 +623,187 @@ class AnkiCollectionReader:
                     title=next(iter(fields.values()), ""),
                 )
             )
+        if cancel_check is not None:
+            cancel_check()
         return snapshots
+
+    def snapshot_note_batch(
+        self,
+        collection: Any,
+        note_ids: Iterable[int],
+        *,
+        max_notes: int = DEFAULT_HYDRATION_BATCH_SIZE,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> tuple[IndexedNote, ...]:
+        """Hydrate one explicitly bounded batch of note IDs.
+
+        Controllers can page a manifest and invoke this method in separate
+        serialized ``QueryOp`` calls. Rejecting oversized input avoids an
+        accidental return to whole-profile materialization.
+        """
+
+        limit = int(max_notes)
+        if limit <= 0:
+            raise ValueError("max_notes must be positive")
+        requested = _positive_unique_ids(note_ids)
+        if len(requested) > limit:
+            raise ValueError(
+                f"snapshot batch contains {len(requested)} notes; maximum is {limit}"
+            )
+        return tuple(
+            self.snapshot_note_ids(
+                collection,
+                requested,
+                cancel_check=cancel_check,
+            )
+        )
+
+    @staticmethod
+    def note_manifest_batch(
+        collection: Any,
+        *,
+        after_note_id: int = 0,
+        limit: int = 500,
+    ) -> tuple[NoteManifestEntry, ...]:
+        """Return a compact, keyset-paged note inventory with content digests.
+
+        ``mod``/``usn`` are deliberately supplemented with note type, byte
+        lengths, Anki's sort-field checksum, and fixed-size field/tag digests.
+        Raw text exists only in this bounded collection page and is discarded
+        immediately after hashing.
+        """
+
+        page_size = int(limit)
+        if page_size <= 0:
+            raise ValueError("limit must be positive")
+        page_size = min(page_size, 5_000)
+        cursor = max(0, int(after_note_id))
+        rows = collection.db.all(
+            """
+            SELECT id, mod, usn, mid,
+                   length(CAST(flds AS BLOB)),
+                   length(CAST(tags AS BLOB)),
+                   csum, flds, tags
+            FROM notes
+            WHERE id > ?
+            ORDER BY id
+            LIMIT ?
+            """,
+            cursor,
+            page_size,
+        )
+        return _note_manifest_entries(rows)
+
+    @staticmethod
+    def note_manifest_for_ids(
+        collection: Any,
+        note_ids: Iterable[int],
+    ) -> tuple[NoteManifestEntry, ...]:
+        """Return compact manifests for exact live IDs, preserving input order.
+
+        Missing/deleted notes are omitted. SQL work is chunked below SQLite's
+        common variable limit so a durable queue can be acknowledged after a
+        targeted reconcile without requiring a whole-profile inventory pass.
+        """
+
+        requested = _positive_unique_ids(note_ids)
+        if not requested:
+            return ()
+        by_note_id: dict[int, NoteManifestEntry] = {}
+        for offset in range(0, len(requested), 500):
+            chunk = requested[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = collection.db.all(
+                f"""
+                SELECT id, mod, usn, mid,
+                       length(CAST(flds AS BLOB)),
+                       length(CAST(tags AS BLOB)),
+                       csum, flds, tags
+                FROM notes
+                WHERE id IN ({placeholders})
+                """,
+                *chunk,
+            )
+            for entry in _note_manifest_entries(rows):
+                by_note_id[entry.note_id] = entry
+        return tuple(
+            by_note_id[note_id]
+            for note_id in requested
+            if note_id in by_note_id
+        )
+
+    @staticmethod
+    def card_manifest_batch(
+        collection: Any,
+        *,
+        after_card_id: int = 0,
+        limit: int = 500,
+    ) -> tuple[CardManifestEntry, ...]:
+        """Return keyset-paged card ownership and canonical home decks.
+
+        Queue, due, interval, reps, flags, and filtered-deck placement are
+        intentionally absent, so answering cards cannot dirty this manifest.
+        """
+
+        page_size = int(limit)
+        if page_size <= 0:
+            raise ValueError("limit must be positive")
+        page_size = min(page_size, 5_000)
+        cursor = max(0, int(after_card_id))
+        rows = collection.db.all(
+            """
+            SELECT id, nid,
+                   CASE WHEN odid > 0 THEN odid ELSE did END
+            FROM cards
+            WHERE id > ?
+            ORDER BY id
+            LIMIT ?
+            """,
+            cursor,
+            page_size,
+        )
+        return tuple(
+            CardManifestEntry(
+                card_id=int(card_id),
+                note_id=int(note_id),
+                home_deck_id=max(0, int(home_deck_id or 0)),
+            )
+            for card_id, note_id, home_deck_id in rows
+        )
+
+    @staticmethod
+    def card_manifest_for_note_ids(
+        collection: Any,
+        note_ids: Iterable[int],
+    ) -> tuple[CardManifestEntry, ...]:
+        """Return stable card scope for an exact bounded note set."""
+
+        requested = _positive_unique_ids(note_ids)
+        if not requested:
+            return ()
+        output: list[CardManifestEntry] = []
+        for offset in range(0, len(requested), 500):
+            chunk = requested[offset : offset + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            rows = collection.db.all(
+                f"""
+                SELECT id, nid,
+                       CASE WHEN odid > 0 THEN odid ELSE did END
+                FROM cards
+                WHERE nid IN ({placeholders})
+                ORDER BY id
+                """,
+                *chunk,
+            )
+            output.extend(
+                CardManifestEntry(
+                    card_id=int(card_id),
+                    note_id=int(note_id),
+                    home_deck_id=max(0, int(home_deck_id or 0)),
+                )
+                for card_id, note_id, home_deck_id in rows
+            )
+        return tuple(sorted(output, key=lambda row: row.card_id))
 
     @staticmethod
     def note_ids_for_query(collection: Any, query: str) -> set[int]:
@@ -673,6 +966,69 @@ class AnkiCollectionReader:
                     names.append(name)
                     seen.add(folded)
         return tuple(names)
+
+
+def _canonical_home_deck_id(deck_id: object, original_deck_id: object) -> int:
+    """Return a card's stable home deck, not its temporary filtered deck."""
+
+    try:
+        original = int(original_deck_id or 0)
+    except (TypeError, ValueError):
+        original = 0
+    if original > 0:
+        return original
+    try:
+        current = int(deck_id or 0)
+    except (TypeError, ValueError):
+        return 0
+    return current if current > 0 else 0
+
+
+def _positive_unique_ids(values: Iterable[int]) -> tuple[int, ...]:
+    output: list[int] = []
+    seen: set[int] = set()
+    for value in values:
+        try:
+            candidate = int(value)
+        except (TypeError, ValueError):
+            continue
+        if candidate > 0 and candidate not in seen:
+            output.append(candidate)
+            seen.add(candidate)
+    return tuple(output)
+
+
+def _note_manifest_entries(rows: Iterable[Sequence[object]]) -> tuple[NoteManifestEntry, ...]:
+    return tuple(
+        NoteManifestEntry(
+            note_id=int(note_id),
+            modified_seconds=int(modified or 0),
+            usn=int(update_sequence or 0),
+            note_type_id=int(note_type_id or 0),
+            fields_length=int(field_bytes or 0),
+            tags_length=int(tag_bytes or 0),
+            field_checksum=int(checksum or 0),
+            fields_digest=hashlib.blake2b(
+                str(fields or "").encode("utf-8"),
+                digest_size=16,
+            ).digest(),
+            tags_digest=hashlib.blake2b(
+                str(tags or "").encode("utf-8"),
+                digest_size=16,
+            ).digest(),
+        )
+        for (
+            note_id,
+            modified,
+            update_sequence,
+            note_type_id,
+            field_bytes,
+            tag_bytes,
+            checksum,
+            fields,
+            tags,
+        ) in rows
+    )
 
 
 def open_note_ids_in_browser(

@@ -1,5 +1,57 @@
 # Changelog
 
+## [1.0.20] — 2026-08-02
+
+### Performance
+
+- Reviewing now triggers no Smart Search indexing, collection reads, fuzzy
+  refreshes, preview refreshes, or Semantic work.
+- Semantic inference loads only when requested, is released after use, and is
+  canceled cooperatively when reviewing begins. Full vector maintenance now
+  processes bounded batches instead of retaining all note text or candidates.
+- Typo-matching vocabulary preparation is deferred until Smart Search opens.
+
+### Index freshness and reliability
+
+- Added a crash-safe profile-local maintenance journal so exact edits resume
+  after restart and are hydrated in bounded batches outside review mode.
+- Added compact note, card/home-deck, deck, and note-type manifests for
+  targeted sync/import/undo audits without rebuilding every note.
+- First-run manifest seeding now verifies fixed-size field/tag digests,
+  note-type schema, card scope, and canonical decks against the existing index,
+  closing aggregate-fingerprint collision and same-second edit gaps.
+- Filtered-deck reviews use each card's stable home deck and no longer make the
+  search index appear stale.
+- Damaged maintenance state is preserved and recreated without disabling a
+  healthy Smart/Exact index.
+
+### Safety
+
+- Journal writes and all substantial index/model work run off Anki's GUI
+  thread. Background work yields between batches and resumes only after the
+  reviewer has settled.
+- Full setup and manual rebuilds now read the collection in cancellable keyset
+  pages and write vocabulary/manifests in bounded transactions, so entering
+  review can interrupt even first-run work without publishing partial data.
+- Transient collection/index errors retain their exact durable work and retry
+  with bounded backoff; failed journal writes retain a conservative full-audit
+  fallback instead of losing an edit hint.
+- Semantic cancellation now reaches inference and prevents a canceled batch
+  from publishing vectors or being mislabeled as index damage.
+- Successive exact edits now coalesce across durable batches with the newest
+  live/deleted state winning. Semantic publication also rechecks the durable
+  queue at commit time and falls back to one full refresh when exact coverage
+  cannot be proven.
+- Failed journal writes register their conservative audit fallback before the
+  semantic gate reopens, and older maintenance completions cannot erase newer
+  fallback intent.
+- Lexical rebuilds detach Semantic before mutation and publish their new
+  generation immediately after the atomic swap, preventing stale vectors from
+  appearing ready if later cleanup is canceled.
+- Semantic repair/install, hash scans, removals, and lexical deletions are
+  cooperatively cancellable; vector deltas and durable acknowledgements are
+  processed in bounded transactions.
+
 ## [1.0.19] — 2026-08-01
 
 ### Added

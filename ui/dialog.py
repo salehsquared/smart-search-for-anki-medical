@@ -355,6 +355,8 @@ class _SettingsDialog(QDialog):
             self.semantic_action.setText("Preparing Semantic Search…")
             self.semantic_action.setEnabled(False)
             self.semantic_action.setVisible(True)
+        elif state is SemanticState.RESTART_REQUIRED:
+            self.semantic_action.setVisible(False)
         else:
             self.semantic_action.setVisible(False)
 
@@ -1758,6 +1760,13 @@ class SearchDialog(QDialog):
                 "keep searching while it finishes."
             )
             action = ""
+        elif status.state is SemanticState.RESTART_REQUIRED:
+            heading = "Restart Anki to Finish Semantic Search"
+            detail = (
+                "The repair is installed. Restart Anki once to load it; "
+                "Smart and Exact remain available."
+            )
+            action = ""
         elif status.state is SemanticState.NOT_INSTALLED:
             heading = "Set Up Semantic Search"
             detail = (
@@ -1853,6 +1862,8 @@ class SearchDialog(QDialog):
                 progress_text
                 + ". Smart and Exact search remain available."
             )
+        elif status.state is SemanticState.RESTART_REQUIRED:
+            self.semantic_action.setVisible(False)
         else:
             self.semantic_action.setVisible(False)
         if self._batch_busy:

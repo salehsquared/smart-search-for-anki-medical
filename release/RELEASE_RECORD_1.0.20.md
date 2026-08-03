@@ -1,0 +1,84 @@
+# Release record — v1.0.20 candidate
+
+## Status and identity
+
+- Status: validated local candidate; not uploaded to AnkiWeb or GitHub
+- Prepared: 2026-08-02
+- Version: `1.0.20`
+- Supported Anki range: 24.11 through 26.08
+- AnkiWeb point-version range: minimum `241100`, hard maximum `-260800`
+- Semantic Search: macOS 14 or later on Apple silicon
+
+The currently public release remains v1.0.19 under AnkiWeb item `677438639`.
+
+## Frozen candidate artifact
+
+- File: `Smart_Search_Medical_1.0.20.ankiaddon`
+- Bytes: `52,275,482`
+- Files: `68`
+- SHA-256: `dca1f90d52b3a4d64c86108547a7178108a6a55ddcb1d435a976fa9f8415cf8f`
+
+Two independent builds were byte-identical. Archive CRC validation passed;
+paths are unique; the only `user_files` member is its README. The archive has
+no profile data, collection or search database, vector data, expanded runtime,
+model download, cache, log, temporary file, test, development script, source
+control metadata, or Python bytecode.
+
+## Test and compatibility evidence
+
+The complete suite passed with `431/431` tests and zero skips in every target
+environment below. The native updater probe passed in each environment.
+
+| Anki | Python / Qt | Full suite | Native updater probe |
+| --- | --- | ---: | ---: |
+| 24.11 | Python 3.9 / Qt 6.6 | 431 pass | Pass |
+| 25.02.7 | Python 3.9 / Qt 6.6 | 431 pass | Pass |
+| 25.07.5 | Python 3.13 / Qt 6.9 | 431 pass | Pass |
+| 25.09.4 | Python 3.13 / Qt 6.9 | 431 pass | Pass |
+| 25.09.5 | Python 3.13 / Qt 6.9 | 431 pass | Pass |
+| 26.05 | Python 3.13 / Qt 6.11 | 431 pass | Pass |
+| 26.08 | Python 3.13 / Qt 6.11 | 431 pass | Pass |
+
+The local Python 3.11 suite also passed with `431` tests and `78` intentional
+no-Qt skips, including a run that treats `ResourceWarning` as an error. Python
+3.9 compilation passed, and the focused compatibility suite passed `176/176`.
+
+## Official installer validation
+
+Anki's real `AddonManager` implementation completed a disposable clean install
+and a v1.0.19-to-v1.0.20 upgrade in all seven environments. Each upgrade
+preserved customized configuration, a persistence sentinel, and a synthetic
+`search.sqlite3` file. Every final installation contained only numeric folder
+`677438639`, with no named duplicate and no stranded `files_backup` directory.
+
+No real Anki profile or installed add-on was changed during these tests.
+
+## Performance and lifecycle evidence
+
+- Reviewer answers invoke no indexing, collection reads, fuzzy refresh, UI
+  refresh, or Semantic maintenance.
+- Review mode pauses and cooperatively cancels background maintenance; work
+  resumes only after the reviewer has settled.
+- Exact note edits enter a crash-safe profile-local journal and are applied in
+  bounded targeted batches rather than rebuilding the collection.
+- Sync, import, undo/redo, and unknown bulk changes use compact manifests to
+  identify affected notes and cards before scheduling repairs.
+- Filtered-deck scheduling changes are normalized to each card's home deck.
+- Semantic inference is lazy, cooperatively cancellable, and released after
+  use. Vector scans, deltas, and rebuild reads are bounded.
+- Lexical and Semantic generations, durable work, and vector counts are checked
+  before a Semantic index can be published as ready.
+
+## Remaining operational limits
+
+The first full Smart/Exact setup and first full Semantic preparation still
+require CPU, disk I/O, and memory, but they run outside review mode and are
+bounded/cancellable. Native inference libraries may retain allocator caches
+until Anki exits even after the active Semantic model is released.
+
+## Publication boundary
+
+This file records local candidate evidence only. Before calling v1.0.20 public,
+the existing AnkiWeb item must be updated and the supported boundary downloads,
+served archive hash, numeric-code clean install, numeric-code upgrade, rendered
+listing, and public GitHub artifact must be verified against this exact archive.

@@ -100,6 +100,7 @@ class SemanticState(enum.Enum):
     NOT_INSTALLED = "not_installed"
     MODEL_READY = "model_ready"
     INDEXING = "indexing"
+    RESTART_REQUIRED = "restart_required"
     READY = "ready"
     ERROR = "error"
 
@@ -313,6 +314,8 @@ class SemanticStatus:
             if self.progress is None:
                 return "Preparing semantic search"
             return f"Preparing semantic search {round(self.progress * 100)}%"
+        if self.state is SemanticState.RESTART_REQUIRED:
+            return "Restart Anki to finish Semantic search"
         if self.state is SemanticState.READY:
             suffix = f" · {self.indexed_notes:,} notes" if self.indexed_notes else ""
             return f"Semantic search ready{suffix}"

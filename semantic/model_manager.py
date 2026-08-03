@@ -29,13 +29,14 @@ from .manifest import (
 
 
 ProgressCallback = Callable[[str, int, int], None]
+CancelCheck = Callable[[], None]
 MACOS_ARM64_PY39_RUNTIME_TAG = "darwin-arm64-py39"
 MACOS_ARM64_RUNTIME_TAG = "darwin-arm64-py313"
 MACOS_ARM64_RUNTIME_TAGS = frozenset(
     (MACOS_ARM64_PY39_RUNTIME_TAG, MACOS_ARM64_RUNTIME_TAG)
 )
 MINIMUM_SEMANTIC_MACOS_MAJOR = 14
-DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.19"
+DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.20"
 
 
 class ModelInstallError(RuntimeError):
@@ -50,10 +51,16 @@ class UnsupportedRuntimeError(RuntimeInstallError):
     pass
 
 
-def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
+def sha256_file(
+    path: Path,
+    chunk_size: int = 1024 * 1024,
+    cancel_check: CancelCheck | None = None,
+) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         while chunk := handle.read(chunk_size):
+            if cancel_check is not None:
+                cancel_check()
             digest.update(chunk)
     return digest.hexdigest()
 
@@ -119,16 +126,31 @@ class ModelManager:
             return False
         return payload.get("runtime_tag") == runtime_tag()
 
-    def install_model(self, progress: ProgressCallback | None = None) -> None:
+    def install_model(
+        self,
+        progress: ProgressCallback | None = None,
+        *,
+        cancel_check: CancelCheck | None = None,
+    ) -> None:
         self.model_dir.mkdir(parents=True, exist_ok=True)
         for artifact in MODEL_ARTIFACTS:
+            if cancel_check is not None:
+                cancel_check()
             destination = self.model_dir / artifact.local_path
-            if destination.is_file() and sha256_file(destination) == artifact.sha256:
+            if destination.is_file() and sha256_file(
+                destination,
+                cancel_check=cancel_check,
+            ) == artifact.sha256:
                 if progress:
                     progress(artifact.local_path, artifact.size, artifact.size)
                 continue
             destination.parent.mkdir(parents=True, exist_ok=True)
-            self._download(artifact, destination, progress)
+            self._download(
+                artifact,
+                destination,
+                progress,
+                cancel_check=cancel_check,
+            )
 
         manifest = {
             "name": MODEL_NAME,
@@ -147,7 +169,14 @@ class ModelManager:
         }
         self._atomic_write_json(self.model_dir / "install.json", manifest)
 
-    def install_runtime(self, *, force: bool = False) -> None:
+    def install_runtime(
+        self,
+        *,
+        force: bool = False,
+        cancel_check: CancelCheck | None = None,
+    ) -> None:
+        if cancel_check is not None:
+            cancel_check()
         tag = runtime_tag()
         wheels = RUNTIME_WHEELS.get(tag)
         if wheels is None or not _runtime_platform_supported(tag):
@@ -171,11 +200,16 @@ class ModelManager:
         staging.mkdir(parents=True, exist_ok=True)
         try:
             for wheel in wheels:
+                if cancel_check is not None:
+                    cancel_check()
                 source = wheel_dir / wheel.filename
-                if sha256_file(source) != wheel.sha256:
+                if sha256_file(source, cancel_check=cancel_check) != wheel.sha256:
                     raise RuntimeInstallError(f"Checksum failed for {wheel.filename}")
                 with zipfile.ZipFile(source) as archive:
-                    archive.extractall(staging)
+                    for member in archive.infolist():
+                        if cancel_check is not None:
+                            cancel_check()
+                        archive.extract(member, staging)
             self._atomic_write_json(
                 staging / ".smart-search-runtime.json",
                 {
@@ -205,9 +239,13 @@ class ModelManager:
         progress: ProgressCallback | None = None,
         *,
         repair_runtime: bool = False,
+        cancel_check: CancelCheck | None = None,
     ) -> None:
-        self.install_runtime(force=repair_runtime)
-        self.install_model(progress)
+        self.install_runtime(
+            force=repair_runtime,
+            cancel_check=cancel_check,
+        )
+        self.install_model(progress, cancel_check=cancel_check)
 
     def describe(self) -> dict[str, Any]:
         return {
@@ -224,6 +262,8 @@ class ModelManager:
         artifact: Artifact,
         destination: Path,
         progress: ProgressCallback | None,
+        *,
+        cancel_check: CancelCheck | None = None,
     ) -> None:
         part = destination.with_suffix(destination.suffix + ".part")
         resumed_at = part.stat().st_size if part.exists() else 0
@@ -245,6 +285,8 @@ class ModelManager:
             completed = resumed_at
             with response, part.open(mode) as handle:
                 while chunk := response.read(1024 * 1024):
+                    if cancel_check is not None:
+                        cancel_check()
                     handle.write(chunk)
                     completed += len(chunk)
                     if progress:
@@ -262,7 +304,7 @@ class ModelManager:
                 f"Wrong size for {artifact.local_path}: "
                 f"expected {artifact.size}, got {actual_size}"
             )
-        actual_hash = sha256_file(part)
+        actual_hash = sha256_file(part, cancel_check=cancel_check)
         if actual_hash != artifact.sha256:
             part.unlink(missing_ok=True)
             raise ModelInstallError(

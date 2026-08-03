@@ -1,4 +1,4 @@
-# AnkiWeb listing record — v1.0.19
+# AnkiWeb listing record — live v1.0.19 / prepared v1.0.20
 
 ## Live listing
 
@@ -7,6 +7,17 @@
 - **AnkiWeb code:** `677438639`
 - **Public URL:** https://ankiweb.net/shared/info/677438639
 - **Supported Anki versions:** 24.11 through hard maximum 26.08
+
+## Prepared candidate
+
+- **Version:** v1.0.20
+- **Status:** validated locally; not uploaded
+- **Canonical description:** `ANKIWEB_DESCRIPTION_1.0.20.md`
+- **Upload handoff:** `ANKIWEB_UPLOAD_HANDOFF_1.0.20.md`
+- **Evidence:** `RELEASE_RECORD_1.0.20.md`
+
+The listing content below records the currently public v1.0.19 page. Use the
+versioned v1.0.20 description when publishing the prepared candidate.
 
 ## Listing fields
 
@@ -186,6 +197,9 @@ contain no real collection data.
 - v1.0.19 updated that existing item on 2026-08-02 with
   `min_point_version=241100` and hard `max_point_version=-260800`; no second
   listing or branch was created.
+- v1.0.20 is a validated local candidate and has not been uploaded. Its exact
+  artifact and compatibility evidence are recorded in
+  `release/RELEASE_RECORD_1.0.20.md`.
 - `release/ANKIWEB_DESCRIPTION_1.0.19.md` is the canonical description source.
 - The rendered listing, server metadata, served-archive comparison, and
   numeric-code QA are recorded in `release/RELEASE_RECORD_1.0.19.md`.

@@ -71,6 +71,48 @@ class IndexSearchTests(unittest.TestCase):
         self.assertGreater(stats.vocabulary_size, 10)
         self.assertGreater(stats.database_bytes, 0)
 
+    def test_cancelled_note_delete_rolls_back_the_batch(self) -> None:
+        checkpoints = 0
+
+        def cancel() -> None:
+            nonlocal checkpoints
+            checkpoints += 1
+            if checkpoints == 2:
+                raise RuntimeError("review started")
+
+        with self.assertRaisesRegex(RuntimeError, "review started"):
+            self.index.delete_notes(
+                (1001, 1002),
+                cancel_check=cancel,
+            )
+
+        self.assertEqual(self.index.count_documents((1001, 1002)), 2)
+
+    def test_cancelled_rebuild_tail_keeps_the_published_index(self) -> None:
+        vocabulary = " ".join(f"term{number:04d}" for number in range(1_200))
+        replacement = IndexedNote(
+            9001,
+            {"Text": vocabulary},
+            card_ids=(9901,),
+            guid="large-rebuild",
+        )
+        checkpoints = 0
+
+        def cancel() -> None:
+            nonlocal checkpoints
+            checkpoints += 1
+            # One note checkpoint, the post-note checkpoint, and one complete
+            # 500-term write occur before cancellation. The temporary rebuild
+            # must still roll back without replacing the published index.
+            if checkpoints == 4:
+                raise RuntimeError("review started")
+
+        with self.assertRaisesRegex(RuntimeError, "review started"):
+            self.index.rebuild([replacement], cancel_check=cancel)
+
+        self.assertEqual(self.index.note_ids(), (1001, 1002, 1003))
+        self.assertEqual(self.index.count_documents((9001,)), 0)
+
     def test_compact_schema_has_no_per_note_term_or_field_tables(self) -> None:
         tables = {
             row[0]
@@ -85,6 +127,45 @@ class IndexSearchTests(unittest.TestCase):
             "SELECT typeof(payload) FROM notes LIMIT 1"
         ).fetchone()[0]
         self.assertEqual(payload_type, "blob")
+
+    def test_existing_v2_index_backfills_scope_and_content_hashes_in_place(self) -> None:
+        legacy_path = Path(self.temporary.name) / "legacy-v2.sqlite3"
+        note = sample_notes()[0]
+        prepared = index_module._prepare_note(note)
+        connection = sqlite3.connect(legacy_path)
+        connection.executescript(
+            """
+            CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO metadata(key, value) VALUES('schema_version', '2');
+            INSERT INTO metadata(key, value) VALUES('generation', '9');
+            CREATE TABLE notes (
+                note_id INTEGER PRIMARY KEY,
+                title TEXT NOT NULL,
+                payload BLOB NOT NULL,
+                content_hash BLOB NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO notes(note_id, title, payload, content_hash) VALUES(?, ?, ?, ?)",
+            (note.note_id, prepared["title"], prepared["payload"], b"legacy"),
+        )
+        connection.commit()
+        connection.close()
+
+        migrated = SmartSearchIndex(legacy_path)
+        try:
+            columns = {
+                row[1]
+                for row in migrated.connection.execute("PRAGMA table_info(notes)")
+            }
+            self.assertIn("card_scope_hash", columns)
+            plan = migrated.plan_targeted_upsert([note])
+            self.assertEqual(plan.changed, ())
+            self.assertEqual(plan.card_scope_updates, ())
+            self.assertEqual(migrated.generation, 9)
+        finally:
+            migrated.close()
 
     def test_incremental_field_allowlist_uses_aggregate_counts(self) -> None:
         self.index.upsert_notes(
@@ -386,6 +467,54 @@ class IndexSearchTests(unittest.TestCase):
         self.assertEqual([note.note_id for note, _hash in plan.changed], [1001])
         self.assertEqual(self.index.apply_upsert(plan), 1)
         self.assertIn("updated", self.engine.search("updated").results[0].snippet)
+
+    def test_card_scope_and_timestamps_do_not_rebuild_lexical_content(self) -> None:
+        original_generation = self.index.generation
+        original = sample_notes()[0]
+        rescheduled = IndexedNote(
+            original.note_id,
+            original.fields,
+            tags=original.tags,
+            decks=original.decks,
+            note_type=original.note_type,
+            card_ids=(2001, 2999),
+            modified_seconds=999_999,
+            guid="replacement-guid",
+            title=original.title,
+        )
+
+        plan = self.index.plan_targeted_upsert([rescheduled])
+
+        self.assertEqual(plan.changed, ())
+        self.assertEqual(len(plan.card_scope_updates), 1)
+        self.assertEqual(self.index.apply_upsert(plan), 0)
+        self.assertEqual(self.index.generation, original_generation)
+        self.assertEqual(
+            self.index.get_documents((original.note_id,))[original.note_id].card_ids,
+            (2001, 2999),
+        )
+
+    def test_searchable_deck_change_still_reindexes_the_note(self) -> None:
+        original = sample_notes()[0]
+        moved = IndexedNote(
+            original.note_id,
+            original.fields,
+            tags=original.tags,
+            decks=("AnKing::Moved",),
+            note_type=original.note_type,
+            card_ids=original.card_ids,
+            modified_seconds=original.modified_seconds,
+            guid=original.guid,
+        )
+
+        plan = self.index.plan_targeted_upsert([moved])
+
+        self.assertEqual([note.note_id for note, _digest in plan.changed], [1001])
+        self.assertEqual(self.index.apply_upsert(plan), 1)
+        self.assertEqual(
+            self.index.get_documents((1001,))[1001].decks,
+            ("AnKing::Moved",),
+        )
 
     def test_fts_search_honors_cancellation_before_sql_work(self) -> None:
         class Cancelled(RuntimeError):

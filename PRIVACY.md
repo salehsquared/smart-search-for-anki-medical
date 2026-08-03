@@ -1,7 +1,7 @@
 # Privacy
 
 **Effective date:** July 29, 2026
-**Applies to:** Smart Search for Anki — Medical 1.0.19
+**Applies to:** Smart Search for Anki — Medical 1.0.20
 
 ## Plain-language summary
 
@@ -49,6 +49,11 @@ Smart Search stores add-on-owned files below its Anki `user_files` directory:
 - `profiles/<profile-key>/search.sqlite3` contains a disposable full-text
   index. It includes note text, raw field values, field names, note/card
   identifiers, tags, deck names, note-type names, and derived vocabulary.
+- `profiles/<profile-key>/maintenance.sqlite3` contains the durable queue and
+  compact integrity manifests used to keep that index current. It stores
+  note/card IDs, queue reasons and sequence numbers, fixed-size field/tag
+  digests and lengths, note modification metadata, canonical home-deck IDs,
+  and deck/note-type signatures. It does not store raw field or tag text.
 - `profiles/<profile-key>/vectors/` contains note identifiers, content hashes,
   and embeddings derived from note text. It does not contain a second plain
   text copy of the notes, but embeddings are still derived from private
