@@ -1,17 +1,19 @@
-# Release record — v1.0.20 candidate
+# Release record — v1.0.20
 
 ## Status and identity
 
-- Status: validated local candidate; not uploaded to AnkiWeb or GitHub
+- Status: public beta
 - Prepared: 2026-08-02
+- Published: 2026-08-03 UTC (2026-08-02 America/Phoenix)
 - Version: `1.0.20`
 - Supported Anki range: 24.11 through 26.08
 - AnkiWeb point-version range: minimum `241100`, hard maximum `-260800`
 - Semantic Search: macOS 14 or later on Apple silicon
 
-The currently public release remains v1.0.19 under AnkiWeb item `677438639`.
+v1.0.20 is live under the existing AnkiWeb item `677438639` and GitHub tag
+`v1.0.20`. No duplicate listing or compatibility branch was created.
 
-## Frozen candidate artifact
+## Frozen public artifact
 
 - File: `Smart_Search_Medical_1.0.20.ankiaddon`
 - Bytes: `52,275,482`
@@ -76,9 +78,52 @@ require CPU, disk I/O, and memory, but they run outside review mode and are
 bounded/cancellable. Native inference libraries may retain allocator caches
 until Anki exits even after the active Semantic model is released.
 
-## Publication boundary
+## GitHub distribution
 
-This file records local candidate evidence only. Before calling v1.0.20 public,
-the existing AnkiWeb item must be updated and the supported boundary downloads,
-served archive hash, numeric-code clean install, numeric-code upgrade, rendered
-listing, and public GitHub artifact must be verified against this exact archive.
+- Pull request: https://github.com/salehsquared/smart-search-for-anki-medical/pull/4
+- Merge commit: `625b3506765ea074eea8542ac616f3cc5011f10e`
+- Annotated tag: `v1.0.20`
+- Public prerelease:
+  https://github.com/salehsquared/smart-search-for-anki-medical/releases/tag/v1.0.20
+- Final `main` validation:
+  https://github.com/salehsquared/smart-search-for-anki-medical/actions/runs/30777389049
+
+The public release contains the `.ankiaddon` and checksum sidecar. Fresh
+unauthenticated downloads were byte-identical to the frozen local files, and
+both tagged screenshot URLs used by AnkiWeb returned HTTP 200.
+
+## AnkiWeb distribution
+
+- Add-on code: `677438639`
+- Public listing: https://ankiweb.net/shared/info/677438639
+- Server range: `minpt=241100`, hard `maxpt=-260800`, `bidx=0`
+- Listing date: 2026-08-03 UTC (2026-08-02 America/Phoenix)
+
+The existing item and its single branch were updated in place. The rendered
+listing shows the v1.0.20 review-isolation description, both publication
+images, the expected support contact, and Anki 24.11–26.08.
+
+Requests at point versions `241100` and `260800` each downloaded exactly
+`52,275,482` bytes with SHA-256
+`dca1f90d52b3a4d64c86108547a7178108a6a55ddcb1d435a976fa9f8415cf8f`.
+Both archives were byte-identical to the frozen artifact and reported
+`human_version=1.0.20`. Requests immediately outside the range, at `241099`
+and `260900`, returned HTTP 404.
+
+## Public numeric-code installation
+
+Anki's official `download_and_install_addon()` path completed clean installs
+from code `677438639` in disposable Anki 24.11 and 26.08 environments. Both
+returned `InstallOk`; all 68 archive members matched the frozen artifact
+byte-for-byte, and the final directory contained only numeric folder
+`677438639` plus Anki-managed `meta.json`.
+
+A disposable Anki 26.05 environment then installed v1.0.19, added customized
+configuration, a `user_files` persistence sentinel, and a synthetic
+`search.sqlite3` database with a probe row before updating through the same
+live numeric-code path. The update returned `InstallOk`, installed v1.0.20,
+preserved the exact configuration values and both files byte-for-byte, and left
+no named duplicate or `files_backup` directory.
+
+No real Anki profile or installed add-on was opened or modified by these
+public-route tests. First-window support monitoring remains ongoing.

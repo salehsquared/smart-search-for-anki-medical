@@ -91,12 +91,11 @@ not part of the public package.
 - [x] Ensure the public repository does not contain generated profile indexes or
       expanded runtimes.
 
-## 6. Distribution-path validation — refreshed for v1.0.20 candidate
+## 6. Distribution-path validation — v1.0.20 public release
 
-Local v1.0.20 candidate evidence is in `RELEASE_RECORD_1.0.20.md`. The current
-public server evidence remains in `RELEASE_RECORD_1.0.19.md`, and the original
-listing evidence remains in `RELEASE_RECORD_1.0.15.md`. v1.0.20 has not yet
-crossed the public upload boundary.
+Complete local and public v1.0.20 evidence is in
+`RELEASE_RECORD_1.0.20.md`. Historical v1.0.19 and original-listing evidence
+remain in their versioned release records.
 
 ### A. Isolated clean-install matrix
 
@@ -105,8 +104,8 @@ crossed the public upload boundary.
 - [x] Create a synthetic profile containing only generated, non-personal notes.
 - [x] Install the release through the same route users will use: first as a
       local `.ankiaddon`, then from the public AnkiWeb numeric code. The frozen
-      v1.0.20 archive passed disposable local installs on all seven supported
-      versions; numeric-code installation remains a post-upload gate.
+      archive passed disposable local installs on all seven supported versions;
+      the live code passed clean installs through Anki 24.11 and 26.08.
 - [x] Restart Anki and confirm no duplicate add-on folders or startup warnings.
 - [x] Verify Smart and Exact before enabling Semantic.
 - [ ] Enable Semantic explicitly; verify download progress, digest validation,
@@ -158,19 +157,16 @@ fully usable.
 
 ### D. AnkiWeb staging and final publication
 
-The checked items below describe the currently public v1.0.19 release. They do
-not constitute publication evidence for v1.0.20.
-
 - [x] Update the existing public item in place with the frozen archive; no
       duplicate staging item or compatibility branch was created.
 - [x] Record the assigned numeric add-on code: `677438639`.
-- [x] Repeat clean install and v1.0.15 → v1.0.19 upgrade tests using that
+- [x] Repeat clean install and v1.0.19 → v1.0.20 upgrade tests using that
       numeric code through Anki's official updater.
 - [x] Verify the listing, images, links, formatting, version range, and support
       contact in AnkiWeb's rendered page.
 - [x] Obtain explicit approval for the public listing.
 - [x] Make the listing public.
-- [x] Install once more from the public code and compare all 67 installed
+- [x] Install once more from the public code and compare all 68 installed
       archive members byte-for-byte with the approved release candidate.
 - [ ] Monitor the support channel for installation or compatibility failures
       during the first release window.
@@ -182,7 +178,6 @@ release record and are not part of the public beta support claim.
 
 ## 7. Release record
 
-The v1.0.20 candidate artifact, hashes, compatibility evidence, and publication
-boundary are recorded in `RELEASE_RECORD_1.0.20.md`. Live v1.0.19 publication
-metadata remains in `RELEASE_RECORD_1.0.19.md`; the original AnkiWeb publication
-is documented in `RELEASE_RECORD_1.0.15.md`.
+The v1.0.20 artifact, hashes, compatibility evidence, GitHub release, live
+AnkiWeb boundaries, and numeric-code installation evidence are recorded in
+`RELEASE_RECORD_1.0.20.md`. Earlier releases remain in their versioned records.

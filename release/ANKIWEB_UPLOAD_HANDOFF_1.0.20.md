@@ -2,10 +2,9 @@
 
 ## Publication status
 
-- This candidate is validated locally but has **not** been uploaded.
-- The currently public release is v1.0.19.
-- Update existing item `677438639`; do not create a second listing or an
-  overlapping compatibility branch.
+- v1.0.20 was published on 2026-08-03 UTC (2026-08-02 America/Phoenix).
+- Existing item `677438639` and its single compatibility branch were updated
+  in place; no second listing or overlapping branch was created.
 
 ## Upload fields
 
@@ -19,16 +18,16 @@
 
 Use `release/ANKIWEB_DESCRIPTION_1.0.20.md` as the description source.
 
-## Required post-upload checks
+## Completed post-upload checks
 
-1. Confirm AnkiWeb reports human version `1.0.20`, minimum `241100`, and hard
+1. Confirmed AnkiWeb reports human version `1.0.20`, minimum `241100`, and hard
    maximum `-260800`.
-2. Confirm downloads for point versions `241100` and `260800` are byte-identical
-   to the frozen archive; versions immediately outside the range must fail.
-3. Install code `677438639` into disposable Anki 24.11 and 26.08 profiles.
-4. Upgrade a preserved v1.0.19 installation through Anki's native updater and
-   confirm configuration and all `user_files` data survive.
-5. Confirm startup, Smart/Exact search, About update UI, review-mode isolation,
-   and the expected Semantic setup state.
-6. Record the final server metadata, hashes, and installation evidence in
-   `release/RELEASE_RECORD_1.0.20.md` before declaring the release public.
+2. Boundary downloads at `241100` and `260800` were byte-identical to the
+   frozen archive; `241099` and `260900` were rejected.
+3. Code `677438639` completed disposable clean installs through Anki 24.11 and
+   26.08's official installer implementations.
+4. A live v1.0.19-to-v1.0.20 update through Anki 26.05 preserved customized
+   configuration, a sentinel, and a synthetic local index.
+5. The public listing, images, support link, GitHub assets, update metadata,
+   and expected Semantic compatibility text were verified.
+6. Final evidence is recorded in `release/RELEASE_RECORD_1.0.20.md`.
