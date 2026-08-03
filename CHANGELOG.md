@@ -11,6 +11,13 @@
   the rendered card; Space reveals the answer instead of scrolling the card.
 - Shift+Space now checks or unchecks a result for bulk actions, preserving a
   dedicated keyboard selection shortcut without conflicting with card reveal.
+- Semantic search now keeps its isolated model worker warm for a normal search
+  session instead of cold-starting it again after only two seconds. Closing
+  search or entering review mode still releases it immediately. Superseded
+  typing discards the stale result without tearing down the loaded model.
+- Flag, suspension, and tag actions now update the visible rows in place and
+  never rerun or replace the result list automatically. Press Enter or search
+  again to reapply filters such as `is:suspended`, `flag:`, or `tag:`.
 
 ## [1.0.21] — 2026-08-02
 

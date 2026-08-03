@@ -66,6 +66,7 @@ from .widgets import (  # Qt shim + custom widgets
 )
 
 DEBOUNCE_MS = 150
+SEMANTIC_DEBOUNCE_MIN_MS = 450
 BATCH_CONFIRM_THRESHOLD = 100
 
 _PAGE_HELP = 0
@@ -483,6 +484,7 @@ class SearchDialog(QDialog):
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(DEBOUNCE_MS)
         self._debounce.timeout.connect(self._emit_search)
+        self._debounce_ms = DEBOUNCE_MS
 
         self._last_response: Optional[SearchResponse] = None
         self._last_status: Optional[IndexStatus] = None
@@ -1063,6 +1065,10 @@ class SearchDialog(QDialog):
 
     def set_mode(self, mode: SearchMode) -> None:
         self.segmented.setMode(mode)
+
+    def set_debounce_interval(self, milliseconds: int) -> None:
+        self._debounce_ms = max(1, int(milliseconds))
+        self._debounce.setInterval(self._debounce_ms)
 
     def focus_query(self) -> None:
         self.search.setFocus(Qt.FocusReason.ShortcutFocusReason)
@@ -1940,7 +1946,12 @@ class SearchDialog(QDialog):
                 self.show_semantic_needed(semantic)
                 return
         self.show_debouncing()
-        self._debounce.start()
+        delay = self._debounce_ms
+        if self.mode() is SearchMode.SEMANTIC:
+            # Avoid repeatedly cold-starting and cancelling the isolated
+            # model while a user pauses briefly in the middle of a term.
+            delay = max(delay, SEMANTIC_DEBOUNCE_MIN_MS)
+        self._debounce.start(delay)
 
     def _open_deck_picker(self) -> None:
         """Open immediately, then refresh choices asynchronously."""

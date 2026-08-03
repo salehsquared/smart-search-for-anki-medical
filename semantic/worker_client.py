@@ -403,6 +403,7 @@ class SemanticWorkerClient:
         taskpolicy = Path("/usr/sbin/taskpolicy")
         if taskpolicy.is_file():
             clamp = "background" if background else "utility"
+            disk_policy = "throttle" if background else "default"
             # This is a second line of defense behind single-sequence
             # inference and bounded IPC. If a native dependency regresses,
             # macOS ends the disposable helper instead of allowing it to grow
@@ -412,7 +413,7 @@ class SemanticWorkerClient:
                 "-m",
                 str(_WORKER_MEMORY_LIMIT_MIB),
                 "-d",
-                "throttle",
+                disk_policy,
                 "-c",
                 clamp,
             ]

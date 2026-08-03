@@ -369,11 +369,20 @@ class SemanticService:
             if cancel_check is not None:
                 cancel_check()
             with _shared_runtime_access(cancel_check):
+                # Once an interactive inference has started, let the bounded
+                # one-query request finish even if newer typing supersedes it.
+                # The caller discards that stale response at the checkpoint
+                # below, while the already-loaded helper remains reusable for
+                # the replacement query. Hard lifecycle exits (review,
+                # profile close, or dialog close) still terminate the helper
+                # directly through ``abort_now()``.
                 vector = self._worker.embed(
                     [query],
                     background=False,
-                    cancel_check=cancel_check,
+                    cancel_check=None,
                 )[0]
+            if cancel_check is not None:
+                cancel_check()
             self.manager.activate_vector_runtime()
             hits = self.index.search(
                 vector,

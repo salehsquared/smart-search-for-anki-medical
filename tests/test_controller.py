@@ -1422,6 +1422,10 @@ class ControllerTests(unittest.TestCase):
         backend._set_index_state(
             contracts.IndexState.READY, detail="1 note indexed."
         )
+        semantic_activity = []
+        backend.set_semantic_activity_callback(
+            semantic_activity.append
+        )
 
         semantic_responses = []
         errors = []
@@ -1465,6 +1469,7 @@ class ControllerTests(unittest.TestCase):
         )
         self.assertEqual(semantic_responses, [])
         self.assertEqual(errors, [])
+        self.assertEqual(semantic_activity, [True, False])
 
     def test_review_entry_aborts_semantic_search_silently_and_next_search_works(
         self,
@@ -3054,9 +3059,18 @@ class ControllerTests(unittest.TestCase):
         addon._dialog = dialog
         addon._ui_controller = ui_controller
         addon._previewer = preview
+        semantic_timer = _FakeTimer()
+        semantic_timer.start(90_000)
+        addon._semantic_unload_timer = semantic_timer
+        semantic_aborts = []
+        addon.backend.abort_semantic_runtime_now = (
+            lambda: semantic_aborts.append(True) or True
+        )
 
         addon._close_dialog()
         self.assertEqual(events, ["pause", "save"])
+        self.assertEqual(semantic_timer.stop_count, 1)
+        self.assertEqual(semantic_aborts, [True])
         self.assertIs(addon._dialog, dialog)
         self.assertIs(addon._previewer, preview)
 
@@ -3633,6 +3647,98 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(reconciles, [])
         self.assertEqual(timer.starts, [])
 
+    def test_semantic_worker_lease_is_warm_in_search_and_reaped_on_close(
+        self,
+    ) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        dialog = types.SimpleNamespace(isVisible=lambda: True)
+        timer = _FakeTimer()
+        card_timer = _FakeTimer()
+        aborts: list[bool] = []
+        closed: list[bool] = []
+        addon._dialog = dialog
+        addon._semantic_unload_timer = timer
+        addon._card_state_refresh_timer = card_timer
+        addon.backend.abort_semantic_runtime_now = (
+            lambda: aborts.append(True) or True
+        )
+        addon._close_previewer = lambda: closed.append(True)
+        addon._mark_managed_dialog_closed = lambda: closed.append(True)
+
+        addon._arm_semantic_idle_unload()
+        self.assertEqual(timer.starts, [90_000])
+        self.assertEqual(aborts, [])
+
+        addon._semantic_activity_changed(True)
+        self.assertEqual(timer.stop_count, 1)
+        addon._semantic_activity_changed(False)
+        self.assertEqual(timer.starts, [90_000, 90_000])
+
+        addon._search_dialog_closed(dialog)
+        self.assertEqual(timer.stop_count, 2)
+        self.assertEqual(card_timer.stop_count, 1)
+        self.assertEqual(aborts, [True])
+        self.assertEqual(closed, [True, True])
+
+    def test_unexpected_dialog_deletion_releases_semantic_worker(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        dialog = object()
+        disposed = []
+        ui_controller = types.SimpleNamespace(
+            dispose=lambda: disposed.append(True)
+        )
+        timer = _FakeTimer()
+        aborts = []
+        previews = []
+        closed = []
+        addon._dialog = dialog
+        addon._ui_controller = ui_controller
+        addon._semantic_unload_timer = timer
+        addon.backend.abort_semantic_runtime_now = (
+            lambda: aborts.append(True) or True
+        )
+        addon._close_previewer = lambda **kwargs: previews.append(kwargs)
+        addon._mark_managed_dialog_closed = lambda: closed.append(True)
+
+        addon._search_dialog_destroyed(dialog, ui_controller)
+
+        self.assertEqual(timer.stop_count, 1)
+        self.assertEqual(aborts, [True])
+        self.assertEqual(previews, [{"save": False}])
+        self.assertEqual(closed, [True])
+        self.assertEqual(disposed, [True])
+        self.assertIsNone(addon._dialog)
+        self.assertIsNone(addon._ui_controller)
+
+    def test_semantic_worker_lease_never_arms_during_review(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        timer = _FakeTimer()
+        aborts: list[bool] = []
+        addon._dialog = types.SimpleNamespace(isVisible=lambda: True)
+        addon._semantic_unload_timer = timer
+        addon._review_active = True
+        addon.backend.abort_semantic_runtime_now = (
+            lambda: aborts.append(True) or True
+        )
+
+        addon._arm_semantic_idle_unload()
+
+        self.assertEqual(timer.starts, [])
+        self.assertEqual(timer.stop_count, 1)
+        self.assertEqual(aborts, [True])
+
     def test_reviewer_entry_is_idempotent_and_stops_each_background_timer_once(
         self,
     ) -> None:
@@ -3739,59 +3845,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(addon._pending_reconcile_note_ids, set())
         self.assertEqual(addon._reconcile_retry_count, 0)
 
-    def test_collection_actions_requery_only_filters_they_can_invalidate(
-        self,
-    ) -> None:
-        flag = controller.CollectionAction(
-            controller.ActionKind.FLAG,
-            card_ids=(1,),
-            flag=4,
-        )
-        suspend = controller.CollectionAction(
-            controller.ActionKind.SUSPEND,
-            card_ids=(1,),
-        )
-        remove_tag = controller.CollectionAction(
-            controller.ActionKind.REMOVE_TAGS,
-            note_ids=(1,),
-            tags="review",
-        )
-
-        self.assertTrue(
-            controller._collection_action_requires_requery(flag, "flag:1")
-        )
-        self.assertTrue(
-            controller._collection_action_requires_requery(
-                suspend,
-                "-is:suspended bupropion",
-            )
-        )
-        self.assertTrue(
-            controller._collection_action_requires_requery(
-                suspend,
-                "(is:suspended OR deck:AnKing)",
-            )
-        )
-        self.assertTrue(
-            controller._collection_action_requires_requery(
-                remove_tag,
-                "tag:review heart",
-            )
-        )
-        self.assertFalse(
-            controller._collection_action_requires_requery(
-                flag,
-                "deck:AnKing bupropion",
-            )
-        )
-        self.assertFalse(
-            controller._collection_action_requires_requery(
-                suspend,
-                "flag:1 bupropion",
-            )
-        )
-
-    def test_filtered_action_success_reruns_captured_search_generation(self) -> None:
+    def test_filtered_action_success_updates_in_place_without_requery(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),
             bundle_root=self.bundle,
@@ -3809,10 +3863,10 @@ class ControllerTests(unittest.TestCase):
             ),
             finish_batch_action=lambda ok, text: finished.append((ok, text)),
         )
-        captured = object()
+        captures: list[bool] = []
         reruns: list[object] = []
         addon._ui_controller = types.SimpleNamespace(
-            capture_search_generation=lambda: captured,
+            capture_search_generation=lambda: captures.append(True),
             rerun_search_if_current=lambda token: reruns.append(token) or True,
         )
         addon._show_message = lambda _message: None
@@ -3841,9 +3895,10 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(busy, [(True, "Applying change…")])
         self.assertEqual(applied, [((101,), False)])
         self.assertEqual(len(finished), 1)
-        self.assertEqual(reruns, [captured])
+        self.assertEqual(captures, [])
+        self.assertEqual(reruns, [])
 
-    def test_tag_filtered_action_uses_the_same_generation_safe_rerun(self) -> None:
+    def test_tag_filtered_action_also_keeps_current_results_stable(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),
             bundle_root=self.bundle,
@@ -3855,10 +3910,10 @@ class ControllerTests(unittest.TestCase):
             set_batch_action_busy=lambda _value, _text: None,
             finish_batch_action=lambda _ok, _text: None,
         )
-        captured = object()
+        captures: list[bool] = []
         reruns: list[object] = []
         addon._ui_controller = types.SimpleNamespace(
-            capture_search_generation=lambda: captured,
+            capture_search_generation=lambda: captures.append(True),
             rerun_search_if_current=lambda token: reruns.append(token) or True,
         )
         addon._show_message = lambda _message: None
@@ -3884,7 +3939,8 @@ class ControllerTests(unittest.TestCase):
         with patch.object(controller, "start_collection_action", side_effect=complete):
             addon._run_collection_action(action)
 
-        self.assertEqual(reruns, [captured])
+        self.assertEqual(captures, [])
+        self.assertEqual(reruns, [])
 
     def test_owned_card_operation_does_not_schedule_racing_state_refresh(
         self,
