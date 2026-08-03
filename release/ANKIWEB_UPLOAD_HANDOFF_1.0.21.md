@@ -1,9 +1,10 @@
-# AnkiWeb upload handoff — v1.0.21
+# Completed AnkiWeb upload handoff — v1.0.21
 
-## Publication target
+## Publication status
 
-- Update existing item `677438639` and its single compatibility branch in
-  place. Do not create a second listing or overlapping branch.
+- v1.0.21 was published on 2026-08-03 UTC (2026-08-02 America/Phoenix).
+- Existing item `677438639` and its single compatibility branch were updated
+  in place; no second listing or overlapping branch was created.
 
 ## Upload fields
 
@@ -17,16 +18,16 @@
 
 Use `release/ANKIWEB_DESCRIPTION_1.0.21.md` as the exact description source.
 
-## Required post-upload checks
+## Completed post-upload checks
 
-1. Confirm AnkiWeb reports human version `1.0.21`, minimum `241100`, and hard
+1. Confirmed AnkiWeb reports human version `1.0.21`, minimum `241100`, and hard
    maximum `-260800`.
-2. Confirm boundary downloads at `241100` and `260800` are byte-identical to
-   the frozen archive; reject `241099`, `260801`, and `260900`.
-3. Complete disposable clean installs from code `677438639` through the oldest
-   and newest supported Anki versions.
-4. Complete a live v1.0.20-to-v1.0.21 update through Anki 26.05 and verify that
-   customized configuration, `user_files`, and synthetic indexes survive.
-5. Verify the rendered listing, tagged images, support links, GitHub assets,
-   update metadata, and Semantic compatibility text.
-6. Record the final evidence in `release/RELEASE_RECORD_1.0.21.md`.
+2. Boundary downloads at `241100` and `260800` were byte-identical to the
+   frozen archive; `241099`, `260801`, and `260900` were rejected.
+3. Code `677438639` completed disposable clean installs through Anki 24.11 and
+   26.08's official installer implementations.
+4. A live v1.0.20-to-v1.0.21 update through Anki 26.05 preserved customized
+   configuration, a sentinel, and a synthetic local index.
+5. The public listing, images, support link, GitHub assets, update metadata,
+   and expected Semantic compatibility text were verified.
+6. Final evidence is recorded in `release/RELEASE_RECORD_1.0.21.md`.
