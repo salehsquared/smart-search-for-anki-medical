@@ -44,7 +44,7 @@ try:
         Qt,
     )
     from PyQt6.QtCore import QPoint, QPointF
-    from PyQt6.QtGui import QWheelEvent
+    from PyQt6.QtGui import QKeyEvent, QWheelEvent
     from PyQt6.QtTest import QTest
 except ImportError as error:  # PyQt6 is intentionally not a package dependency.
     IMPORT_ERROR = error
@@ -1857,6 +1857,112 @@ class OffscreenSmokeTests(unittest.TestCase):
 
         dialog.set_preview_active(False)
         self.assertFalse(dialog.preview_button.isChecked())
+        dialog.deleteLater()
+
+    def test_result_keys_reveal_preview_and_shift_space_checks(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        result = SearchResult(note_id=7, card_ids=(71,), title="Seven")
+        dialog.show_response(
+            SearchResponse(
+                request_id=14,
+                query="seven",
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        requested: list[tuple[SearchResult, str]] = []
+        dialog.previewSideRequested.connect(
+            lambda current, side: requested.append((current, side))
+        )
+        dialog.results.setFocus()
+        self.app.processEvents()
+
+        QTest.keyClick(dialog.results, Qt.Key.Key_Space)
+        QTest.keyClick(dialog.results, Qt.Key.Key_Right)
+        QTest.keyClick(dialog.results, Qt.Key.Key_Left)
+        self.app.processEvents()
+
+        self.assertEqual(
+            requested,
+            [
+                (result, "answer"),
+                (result, "answer"),
+                (result, "question"),
+            ],
+        )
+        self.assertEqual(dialog.results.checked_results(), ())
+
+        repeated = QKeyEvent(
+            QEvent.Type.KeyPress,
+            Qt.Key.Key_Space,
+            Qt.KeyboardModifier.NoModifier,
+            " ",
+            True,
+            2,
+        )
+        QApplication.sendEvent(dialog.results, repeated)
+        self.assertEqual(len(requested), 3)
+
+        QTest.keyClick(
+            dialog.results,
+            Qt.Key.Key_Space,
+            Qt.KeyboardModifier.ShiftModifier,
+        )
+        self.app.processEvents()
+        self.assertEqual(dialog.results.checked_results(), (result,))
+        self.assertEqual(len(requested), 3)
+
+        # Selection keeps one stable shortcut even when Card preview is off.
+        dialog.set_preview_enabled(False)
+        QTest.keyClick(dialog.results, Qt.Key.Key_Space)
+        self.app.processEvents()
+        self.assertEqual(dialog.results.checked_results(), (result,))
+        self.assertEqual(len(requested), 3)
+        dialog.deleteLater()
+
+    def test_preview_side_keys_do_not_capture_search_or_no_card_results(
+        self,
+    ) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        no_card = SearchResult(note_id=8, card_ids=(), title="Missing")
+        dialog.show_response(
+            SearchResponse(
+                request_id=15,
+                query="missing",
+                results=(no_card,),
+                total_results=1,
+            ),
+            (),
+        )
+        requested: list[tuple[SearchResult, str]] = []
+        dialog.previewSideRequested.connect(
+            lambda current, side: requested.append((current, side))
+        )
+
+        dialog.results.setFocus()
+        QTest.keyClick(dialog.results, Qt.Key.Key_Space)
+        self.app.processEvents()
+        self.assertEqual(requested, [])
+        self.assertEqual(dialog.results.checked_results(), ())
+
+        QTest.keyClick(
+            dialog.results,
+            Qt.Key.Key_Space,
+            Qt.KeyboardModifier.ControlModifier,
+        )
+        self.assertEqual(dialog.results.checked_results(), ())
+
+        dialog.search.setText("ab")
+        dialog.search.setCursorPosition(1)
+        dialog.search.setFocus()
+        QTest.keyClick(dialog.search, Qt.Key.Key_Space)
+        QTest.keyClick(dialog.search, Qt.Key.Key_Left)
+        self.app.processEvents()
+        self.assertEqual(dialog.search.text(), "a b")
+        self.assertEqual(requested, [])
         dialog.deleteLater()
 
     def test_inline_preview_pane_opens_edits_expands_and_closes_in_place(

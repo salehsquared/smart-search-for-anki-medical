@@ -2952,6 +2952,81 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(addon._preview_auto_suppressed)
         self.assertIsNone(addon._previewer)
 
+    def test_preview_side_request_opens_card_mode_and_is_safely_scoped(
+        self,
+    ) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        result = contracts.SearchResult(
+            note_id=7,
+            card_ids=(71,),
+            title="Seven",
+        )
+        pane_mode = ["edit"]
+        addon._dialog = types.SimpleNamespace(
+            preview_pane=types.SimpleNamespace(
+                mode=lambda: pane_mode[0],
+                isVisible=lambda: True,
+            ),
+            set_preview_active=lambda _active: None,
+        )
+        addon._ui_controller = types.SimpleNamespace(
+            settings=types.SimpleNamespace(preview_enabled=True)
+        )
+        events: list[object] = []
+
+        class _Preview:
+            def is_targeting(self, current) -> bool:
+                return current == result
+
+            def set_mode(self, mode: str) -> None:
+                events.append(("mode", mode))
+                pane_mode[0] = mode
+
+            def show_side(self, side: str) -> None:
+                events.append(("side", side))
+
+        preview = _Preview()
+
+        def open_preview(current) -> None:
+            events.append(("open", current))
+            addon._previewer = preview
+
+        with patch.object(addon, "_toggle_previewer", side_effect=open_preview):
+            addon._show_preview_side(result, "answer")
+
+        self.assertEqual(
+            events,
+            [
+                ("open", result),
+                ("mode", "card"),
+                ("side", "answer"),
+            ],
+        )
+
+        # Once the correct card is already open, another reveal bypasses the
+        # reopen path; the inspector's idempotent side setter decides whether
+        # any render is needed.
+        events.clear()
+        addon._previewer = preview
+        with patch.object(addon, "_toggle_previewer") as toggle:
+            addon._show_preview_side(result, "answer")
+        toggle.assert_not_called()
+        self.assertEqual(events, [("side", "answer")])
+
+        events.clear()
+        addon._ui_controller.settings.preview_enabled = False
+        addon._show_preview_side(result, "question")
+        addon._ui_controller.settings.preview_enabled = True
+        addon._show_preview_side(
+            contracts.SearchResult(note_id=8, card_ids=()),
+            "answer",
+        )
+        self.assertEqual(events, [])
+
     def test_dialog_close_waits_for_inline_editor_save_before_cleanup(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),

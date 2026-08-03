@@ -4311,6 +4311,7 @@ class SmartSearchAddonController:
             dialog.previewResultChanged.connect(
                 self._preview_selection_changed
             )
+            dialog.previewSideRequested.connect(self._show_preview_side)
             dialog.set_managed_close_handler(
                 self._close_dialog_with_callback
             )
@@ -4596,6 +4597,41 @@ class SmartSearchAddonController:
         except Exception as error:
             self._close_previewer()
             self._show_error(f"Could not update the inline preview: {error}")
+
+    def _show_preview_side(self, result: object | None, side: str) -> None:
+        """Open the selected card preview and deterministically show one side."""
+
+        if not self._preview_feature_enabled() or not preview_card_ids(result):
+            return
+        dialog = self._dialog
+        if dialog is None:
+            return
+        previewer = self._previewer
+        needs_open = previewer is None
+        if previewer is not None:
+            try:
+                needs_open = (
+                    not dialog.preview_pane.isVisible()
+                    or not previewer.is_targeting(result)
+                )
+            except (AttributeError, RuntimeError):
+                needs_open = True
+        if needs_open:
+            self._toggle_previewer(result)
+            previewer = self._previewer
+        if previewer is None:
+            return
+        try:
+            if dialog.preview_pane.mode() != "card":
+                previewer.set_mode("card")
+            previewer.show_side(side)
+        except Exception as error:
+            self._close_previewer()
+            try:
+                dialog.set_preview_active(False)
+            except RuntimeError:
+                pass
+            self._show_error(f"Could not show the requested card side: {error}")
 
     def _preview_feature_enabled(self) -> bool:
         ui_controller = self._ui_controller

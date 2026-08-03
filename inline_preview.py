@@ -28,6 +28,14 @@ def _result_card_ids(result: object | None) -> tuple[int, ...]:
     return tuple(output)
 
 
+def _result_identity(result: object | None) -> tuple[int, tuple[int, ...]]:
+    try:
+        note_id = int(getattr(result, "note_id", 0) or 0)
+    except (TypeError, ValueError):
+        note_id = 0
+    return note_id, _result_card_ids(result)
+
+
 class InlineResultInspector:
     """Own the rendered card page and lazily-created native Anki Editor."""
 
@@ -154,17 +162,9 @@ class InlineResultInspector:
     def set_result(self, result: object | None, *, force: bool = False) -> None:
         if self._disposed:
             return
-        card_ids = _result_card_ids(result)
-        try:
-            note_id = int(getattr(result, "note_id", 0) or 0)
-        except (TypeError, ValueError):
-            note_id = 0
-        old_key = (
-            int(getattr(self._result, "note_id", 0) or 0)
-            if self._result is not None
-            else 0,
-            self._card_ids,
-        )
+        note_id, card_ids = _result_identity(result)
+        old_note_id, _old_result_card_ids = _result_identity(self._result)
+        old_key = (old_note_id, self._card_ids)
         new_key = (note_id, card_ids)
         self._result = result
         self._card_ids = card_ids
@@ -188,6 +188,14 @@ class InlineResultInspector:
             and self.pane.mode() == "edit"
         ):
             self._sync_editor_to_target()
+
+    def is_targeting(self, result: object | None) -> bool:
+        """Return whether ``result`` is the card target already in the pane."""
+
+        current_note_id, _current_result_card_ids = _result_identity(
+            self._result
+        )
+        return _result_identity(result) == (current_note_id, self._card_ids)
 
     def _current_card_id(self) -> int:
         if not self._card_ids:
@@ -218,8 +226,11 @@ class InlineResultInspector:
         self.flip_button.setEnabled(available)
         answer = self._state == "answer"
         self.flip_button.setText("Front" if answer else "Answer")
-        self.flip_button.setAccessibleName(
-            "Show card front" if answer else "Show card answer"
+        action = "Show card front" if answer else "Show card answer"
+        shortcut = "Left Arrow" if answer else "Space or Right Arrow"
+        self.flip_button.setAccessibleName(action)
+        self.flip_button.setToolTip(
+            f"{action} ({shortcut})"
         )
 
     def previous_sibling(self) -> bool:
@@ -340,12 +351,28 @@ class InlineResultInspector:
         self.web.eval(script)
         self._update_controls()
 
-    def flip(self) -> None:
-        if not self._card_ids:
-            return
-        self._state = "answer" if self._state == "question" else "question"
+    def show_side(self, side: str) -> bool:
+        """Show one card side without repeat-key toggling or extra renders."""
+
+        target = str(side or "").casefold()
+        if target not in {"question", "answer"}:
+            return False
+        if not self._card_ids or self._state == target:
+            return False
+        self._state = target
         self._update_controls()
         self._schedule_render(force=True)
+        return True
+
+    def show_answer(self) -> bool:
+        return self.show_side("answer")
+
+    def show_question(self) -> bool:
+        return self.show_side("question")
+
+    def flip(self) -> None:
+        target = "answer" if self._state == "question" else "question"
+        self.show_side(target)
 
     def replay_audio(self) -> None:
         from aqt.reviewer import replay_audio

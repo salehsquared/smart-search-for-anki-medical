@@ -874,8 +874,10 @@ class ResultsView(QListView):
         )
         self.setAccessibleName("Search results")
         self.setAccessibleDescription(
-            "List of matching notes. Click a checkbox or press Space to include "
-            "a result in a bulk action; Shift-click a row to include a range. "
+            "List of matching notes. With card preview enabled, press Space or "
+            "Right Arrow to show the answer and Left Arrow to show the front. "
+            "Click a checkbox or press Shift+Space to include a result in a "
+            "bulk action; Shift-click a row to include a range. "
             "Right-click a row to open, flag, suspend, or tag the target selection. "
             "Press Return to open the highlighted note, or Up on the first row "
             "to return to the search field."
@@ -1022,13 +1024,25 @@ class ResultsView(QListView):
                 self.activated.emit(index)
                 event.accept()
                 return
-        if event.key() == Qt.Key.Key_Space:
+        if (
+            event.key() == Qt.Key.Key_Space
+            and event.modifiers() == Qt.KeyboardModifier.ShiftModifier
+        ):
             row = self.currentIndex().row()
             if 0 <= row < self._model.count():
                 self._model.toggle_checked(row)
                 self._range_anchor_row = row
                 event.accept()
                 return
+        if (
+            event.key() == Qt.Key.Key_Space
+            and event.modifiers() == Qt.KeyboardModifier.NoModifier
+        ):
+            # SearchDialog consumes this when a previewable result is focused.
+            # Otherwise keep plain Space inert instead of changing meaning
+            # based on whether Card preview is enabled or a card was deleted.
+            event.accept()
+            return
         if event.matches(QKeySequence.StandardKey.SelectAll):
             self._model.set_all_checked(True)
             event.accept()

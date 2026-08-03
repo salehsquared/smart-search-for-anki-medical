@@ -101,10 +101,12 @@ Smart and Exact while Semantic is being prepared.</p>
 <b>notetype:Cloze</b> to narrow results.</p>
 <ul>
 <li><b>Down / Up</b> — move through results; the preview follows</li>
+<li><b>Space / Right Arrow</b> — show the card answer</li>
+<li><b>Left Arrow</b> — return to the card front</li>
 <li><b>Return in the search field</b> — run the current search immediately</li>
 <li><b>Return in the results</b> — open the highlighted note in the Browser</li>
 <li><b>Ctrl+Shift+P</b> — toggle the card preview pane</li>
-<li><b>Space</b> — check or uncheck the highlighted result for bulk actions</li>
+<li><b>Shift+Space</b> — check or uncheck the highlighted result for bulk actions</li>
 <li><b>Shift+click</b> — check a range of results</li>
 <li><b>Right-click</b> — open, flag, suspend, or tag the clicked/checked results</li>
 <li><b>{_PRIMARY_KEY}+Return</b> — open checked results, or all shown if none are checked</li>
@@ -447,6 +449,7 @@ class SearchDialog(QDialog):
     openAllRequested = pyqtSignal(object)      # tuple[SearchResult, ...]
     previewToggleRequested = pyqtSignal(object)  # SearchResult | None
     previewResultChanged = pyqtSignal(object)  # SearchResult | None
+    previewSideRequested = pyqtSignal(object, str)  # result, "question" | "answer"
     previewModeChanged = pyqtSignal(str)  # "card" | "edit"
     filterRemoveRequested = pyqtSignal(object)   # FilterChip
     correctionDismissRequested = pyqtSignal(object)  # Correction
@@ -2072,6 +2075,31 @@ class SearchDialog(QDialog):
             elif obj is self.results:
                 if key == Qt.Key.Key_Up and self.results.currentIndex().row() <= 0:
                     self.focus_query()
+                    return True
+                result = self.results.current_result()
+                preview_key = key in {
+                    Qt.Key.Key_Space,
+                    Qt.Key.Key_Right,
+                    Qt.Key.Key_Left,
+                }
+                if (
+                    preview_key
+                    and event.modifiers() == Qt.KeyboardModifier.NoModifier
+                    and self._preview_enabled
+                    and result is not None
+                    and bool(result.card_ids)
+                ):
+                    # A held key must not repeatedly schedule renders or
+                    # restart answer audio. Right/Space are deliberately
+                    # one-way reveals; Left is the explicit way back.
+                    if not event.isAutoRepeat():
+                        side = (
+                            "question"
+                            if key == Qt.Key.Key_Left
+                            else "answer"
+                        )
+                        self.previewSideRequested.emit(result, side)
+                    event.accept()
                     return True
         return super().eventFilter(obj, event)
 

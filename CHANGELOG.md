@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- The inline card preview now uses reviewer-style keyboard controls while the
+  result list is focused: Space or Right Arrow reveals the answer, Left Arrow
+  returns to the front, and Up/Down continues moving between results.
+- Shift+Space now checks or unchecks a result for bulk actions, preserving a
+  dedicated keyboard selection shortcut without conflicting with card reveal.
+
 ## [1.0.21] — 2026-08-02
 
 ### Memory and CPU
