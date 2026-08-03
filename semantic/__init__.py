@@ -11,14 +11,22 @@ from .model_manager import (
     RuntimeInstallError,
     UnsupportedRuntimeError,
 )
-from .service import SemanticHit, SemanticService, SemanticStatus
+from .service import (
+    SemanticDocument,
+    SemanticHit,
+    SemanticService,
+    SemanticStatus,
+    semantic_text_hash,
+)
 
 __all__ = [
     "ModelInstallError",
     "ModelManager",
     "RuntimeInstallError",
+    "SemanticDocument",
     "SemanticHit",
     "SemanticService",
     "SemanticStatus",
     "UnsupportedRuntimeError",
+    "semantic_text_hash",
 ]

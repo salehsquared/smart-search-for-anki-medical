@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 import sqlite3
 import time
@@ -36,9 +37,11 @@ class VectorIndex:
     @contextmanager
     def _connect(self) -> Iterable[sqlite3.Connection]:
         connection = sqlite3.connect(self.db_path, timeout=30)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA synchronous=NORMAL")
         try:
+            # Setup belongs inside the guarded block: a damaged disposable
+            # index can raise from a PRAGMA before the context yields.
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA synchronous=NORMAL")
             yield connection
             connection.commit()
         finally:
@@ -225,17 +228,35 @@ class VectorIndex:
             ).fetchone()
         return str(row[0]) if row else None
 
-    def known_hashes(self, note_ids: Sequence[int] | None = None) -> dict[int, str]:
+    def known_hashes(
+        self,
+        note_ids: Sequence[int] | None = None,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> dict[int, str]:
         with self._connect() as connection:
-            if not note_ids:
+            if note_ids is None:
                 rows = connection.execute("SELECT note_id, content_hash FROM vectors")
-                return {int(row[0]): str(row[1]) for row in rows}
+                output: dict[int, str] = {}
+                for index, row in enumerate(rows, start=1):
+                    if cancel_check is not None and (
+                        index == 1 or index % 900 == 0
+                    ):
+                        cancel_check()
+                    output[int(row[0])] = str(row[1])
+                if cancel_check is not None:
+                    cancel_check()
+                return output
 
             # A full collection can exceed SQLite's conservative host
             # parameter limit, so resolve IDs in portable chunks.
             output: dict[int, str] = {}
             normalized = tuple(dict.fromkeys(int(note_id) for note_id in note_ids))
+            if not normalized:
+                return output
             for start in range(0, len(normalized), 900):
+                if cancel_check is not None:
+                    cancel_check()
                 chunk = normalized[start : start + 900]
                 placeholders = ",".join("?" for _ in chunk)
                 rows = connection.execute(
@@ -244,6 +265,8 @@ class VectorIndex:
                     chunk,
                 )
                 output.update((int(row[0]), str(row[1])) for row in rows)
+            if cancel_check is not None:
+                cancel_check()
             return output
 
     def upsert_many(
@@ -349,13 +372,22 @@ class VectorIndex:
             mmap.flush()
             del mmap
 
-    def delete(self, note_ids: Sequence[int]) -> None:
+    def delete(
+        self,
+        note_ids: Sequence[int],
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> None:
         if not note_ids:
             return
+        if cancel_check is not None:
+            cancel_check()
         self.clear_source_generation()
         with self._connect() as connection:
             normalized = tuple(dict.fromkeys(int(note_id) for note_id in note_ids))
             for start in range(0, len(normalized), 900):
+                if cancel_check is not None:
+                    cancel_check()
                 chunk = normalized[start : start + 900]
                 placeholders = ",".join("?" for _ in chunk)
                 rows = connection.execute(
@@ -370,6 +402,8 @@ class VectorIndex:
                     "INSERT OR IGNORE INTO free_slots(slot) VALUES (?)",
                     [(int(row[0]),) for row in rows],
                 )
+            if cancel_check is not None:
+                cancel_check()
 
     def search(
         self,
@@ -392,22 +426,19 @@ class VectorIndex:
             return []
         query = query / norm
 
+        count = max(0, int(limit))
+        if count == 0 or (
+            allowed_note_ids is not None and not allowed_note_ids
+        ):
+            return []
+
         with self._connect() as connection:
             capacity = int(
                 connection.execute(
                     "SELECT value FROM meta WHERE key = 'capacity'"
                 ).fetchone()[0]
             )
-            rows = connection.execute("SELECT note_id, slot FROM vectors").fetchall()
-        if not rows or capacity <= 0:
-            return []
-
-        selected = [
-            (int(row["note_id"]), int(row["slot"]))
-            for row in rows
-            if allowed_note_ids is None or int(row["note_id"]) in allowed_note_ids
-        ]
-        if not selected:
+        if capacity <= 0:
             return []
 
         mmap = np.memmap(
@@ -416,46 +447,122 @@ class VectorIndex:
             mode="r",
             shape=(capacity, self.dimension),
         )
-        heap_note_ids: list[int] = []
-        heap_scores: list[float] = []
-        for start in range(0, len(selected), 4096):
-            if cancel_check is not None:
-                cancel_check()
-            chunk = selected[start : start + 4096]
-            slots = np.asarray([slot for _, slot in chunk], dtype=np.int64)
-            matrix = np.asarray(mmap[slots], dtype=np.float32)
-            scores = matrix @ query
-            heap_note_ids.extend(note_id for note_id, _ in chunk)
-            heap_scores.extend(float(score) for score in scores)
-        del mmap
+        retained_note_ids = np.empty((0,), dtype=np.int64)
+        retained_scores = np.empty((0,), dtype=np.float32)
+        try:
+            with self._connect() as connection:
+                for rows in _vector_row_batches(
+                    connection,
+                    allowed_note_ids=allowed_note_ids,
+                ):
+                    if cancel_check is not None:
+                        cancel_check()
+                    note_ids = np.fromiter(
+                        (int(row["note_id"]) for row in rows),
+                        dtype=np.int64,
+                        count=len(rows),
+                    )
+                    slots = np.fromiter(
+                        (int(row["slot"]) for row in rows),
+                        dtype=np.int64,
+                        count=len(rows),
+                    )
+                    matrix = np.asarray(mmap[slots], dtype=np.float32)
+                    scores = np.asarray(matrix @ query, dtype=np.float32)
 
-        count = min(max(0, int(limit)), len(heap_scores))
-        if count == 0:
+                    if retained_scores.size:
+                        note_ids = np.concatenate((retained_note_ids, note_ids))
+                        scores = np.concatenate((retained_scores, scores))
+
+                    # Retain at most ``limit`` candidates after every vector
+                    # chunk.  Partitioning is linear in the chunk size, then
+                    # only the retained top-K is sorted for deterministic ties.
+                    # Memory remains O(chunk + limit), not O(the collection).
+                    retained_note_ids, retained_scores = _retain_top_k(
+                        np,
+                        note_ids,
+                        scores,
+                        count,
+                    )
+        finally:
+            del mmap
+
+        if not retained_scores.size:
             return []
-        scores_array = np.asarray(heap_scores, dtype=np.float32)
-        note_ids_array = np.asarray(heap_note_ids, dtype=np.int64)
-        if count < len(heap_scores):
-            selected_indices = np.argpartition(scores_array, -count)[-count:]
-        else:
-            selected_indices = np.arange(len(heap_scores), dtype=np.int64)
-        # Sort only the retained candidates.  Lexsort makes ties deterministic
-        # by note ID and avoids a Python O(n log n) sort over the whole index.
-        local_order = np.lexsort(
-            (
-                note_ids_array[selected_indices],
-                -scores_array[selected_indices],
-            )
-        )
-        order = selected_indices[local_order]
         if cancel_check is not None:
             cancel_check()
         return [
             VectorHit(
-                note_id=int(note_ids_array[index]),
-                score=float(scores_array[index]),
+                note_id=int(note_id),
+                score=float(score),
             )
-            for index in order
+            for note_id, score in zip(retained_note_ids, retained_scores)
         ]
+
+
+def _vector_row_batches(
+    connection: sqlite3.Connection,
+    *,
+    allowed_note_ids: set[int] | None,
+    scan_batch_size: int = 4096,
+) -> Iterable[list[sqlite3.Row]]:
+    """Stream vector metadata without materializing the full index in Python."""
+
+    if allowed_note_ids is None:
+        cursor = connection.execute("SELECT note_id, slot FROM vectors")
+        while True:
+            rows = cursor.fetchmany(max(1, int(scan_batch_size)))
+            if not rows:
+                return
+            yield rows
+
+    # Resolve an allowed-ID set directly in SQLite.  Besides avoiding a full
+    # vector-table scan, 900 IDs remains below conservative SQLite host
+    # parameter limits used by supported Anki versions.
+    # The ``None`` path returns from the generator above.
+    assert allowed_note_ids is not None
+    iterator = iter(allowed_note_ids)
+    while True:
+        chunk = tuple(islice(iterator, 900))
+        if not chunk:
+            return
+        placeholders = ",".join("?" for _ in chunk)
+        cursor = connection.execute(
+            f"SELECT note_id, slot FROM vectors WHERE note_id IN ({placeholders})",
+            chunk,
+        )
+        while True:
+            rows = cursor.fetchmany(max(1, int(scan_batch_size)))
+            if not rows:
+                break
+            yield rows
+
+
+def _retain_top_k(
+    np: Any,
+    note_ids: Any,
+    scores: Any,
+    limit: int,
+) -> tuple[Any, Any]:
+    """Return score-descending candidates with note-ID tie breaking."""
+
+    size = int(scores.size)
+    if size <= limit:
+        retained = np.arange(size, dtype=np.int64)
+    else:
+        cutoff = np.partition(scores, size - limit)[size - limit]
+        better = np.flatnonzero(scores > cutoff)
+        tied = np.flatnonzero(scores == cutoff)
+        needed = limit - int(better.size)
+        if needed < int(tied.size):
+            tied_note_ids = note_ids[tied]
+            selected_ties = np.argpartition(tied_note_ids, needed - 1)[:needed]
+            tied = tied[selected_ties]
+        retained = np.concatenate((better, tied[:needed]))
+
+    order = np.lexsort((note_ids[retained], -scores[retained]))
+    retained = retained[order]
+    return note_ids[retained], scores[retained]
 
 
 def _nonnegative_metadata_int(key: str, value: object) -> int:

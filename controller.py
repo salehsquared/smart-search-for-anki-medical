@@ -20,7 +20,7 @@ target files below this add-on's ``user_files`` directory.
 
 from __future__ import annotations
 
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import field, replace
 import hashlib
@@ -55,6 +55,14 @@ from .backend.anki_reader import iter_collection_notes
 from .backend.index import (
     FTS5Unavailable,
     SmartSearchIndex,
+)
+from .backend.maintenance import (
+    AuditRequest,
+    DirtyNote,
+    DirtyReason,
+    FacetManifest,
+    MaintenanceJournal,
+    ManifestDiff,
 )
 from .backend.models import (
     AliasExpansion as BackendAliasExpansion,
@@ -101,6 +109,9 @@ _DEFAULT_RESULT_LIMIT = 50
 _DEFAULT_DEBOUNCE_MS = 1200
 _DEFAULT_SEMANTIC_AUTOSTART_DELAY_MS = 20_000
 _SEMANTIC_AUTOSTART_RETRY_MS = 2_000
+_POST_REVIEW_MAINTENANCE_DELAY_MS = 5_000
+_SEMANTIC_IDLE_UNLOAD_MS = 90_000
+_SEMANTIC_DELTA_BATCH_SIZE = 250
 _RXTERMS_RESOURCE = Path("resources") / "medical_vocab" / "rxterms_202607.json.gz"
 _DIALOG_MANAGER_NAME = "SmartSearchMedical"
 _NOTETYPE_FILTER = re.compile(
@@ -126,6 +137,7 @@ class _ProfileContext:
     index: SmartSearchIndex
     engine: SearchEngine
     semantic: SemanticService | None
+    maintenance: MaintenanceJournal | None = None
     note_count: int = 0
     semantic_needs_reconcile: bool = False
     semantic_error: str | None = None
@@ -137,6 +149,13 @@ class _ProfileContext:
     field_names: tuple[str, ...] = ()
     semantic_pending_note_ids: set[int] = field(default_factory=set)
     semantic_pending_deleted_ids: set[int] = field(default_factory=set)
+    # Exact note IDs can bridge several successive lexical generations, but
+    # only when the chain began from a vector generation known to be current.
+    # Unknown/bulk changes deliberately invalidate that chain and request one
+    # canonical full refresh after lexical maintenance drains.
+    semantic_exact_delta_chain: bool = False
+    semantic_force_full_refresh: bool = False
+    semantic_restart_required: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +192,16 @@ def _object_id(value: Any) -> int:
         return max(0, int(candidate or 0))
     except (TypeError, ValueError):
         return 0
+
+
+def _host_state_name(value: Any) -> str:
+    """Normalize Anki state strings/enums across supported host versions."""
+
+    candidate = getattr(value, "value", value)
+    text = str(candidate or "").strip().casefold()
+    if "." in text:
+        text = text.rsplit(".", 1)[-1]
+    return text
 
 
 def _handler_note_id(handler: object | None) -> int:
@@ -219,8 +248,12 @@ class AnkiSearchBackend:
         self._engine_lock = threading.RLock()
         self._search_lock = threading.Lock()
         self._active_cancellations: set[threading.Event] = set()
+        self._maintenance_cancellations: set[threading.Event] = set()
+        self._semantic_cancellations: set[threading.Event] = set()
+        self._journal_writes_inflight: dict[int, int] = {}
         self._background_op_count = 0
         self._bundle_update_running = False
+        self._background_maintenance_paused = False
         self._maintenance_running = False
         self._vocabulary_refresh_running = False
         self._vocabulary_refresh_token: int | None = None
@@ -233,6 +266,8 @@ class AnkiSearchBackend:
         self._semantic_phase_detail = ""
         self._semantic_enabled = True
         self._auto_semantic_index = True
+        self._semantic_activity_callback: Callable[[], None] = _noop
+        self._semantic_cancelled_callback: Callable[[], None] = _noop
 
     # ------------------------------------------------------------------
     # Profile lifecycle
@@ -251,6 +286,20 @@ class AnkiSearchBackend:
 
         with self._state_lock:
             return self._bundle_update_running
+
+    def set_semantic_activity_callback(
+        self, callback: Callable[[], None] | None
+    ) -> None:
+        """Notify host UI after a real Semantic query uses the local model."""
+
+        self._semantic_activity_callback = callback or _noop
+
+    def set_semantic_cancelled_callback(
+        self, callback: Callable[[], None] | None
+    ) -> None:
+        """Notify the host when canceled model maintenance has fully unwound."""
+
+        self._semantic_cancelled_callback = callback or _noop
 
     def begin_bundle_update(self) -> bool:
         """Claim an exclusive, fail-closed lane for Anki's native updater.
@@ -355,15 +404,26 @@ class AnkiSearchBackend:
             on_ready(status)
             return status
         token, profile_name, collection_path, key = setup
+        event = self._new_cancellation(kind="maintenance")
         self._set_index_state(
             IndexState.BUILDING,
             detail="Opening search data.",
         )
 
         def opened(payload: tuple[_ProfileContext, str | None]) -> None:
+            cancelled = event.is_set() or self.background_maintenance_paused
+            self._forget_cancellation(event)
             context, alias_error = payload
             if token != self._profile_token:
                 self._close_context_in_background(context)
+                return
+            if cancelled:
+                self._close_context_in_background(context)
+                self._set_index_state(
+                    IndexState.UNAVAILABLE,
+                    detail="Search setup will resume after reviewing.",
+                )
+                on_ready(self.get_status())
                 return
             status = self._publish_profile_context(
                 context,
@@ -372,8 +432,16 @@ class AnkiSearchBackend:
             )
             on_ready(status)
 
-        def failed(_error: Exception) -> None:
+        def failed(error: Exception) -> None:
+            self._forget_cancellation(event)
             if token != self._profile_token:
+                return
+            if isinstance(error, _CancelledOperation) or event.is_set():
+                self._set_index_state(
+                    IndexState.UNAVAILABLE,
+                    detail="Search setup will resume after reviewing.",
+                )
+                on_ready(self.get_status())
                 return
             self._set_index_state(
                 IndexState.ERROR,
@@ -388,6 +456,7 @@ class AnkiSearchBackend:
                 profile_name,
                 collection_path,
                 key,
+                cancel_check=lambda: _raise_if_cancelled(event),
             ),
             success=opened,
             failure=failed,
@@ -426,10 +495,46 @@ class AnkiSearchBackend:
         profile_name: str,
         collection_path: str,
         key: str,
+        cancel_check: Callable[[], None] | None = None,
     ) -> tuple[_ProfileContext, str | None]:
+        if cancel_check is not None:
+            cancel_check()
         profile_root = self.data_root / "profiles" / key
         profile_root.mkdir(parents=True, exist_ok=True)
-        index = self._open_or_recover_index(profile_root / "search.sqlite3")
+        index = self._open_or_recover_index(
+            profile_root / "search.sqlite3",
+            cancel_check=cancel_check,
+        )
+        if cancel_check is not None:
+            try:
+                cancel_check()
+            except Exception:
+                index.close()
+                raise
+        try:
+            maintenance = self._open_or_recover_maintenance(
+                profile_root / "maintenance.sqlite3"
+            )
+        except Exception:
+            index.close()
+            raise
+        semantic: SemanticService | None = None
+
+        def checkpoint() -> None:
+            if cancel_check is None:
+                return
+            try:
+                cancel_check()
+            except Exception:
+                maintenance.close()
+                index.close()
+                vector_index = getattr(semantic, "index", None)
+                close = getattr(vector_index, "close", None)
+                if callable(close):
+                    close()
+                raise
+
+        checkpoint()
         alias_error: str | None = None
         alias_path = self.bundle_root / _RXTERMS_RESOURCE
         if alias_path.is_file():
@@ -439,14 +544,15 @@ class AnkiSearchBackend:
                 # RxTerms improves search, but lexical/fuzzy search must not be
                 # disabled by a damaged optional resource.
                 alias_error = "Some medical aliases are temporarily unavailable."
+        checkpoint()
 
-        semantic: SemanticService | None
         semantic_error: str | None = None
         try:
             semantic = self._open_or_recover_semantic(key)
         except Exception as error:
             semantic = None
             semantic_error = str(error)
+        checkpoint()
 
         engine = SearchEngine(index)
         note_count = index.stats().note_count
@@ -461,6 +567,7 @@ class AnkiSearchBackend:
             collection_path=collection_path,
             index=index,
             engine=engine,
+            maintenance=maintenance,
             semantic=semantic,
             note_count=note_count,
             semantic_error=semantic_error,
@@ -469,6 +576,10 @@ class AnkiSearchBackend:
             ),
             semantic_snapshot=semantic_snapshot,
             semantic_source_generation=semantic_source_generation,
+            semantic_restart_required=bool(
+                semantic is not None
+                and getattr(semantic, "restart_required", False)
+            ),
             fingerprint=_read_index_fingerprint(index),
             lexical_generation=index.generation,
             field_names=index.field_names(),
@@ -504,7 +615,6 @@ class AnkiSearchBackend:
             if alias_error:
                 detail += f" {alias_error}"
             self._set_index_state(IndexState.READY, detail=detail)
-            self._warm_engine(context)
         else:
             self._set_index_state(
                 IndexState.UNAVAILABLE,
@@ -521,6 +631,9 @@ class AnkiSearchBackend:
             self._profile_token += 1
             events = tuple(self._active_cancellations)
             self._active_cancellations.clear()
+            self._maintenance_cancellations.clear()
+            self._semantic_cancellations.clear()
+            self._journal_writes_inflight.clear()
             context = self._context
             self._context = None
             self._maintenance_running = False
@@ -567,18 +680,33 @@ class AnkiSearchBackend:
         with self._search_lock, self._engine_lock:
             context.engine.semantic_provider = None
             context.index.close()
+            if context.maintenance is not None:
+                context.maintenance.close()
             semantic = context.semantic
+            unload = getattr(semantic, "unload", None)
+            if callable(unload):
+                try:
+                    unload()
+                except Exception:
+                    pass
             vector_index = getattr(semantic, "index", None)
             close = getattr(vector_index, "close", None)
             if callable(close):
                 close()
 
-    def _open_or_recover_index(self, path: Path) -> SmartSearchIndex:
+    def _open_or_recover_index(
+        self,
+        path: Path,
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> SmartSearchIndex:
         try:
-            return SmartSearchIndex(path)
+            return SmartSearchIndex(path, cancel_check=cancel_check)
         except FTS5Unavailable:
             raise
         except Exception:
+            if cancel_check is not None:
+                cancel_check()
             # The index is derived data. Preserve a recoverable copy rather
             # than deleting it, then allow a clean rebuild.
             if not path.exists():
@@ -589,7 +717,40 @@ class AnkiSearchBackend:
                 candidate = Path(str(path) + sidecar)
                 if candidate.exists():
                     os.replace(candidate, Path(str(candidate) + suffix))
-            return SmartSearchIndex(path)
+            return SmartSearchIndex(path, cancel_check=cancel_check)
+
+    def _open_or_recover_maintenance(self, path: Path) -> MaintenanceJournal:
+        """Preserve damaged derived journal state and resume via a new audit."""
+
+        try:
+            return MaintenanceJournal(path)
+        except Exception as first_error:
+            if not path.exists():
+                raise
+            suffix = f".invalid-{int(time.time())}"
+            archived = Path(str(path) + suffix)
+            counter = 1
+            while archived.exists():
+                archived = Path(str(path) + suffix + f"-{counter}")
+                counter += 1
+            try:
+                os.replace(path, archived)
+                for sidecar in ("-wal", "-shm"):
+                    candidate = Path(str(path) + sidecar)
+                    if candidate.exists():
+                        os.replace(
+                            candidate,
+                            Path(str(archived) + sidecar),
+                        )
+            except Exception as archive_error:
+                raise RuntimeError(
+                    "Maintenance state could not be opened or preserved: "
+                    f"{first_error}"
+                ) from archive_error
+            recovered = MaintenanceJournal(path)
+            recovered.set_meta("force_canonical_hydration", "1")
+            recovered.request_audit("journal-recovery")
+            return recovered
 
     def _open_or_recover_semantic(self, profile_key_value: str) -> SemanticService:
         """Open the disposable vector index, preserving damage before retrying."""
@@ -801,6 +962,15 @@ class AnkiSearchBackend:
                 indexed_notes=_semantic_count(context),
                 progress=phase_progress,
             )
+        if self._semantic_restart_pending(context):
+            return SemanticStatus(
+                SemanticState.RESTART_REQUIRED,
+                detail=(
+                    "Restart Anki once to load the repaired Semantic search "
+                    "components. Smart and Exact remain available."
+                ),
+                indexed_notes=_semantic_count(context),
+            )
         if context.semantic is None:
             return SemanticStatus(
                 SemanticState.ERROR,
@@ -871,6 +1041,16 @@ class AnkiSearchBackend:
             SemanticState.READY,
             detail="Semantic search is ready and stays on this computer.",
             indexed_notes=status.index_count,
+        )
+
+    @staticmethod
+    def _semantic_restart_pending(context: _ProfileContext | None) -> bool:
+        if context is None:
+            return False
+        semantic = getattr(context, "semantic", None)
+        return bool(
+            getattr(context, "semantic_restart_required", False)
+            or getattr(semantic, "restart_required", False)
         )
 
     def _refresh_semantic_snapshot(self, context: _ProfileContext) -> Any | None:
@@ -1151,6 +1331,11 @@ class AnkiSearchBackend:
                         and semantic_status.ready
                         else None
                     )
+                    if semantic_provider is not None:
+                        try:
+                            self._semantic_activity_callback()
+                        except Exception:
+                            pass
                     with self._engine_lock:
                         context.engine.semantic_provider = semantic_provider
                     _raise_if_cancelled(event)
@@ -1355,12 +1540,20 @@ class AnkiSearchBackend:
             on_error("An index maintenance operation is already running.")
             return None
 
-        event = self._new_cancellation()
+        event = self._new_cancellation(kind="maintenance")
         token = context.token
         previous_count = context.note_count
         self._set_index_state(IndexState.BUILDING, progress=0.0, detail="Starting snapshot.")
 
-        def snapshot(collection: Any) -> tuple[list[IndexedNote], str]:
+        def snapshot(
+            collection: Any,
+        ) -> tuple[
+            list[IndexedNote],
+            str,
+            tuple[Any, ...],
+            tuple[Any, ...],
+            tuple[FacetManifest, ...],
+        ]:
             def progress(done: int, total: int) -> None:
                 _raise_if_cancelled(event)
                 fraction = 0.20 * (done / max(1, total))
@@ -1371,11 +1564,36 @@ class AnkiSearchBackend:
                 )
                 on_progress(fraction, f"reading notes {done:,}/{total:,}")
 
-            notes = self.reader.snapshot(collection, progress=progress)
-            return notes, _collection_fingerprint(collection)
+            notes = self.reader.snapshot(
+                collection,
+                progress=progress,
+                cancel_check=lambda: _raise_if_cancelled(event),
+            )
+            note_rows, card_rows, facet_rows, _filtered_note_ids = (
+                _collection_manifest_inventory(
+                    self.reader,
+                    collection,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+            )
+            return (
+                notes,
+                _collection_fingerprint(collection),
+                note_rows,
+                card_rows,
+                facet_rows,
+            )
 
-        def snapshot_success(payload: tuple[list[IndexedNote], str]) -> None:
-            notes, fingerprint = payload
+        def snapshot_success(
+            payload: tuple[
+                list[IndexedNote],
+                str,
+                tuple[Any, ...],
+                tuple[Any, ...],
+                tuple[FacetManifest, ...],
+            ]
+        ) -> None:
+            notes, fingerprint, note_rows, card_rows, facet_rows = payload
             if self._cancelled(event, token):
                 self._finish_cancelled_maintenance(
                     event, token, previous_count, on_success
@@ -1390,6 +1608,7 @@ class AnkiSearchBackend:
                 on_progress,
                 on_success,
                 on_error,
+                manifest_inventory=(note_rows, card_rows, facet_rows),
             )
 
         self._run_query_op(
@@ -1417,6 +1636,13 @@ class AnkiSearchBackend:
         on_progress: ProgressCallback,
         on_success: StatusCallback,
         on_error: ErrorCallback,
+        *,
+        manifest_inventory: tuple[
+            tuple[Any, ...],
+            tuple[Any, ...],
+            tuple[FacetManifest, ...],
+        ]
+        | None = None,
     ) -> None:
         token = context.token
 
@@ -1426,6 +1652,40 @@ class AnkiSearchBackend:
             # Keep the global order search -> engine used everywhere else.
             with self._search_lock, self._engine_lock:
                 _raise_if_cancelled(event)
+                journal = context.maintenance
+                rebuild_audit_sequence: int | None = None
+                if journal is not None and manifest_inventory is not None:
+                    journal.set_meta("manifest_initialized", "0")
+                    rebuild_audit_sequence = journal.request_audit(
+                        "rebuild-interrupted"
+                    )
+
+                # Detach vectors before any lexical mutation. A cancellation
+                # can arrive immediately after the atomic SQLite swap; failing
+                # closed here prevents an old semantic generation from ever
+                # being reported ready against that new lexical database.
+                context.engine.semantic_provider = None
+                if context.semantic is not None:
+                    context.semantic_needs_reconcile = True
+                    context.semantic_source_generation = None
+                    with self._state_lock:
+                        context.semantic_exact_delta_chain = False
+                        context.semantic_force_full_refresh = True
+                        context.semantic_pending_note_ids.clear()
+                        context.semantic_pending_deleted_ids.clear()
+                    clear_generation = getattr(
+                        getattr(context.semantic, "index", None),
+                        "clear_source_generation",
+                        None,
+                    )
+                    if callable(clear_generation):
+                        try:
+                            clear_generation()
+                        except Exception:
+                            # The lexical rebuild remains useful. Its new
+                            # generation will also fail the persisted semantic
+                            # generation check on the next profile opening.
+                            pass
 
                 def lexical_progress(done: int) -> None:
                     _raise_if_cancelled(event)
@@ -1437,19 +1697,29 @@ class AnkiSearchBackend:
                     )
                     on_progress(fraction, f"preparing notes {done:,}/{len(notes):,}")
 
-                count = context.index.rebuild(notes, progress=lexical_progress)
+                count = context.index.rebuild(
+                    notes,
+                    progress=lexical_progress,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+
+                # ``rebuild()`` has now published a new database. Mirror that
+                # generation in memory before any cancellable tail work.
+                context.note_count = count
+                context.field_names = context.index.field_names()
+                context.lexical_generation = context.index.generation
+                context.engine = SearchEngine(context.index)
+                context.fingerprint = fingerprint
+                _write_index_fingerprint(context.index, fingerprint)
+
                 alias_path = self.bundle_root / _RXTERMS_RESOURCE
                 if alias_path.is_file():
                     context.index.load_alias_resource(alias_path)
+                    context.lexical_generation = context.index.generation
                 _raise_if_cancelled(event)
-
-                context.note_count = count
-                context.field_names = context.index.field_names()
-                context.fingerprint = fingerprint
-                _write_index_fingerprint(context.index, fingerprint)
-                context.lexical_generation = context.index.generation
-                context.engine = SearchEngine(context.index)
-                context.engine.warmup()
+                context.engine.warmup(
+                    cancel_check=lambda: _raise_if_cancelled(event)
+                )
                 self._set_index_state(
                     IndexState.BUILDING,
                     progress=0.90,
@@ -1462,13 +1732,33 @@ class AnkiSearchBackend:
                 # the success callback starts the normal background semantic
                 # worker after the text index becomes searchable again.
                 if context.semantic is not None:
-                    status = context.semantic_snapshot
-                    if (
-                        status is not None
-                        and status.runtime_ready
-                        and status.model_ready
-                    ):
-                        context.semantic_needs_reconcile = True
+                    context.semantic_needs_reconcile = True
+                _raise_if_cancelled(event)
+                if journal is not None and manifest_inventory is not None:
+                    note_rows, card_rows, facet_rows = manifest_inventory
+                    # Initialization is explicit. If cancellation/crash lands
+                    # between these bounded transactions, the next audit sees
+                    # state 0 and replaces every manifest instead of trusting a
+                    # partial table.
+                    journal.replace_manifest(
+                        note_rows,
+                        cancel_check=lambda: _raise_if_cancelled(event),
+                    )
+                    journal.replace_card_manifest(
+                        card_rows,
+                        cancel_check=lambda: _raise_if_cancelled(event),
+                    )
+                    journal.replace_facet_manifest(
+                        facet_rows,
+                        cancel_check=lambda: _raise_if_cancelled(event),
+                    )
+                    journal.set_meta("manifest_initialized", "1")
+                    journal.delete_meta("pending_collection_fingerprint")
+                    if rebuild_audit_sequence is not None:
+                        journal.complete_audit(
+                            rebuild_audit_sequence,
+                            clear_meta_keys=("force_canonical_hydration",),
+                        )
                 _raise_if_cancelled(event)
                 return count
 
@@ -1517,7 +1807,7 @@ class AnkiSearchBackend:
             return False
         if not self._begin_maintenance(reconcile=True):
             return False
-        event = self._new_cancellation()
+        event = self._new_cancellation(kind="maintenance")
         token = context.token
 
         def snapshot_if_needed(
@@ -1526,7 +1816,10 @@ class AnkiSearchBackend:
             fingerprint = _collection_fingerprint(collection)
             if check_fingerprint and fingerprint == context.fingerprint:
                 return fingerprint, None
-            return fingerprint, self.reader.snapshot(collection)
+            return fingerprint, self.reader.snapshot(
+                collection,
+                cancel_check=lambda: _raise_if_cancelled(event),
+            )
 
         self._run_query_op(
             uses_collection=True,
@@ -1545,10 +1838,370 @@ class AnkiSearchBackend:
         )
         return True
 
+    def queue_maintenance(
+        self,
+        *,
+        note_ids: Iterable[int] = (),
+        deleted_note_ids: Iterable[int] = (),
+        reasons: DirtyReason | int = DirtyReason.NOTE_CONTENT,
+        audit_reason: str | None = None,
+        on_ready: Callable[[bool], None] = lambda _saved: None,
+    ) -> bool:
+        """Persist maintenance intent off Anki's GUI/collection threads."""
+
+        context = self._context
+        journal = context.maintenance if context is not None else None
+        if context is None or journal is None:
+            on_ready(False)
+            return False
+        token = context.token
+        live_ids = _positive_ids(note_ids)
+        deleted_ids = _positive_ids(deleted_note_ids)
+        with self._state_lock:
+            self._journal_writes_inflight[token] = (
+                self._journal_writes_inflight.get(token, 0) + 1
+            )
+        finish_lock = threading.Lock()
+        finish_called = False
+
+        def persist(_collection: Any) -> None:
+            journal.enqueue(live_ids, reasons)
+            journal.enqueue(
+                deleted_ids,
+                DirtyReason.DELETED
+                | DirtyReason.LEXICAL
+                | DirtyReason.SEMANTIC
+                | DirtyReason.VOCABULARY,
+            )
+            if audit_reason is not None:
+                journal.request_audit(audit_reason)
+
+        def finished(saved: bool) -> None:
+            nonlocal finish_called
+            with finish_lock:
+                if finish_called:
+                    return
+                finish_called = True
+            # Register the success/fallback while the semantic gate is still
+            # closed.  In current Anki versions GUI callbacks are queued even
+            # when requested from the GUI thread, so dropping the in-flight
+            # count first creates a real stale-generation publication window.
+            try:
+                if token == self._profile_token:
+                    on_ready(saved)
+            finally:
+                with self._state_lock:
+                    remaining = self._journal_writes_inflight.get(token, 0) - 1
+                    if remaining > 0:
+                        self._journal_writes_inflight[token] = remaining
+                    else:
+                        self._journal_writes_inflight.pop(token, None)
+
+        try:
+            self._run_query_op(
+                uses_collection=False,
+                op=persist,
+                success=lambda _result: finished(True),
+                failure=lambda _error: finished(False),
+            )
+        except Exception:
+            finished(False)
+            return False
+        return True
+
+    def audit_manifest(
+        self,
+        *,
+        request: AuditRequest | None = None,
+        on_success: StatusCallback = _noop,
+        on_error: ErrorCallback = _noop,
+    ) -> bool:
+        """Turn an unknown bulk change into durable, targeted note work.
+
+        Only compact note metadata is read from Anki.  Note text is hydrated
+        later in bounded batches, so sync/import/undo no longer materializes
+        every field in the profile or monopolizes one large collection read.
+        """
+
+        context = self._context
+        journal = context.maintenance if context is not None else None
+        if request is None and journal is not None:
+            request = journal.audit_request()
+        if context is None or journal is None or request is None:
+            if context is not None:
+                on_success(self.get_status())
+                return True
+            return False
+        if not self._begin_maintenance(reconcile=True):
+            return False
+
+        event = self._new_cancellation(kind="maintenance")
+        token = context.token
+
+        def inventory(
+            collection: Any,
+        ) -> tuple[
+            tuple[Any, ...],
+            tuple[Any, ...],
+            tuple[FacetManifest, ...],
+            tuple[int, ...],
+            str,
+            str,
+        ]:
+            note_rows, card_rows, facet_rows, filtered_note_ids = (
+                _collection_manifest_inventory(
+                    self.reader,
+                    collection,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+            )
+            return (
+                note_rows,
+                card_rows,
+                facet_rows,
+                filtered_note_ids,
+                _collection_fingerprint(collection),
+                _collection_fingerprint(collection, legacy_card_scope=True),
+            )
+
+        def inventory_ready(
+            payload: tuple[
+                tuple[Any, ...],
+                tuple[Any, ...],
+                tuple[FacetManifest, ...],
+                tuple[int, ...],
+                str,
+                str,
+            ]
+        ) -> None:
+            if self._cancelled(event, token):
+                self._reconcile_failed(
+                    _CancelledOperation(), event, token, on_error
+                )
+                return
+
+            (
+                note_rows,
+                card_rows,
+                facet_rows,
+                filtered_note_ids,
+                fingerprint,
+                legacy_fingerprint,
+            ) = payload
+
+            def classify(_collection: Any) -> ManifestDiff:
+                _raise_if_cancelled(event)
+                manifests_uninitialized = (
+                    journal.get_meta("manifest_initialized", "0") != "1"
+                )
+                force_canonical_hydration = (
+                    journal.get_meta("force_canonical_hydration", "0") == "1"
+                )
+                seeded_from_matching_index = False
+                if manifests_uninitialized:
+                    current_ids = {int(row.note_id) for row in note_rows}
+                    indexed_ids = set(context.index.note_ids())
+                    seeded_from_matching_index = bool(
+                        not force_canonical_hydration
+                        and current_ids == indexed_ids
+                        and context.fingerprint
+                        and (
+                            context.fingerprint == fingerprint
+                            or context.fingerprint == legacy_fingerprint
+                        )
+                    )
+                    if seeded_from_matching_index:
+                        mismatched_ids = _manifest_seed_mismatches(
+                            context.index,
+                            note_rows,
+                            card_rows,
+                            facet_rows,
+                            cancel_check=lambda: _raise_if_cancelled(event),
+                        )
+                        difference = ManifestDiff(
+                            added=(),
+                            changed=mismatched_ids,
+                            deleted=(),
+                            unchanged=max(
+                                0,
+                                len(current_ids) - len(mismatched_ids),
+                            ),
+                        )
+                    else:
+                        difference = ManifestDiff(
+                            added=tuple(sorted(current_ids)),
+                            changed=(),
+                            deleted=tuple(sorted(indexed_ids - current_ids)),
+                            unchanged=0,
+                        )
+                else:
+                    difference = journal.diff_manifest(
+                        note_rows,
+                        cancel_check=lambda: _raise_if_cancelled(event),
+                    )
+                _raise_if_cancelled(event)
+
+                saved_note_rows = journal.manifest_rows(
+                    cancel_check=lambda: _raise_if_cancelled(event)
+                )
+                saved_card_rows = journal.card_manifest_rows(
+                    cancel_check=lambda: _raise_if_cancelled(event)
+                )
+                card_difference = journal.diff_card_manifest(
+                    card_rows,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+                _raise_if_cancelled(event)
+                facet_difference = journal.diff_facet_manifest(
+                    facet_rows,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+                _raise_if_cancelled(event)
+
+                changed_facet_keys = {
+                    *facet_difference.added,
+                    *facet_difference.changed,
+                    *facet_difference.deleted,
+                }
+                changed_deck_ids = {
+                    key.object_id
+                    for key in changed_facet_keys
+                    if key.facet == "deck"
+                }
+                changed_notetype_ids = {
+                    key.object_id
+                    for key in changed_facet_keys
+                    if key.facet == "notetype"
+                }
+                facet_note_ids = {
+                    int(row.note_id)
+                    for row in (*saved_note_rows, *note_rows)
+                    if int(row.note_type_id) in changed_notetype_ids
+                }
+                facet_note_ids.update(
+                    int(row.note_id)
+                    for row in (*saved_card_rows, *card_rows)
+                    if int(row.home_deck_id) in changed_deck_ids
+                )
+                current_note_ids = {int(row.note_id) for row in note_rows}
+                affected_live_ids = set(difference.candidate_note_ids)
+                if seeded_from_matching_index:
+                    # An old index built while cards were in a filtered deck
+                    # may contain that transient deck name. Only those notes
+                    # need canonical home-deck hydration during migration.
+                    affected_live_ids.update(filtered_note_ids)
+                else:
+                    affected_live_ids.update(card_difference.affected_note_ids)
+                    affected_live_ids.update(facet_note_ids)
+                affected_live_ids.intersection_update(current_note_ids)
+
+                # Queue first, then advance the saved manifest. A crash at any
+                # boundary can cause harmless duplicate work, never lost work.
+                journal.enqueue(
+                    affected_live_ids,
+                    DirtyReason.NOTE_CONTENT,
+                )
+                journal.enqueue(
+                    difference.deleted,
+                    DirtyReason.DELETED
+                    | DirtyReason.LEXICAL
+                    | DirtyReason.SEMANTIC
+                    | DirtyReason.VOCABULARY,
+                )
+                _raise_if_cancelled(event)
+                journal.set_meta("manifest_initialized", "0")
+                journal.replace_manifest(
+                    note_rows,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+                _raise_if_cancelled(event)
+                journal.replace_card_manifest(
+                    card_rows,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+                _raise_if_cancelled(event)
+                journal.replace_facet_manifest(
+                    facet_rows,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+                journal.set_meta("manifest_initialized", "1")
+                # Include work left by an earlier audit. A later inventory can
+                # legitimately classify as unchanged while its predecessor's
+                # durable note batches are still draining; publishing the new
+                # generation early would make the fingerprint claim more than
+                # the searchable index currently contains.
+                has_index_work = bool(journal.pending_count())
+                if has_index_work:
+                    # The inventory describes the future state. Keep the
+                    # index's published fingerprint on its old generation
+                    # until every durable note delta has been acknowledged.
+                    journal.set_meta(
+                        "pending_collection_fingerprint",
+                        fingerprint,
+                    )
+                else:
+                    context.fingerprint = fingerprint
+                    _write_index_fingerprint(context.index, fingerprint)
+                    journal.delete_meta("pending_collection_fingerprint")
+                # Only clear the recovery guard when this exact audit request
+                # was published. A newer request can arrive while the audit is
+                # running; in that case the next audit must retain the
+                # conservative hydration requirement.
+                journal.complete_audit(
+                    request.sequence,
+                    clear_meta_keys=("force_canonical_hydration",),
+                )
+                _raise_if_cancelled(event)
+                return difference
+
+            def classified(_difference: ManifestDiff) -> None:
+                self._forget_cancellation(event)
+                if token != self._profile_token:
+                    return
+                self._end_maintenance()
+                on_success(self.get_status())
+
+            self._run_query_op(
+                uses_collection=False,
+                op=classify,
+                success=classified,
+                failure=lambda error: self._reconcile_failed(
+                    error, event, token, on_error
+                ),
+            )
+
+        self._run_query_op(
+            uses_collection=True,
+            op=inventory,
+            success=inventory_ready,
+            failure=lambda error: self._reconcile_failed(
+                error, event, token, on_error
+            ),
+        )
+        return True
+
+    @staticmethod
+    def _promote_pending_fingerprint(
+        context: _ProfileContext,
+        journal: MaintenanceJournal,
+    ) -> bool:
+        """Publish an audited generation only after its durable queue drains."""
+
+        if journal.pending_count() or journal.audit_request() is not None:
+            return False
+        fingerprint = journal.get_meta("pending_collection_fingerprint")
+        if not fingerprint:
+            return False
+        _write_index_fingerprint(context.index, fingerprint)
+        context.fingerprint = fingerprint
+        journal.delete_meta("pending_collection_fingerprint")
+        return True
+
     def reconcile_note_ids(
         self,
         note_ids: Iterable[int],
         *,
+        journal_entries: Sequence[DirtyNote] = (),
         on_success: StatusCallback = _noop,
         on_error: ErrorCallback = _noop,
     ) -> bool:
@@ -1569,19 +2222,45 @@ class AnkiSearchBackend:
         if not self._begin_maintenance():
             return False
 
-        event = self._new_cancellation()
+        event = self._new_cancellation(kind="maintenance")
         token = context.token
 
-        def snapshot(collection: Any) -> list[IndexedNote]:
-            return self.reader.snapshot_note_ids(collection, requested)
+        def snapshot(
+            collection: Any,
+        ) -> tuple[list[IndexedNote], tuple[Any, ...], tuple[Any, ...]]:
+            notes = list(
+                self.reader.snapshot_note_batch(
+                    collection,
+                    requested,
+                    max_notes=250,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+            )
+            _raise_if_cancelled(event)
+            manifests = (
+                self.reader.note_manifest_for_ids(collection, requested)
+                if journal_entries
+                else ()
+            )
+            _raise_if_cancelled(event)
+            card_manifests = (
+                self.reader.card_manifest_for_note_ids(collection, requested)
+                if journal_entries
+                else ()
+            )
+            _raise_if_cancelled(event)
+            return notes, manifests, card_manifests
 
         self._run_query_op(
             uses_collection=True,
             op=snapshot,
-            success=lambda notes: self._reconcile_targeted_snapshot(
+            success=lambda payload: self._reconcile_targeted_snapshot(
                 context,
                 requested,
-                notes,
+                payload[0],
+                payload[1],
+                payload[2],
+                tuple(journal_entries),
                 event,
                 on_success,
                 on_error,
@@ -1597,6 +2276,9 @@ class AnkiSearchBackend:
         context: _ProfileContext,
         requested: tuple[int, ...],
         notes: list[IndexedNote],
+        manifests: Sequence[Any],
+        card_manifests: Sequence[Any],
+        journal_entries: Sequence[DirtyNote],
         event: threading.Event,
         on_success: StatusCallback,
         on_error: ErrorCallback,
@@ -1615,16 +2297,6 @@ class AnkiSearchBackend:
         ]:
             _raise_if_cancelled(event)
             previous_generation = context.lexical_generation
-            semantic_status = context.semantic_snapshot
-            semantic_delta_safe = bool(
-                context.semantic is not None
-                and semantic_status is not None
-                and semantic_status.runtime_ready
-                and semantic_status.model_ready
-                and not context.semantic_needs_reconcile
-                and context.semantic_source_generation == previous_generation
-                and semantic_status.index_count == context.note_count
-            )
             plan = context.index.plan_targeted_upsert(
                 notes,
                 candidate_note_ids=requested,
@@ -1635,12 +2307,53 @@ class AnkiSearchBackend:
             deleted_candidates = plan.existing_note_ids & missing_ids
             changed_ids = tuple(note.note_id for note, _digest in plan.changed)
             has_delta = bool(changed_ids or deleted_candidates)
+            semantic_delta_safe = False
 
             if has_delta:
                 # Drain any in-flight Semantic reader and publish dirty state
                 # before changing the lexical metadata it resolves against.
-                with self._search_lock, self._engine_lock:
+                with self._search_lock, self._engine_lock, self._state_lock:
                     _raise_if_cancelled(event)
+                    semantic_status = context.semantic_snapshot
+                    semantic_phase = self._semantic_phase
+                    base_is_current = bool(
+                        context.semantic is not None
+                        and semantic_status is not None
+                        and semantic_status.runtime_ready
+                        and semantic_status.model_ready
+                        and not context.semantic_needs_reconcile
+                        and not context.semantic_force_full_refresh
+                        and not context.semantic_pending_note_ids
+                        and not context.semantic_pending_deleted_ids
+                        and semantic_phase is None
+                        and context.semantic_source_generation
+                        == previous_generation
+                        and semantic_status.index_count == context.note_count
+                    )
+                    continuing_exact_chain = bool(
+                        context.semantic is not None
+                        and semantic_status is not None
+                        and semantic_status.runtime_ready
+                        and semantic_status.model_ready
+                        and context.semantic_exact_delta_chain
+                        and not context.semantic_force_full_refresh
+                        and semantic_phase in (None, "updating")
+                    )
+                    semantic_delta_safe = bool(
+                        base_is_current or continuing_exact_chain
+                    )
+                    if semantic_delta_safe:
+                        context.semantic_exact_delta_chain = True
+                        self._coalesce_semantic_delta_locked(
+                            context,
+                            changed_ids,
+                            deleted_candidates,
+                        )
+                    elif context.semantic is not None:
+                        context.semantic_exact_delta_chain = False
+                        context.semantic_force_full_refresh = True
+                        context.semantic_pending_note_ids.clear()
+                        context.semantic_pending_deleted_ids.clear()
                     context.engine.defer_vocabulary_refresh()
                     context.engine.semantic_provider = None
                     context.semantic_needs_reconcile = context.semantic is not None
@@ -1650,7 +2363,10 @@ class AnkiSearchBackend:
                 cancel_check=lambda: _raise_if_cancelled(event),
             )
             unchanged = plan.unchanged + (len(plan.changed) - changed)
-            deleted = context.index.delete_notes(deleted_candidates)
+            deleted = context.index.delete_notes(
+                deleted_candidates,
+                cancel_check=lambda: _raise_if_cancelled(event),
+            )
 
             added = sum(
                 1 for note_id in changed_ids if note_id not in plan.existing_note_ids
@@ -1658,11 +2374,28 @@ class AnkiSearchBackend:
             context.note_count = max(0, context.note_count + added - deleted)
             context.field_names = context.index.field_names()
             context.lexical_generation = context.index.generation
-            # A targeted read deliberately does not scan 90+ MB of collection
-            # text just to refresh the startup fingerprint. Mark it unknown;
-            # the next profile-open audit performs the rare canonical check.
-            context.fingerprint = None
-            _clear_index_fingerprint(context.index)
+            journal = context.maintenance
+            if journal is not None and journal_entries:
+                if journal.get_meta("manifest_initialized", "0") == "1":
+                    journal.upsert_manifest(manifests)
+                    journal.delete_manifest(missing_ids)
+                    journal.replace_card_manifest_for_notes(
+                        requested,
+                        card_manifests,
+                    )
+                entries_by_id = {
+                    int(entry.note_id): entry for entry in journal_entries
+                }
+                journal.acknowledge_many(
+                    (
+                        (entry.note_id, entry.sequence)
+                        for note_id in requested
+                        if (entry := entries_by_id.get(int(note_id)))
+                        is not None
+                    ),
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+                self._promote_pending_fingerprint(context, journal)
             _raise_if_cancelled(event)
             actual_changed_ids = changed_ids if changed else ()
             actual_deleted_ids = tuple(sorted(deleted_candidates)) if deleted else ()
@@ -1707,8 +2440,13 @@ class AnkiSearchBackend:
             on_success(self.get_status())
             if changed_ids or deleted_ids:
                 if semantic_delta_safe:
-                    self._queue_semantic_delta(context, changed_ids, deleted_ids)
-                else:
+                    self._queue_semantic_delta(
+                        context,
+                        changed_ids,
+                        deleted_ids,
+                        start=not bool(journal_entries),
+                    )
+                elif not journal_entries:
                     self._refresh_existing_semantic_index(context)
 
         self._run_query_op(
@@ -1762,11 +2500,16 @@ class AnkiSearchBackend:
             # searches continue against the internally locked FTS index.
             has_delta = bool(plan.changed or deleted_ids)
             if has_delta:
-                with self._search_lock, self._engine_lock:
+                with self._search_lock, self._engine_lock, self._state_lock:
                     _raise_if_cancelled(event)
                     context.engine.defer_vocabulary_refresh()
                     context.engine.semantic_provider = None
                     context.semantic_needs_reconcile = context.semantic is not None
+                    if context.semantic is not None:
+                        context.semantic_exact_delta_chain = False
+                        context.semantic_force_full_refresh = True
+                        context.semantic_pending_note_ids.clear()
+                        context.semantic_pending_deleted_ids.clear()
 
             _raise_if_cancelled(event)
             changed = context.index.apply_upsert(
@@ -1774,11 +2517,16 @@ class AnkiSearchBackend:
                 cancel_check=lambda: _raise_if_cancelled(event),
             )
             unchanged = plan.unchanged + (len(plan.changed) - changed)
-            deleted = context.index.delete_notes(deleted_ids)
+            deleted = context.index.delete_notes(
+                deleted_ids,
+                cancel_check=lambda: _raise_if_cancelled(event),
+            )
             if changed or deleted:
                 replacement = SearchEngine(context.index)
                 try:
-                    replacement.warmup()
+                    replacement.warmup(
+                        cancel_check=lambda: _raise_if_cancelled(event)
+                    )
                 except Exception:
                     replacement = SearchEngine(context.index)
                 with self._engine_lock:
@@ -1860,15 +2608,21 @@ class AnkiSearchBackend:
         if token != self._profile_token:
             return
         self._end_maintenance()
+        context = self._context
+        available_count = (
+            int(context.note_count)
+            if context is not None and context.token == token
+            else int(previous_count)
+        )
         if isinstance(error, _CancelledOperation) or event.is_set():
-            state = IndexState.READY if previous_count else IndexState.UNAVAILABLE
+            state = IndexState.READY if available_count else IndexState.UNAVAILABLE
             self._set_index_state(state, detail="Refresh cancelled.")
             on_success(self.get_status())
             return
-        state = IndexState.READY if previous_count else IndexState.ERROR
+        state = IndexState.READY if available_count else IndexState.ERROR
         message = (
-            "Refresh failed. Your previous Smart & Exact search data is still available."
-            if previous_count
+            "Refresh failed. Your current Smart & Exact search data is still available."
+            if available_count
             else "Search setup failed. Try again."
         )
         self._set_index_state(
@@ -1895,7 +2649,11 @@ class AnkiSearchBackend:
     def _begin_maintenance(self, *, reconcile: bool = False) -> bool:
         del reconcile
         with self._state_lock:
-            if self._bundle_update_running or self._maintenance_running:
+            if (
+                self._bundle_update_running
+                or self._background_maintenance_paused
+                or self._maintenance_running
+            ):
                 return False
             self._maintenance_running = True
             return True
@@ -1908,6 +2666,23 @@ class AnkiSearchBackend:
     # ------------------------------------------------------------------
     # Optional local semantic setup
 
+    def _lexical_work_pending(self, context: _ProfileContext) -> bool:
+        """Conservatively gate vectors until durable lexical work is drained.
+
+        A busy journal is treated as pending.  This prevents a semantic pass
+        from capturing an in-between lexical generation between targeted
+        maintenance batches.
+        """
+
+        with self._state_lock:
+            if self._journal_writes_inflight.get(context.token, 0) > 0:
+                return True
+        journal = context.maintenance
+        if journal is None:
+            return False
+        work_state = journal.try_work_state()
+        return work_state is None or bool(work_state[0] or work_state[1])
+
     def _refresh_existing_semantic_index(self, context: _ProfileContext) -> bool:
         """Start a non-blocking refresh for an already-created vector index.
 
@@ -1916,7 +2691,13 @@ class AnkiSearchBackend:
         and routes every embedding pass through :meth:`index_semantic`.
         """
 
-        if context is not self._context or not context.semantic_needs_reconcile:
+        if (
+            context is not self._context
+            or not context.semantic_needs_reconcile
+            or self.background_maintenance_paused
+            or self._semantic_restart_pending(context)
+            or self._lexical_work_pending(context)
+        ):
             return False
         semantic = context.semantic
         if semantic is None:
@@ -1932,7 +2713,10 @@ class AnkiSearchBackend:
         if (
             not status.runtime_ready
             or not status.model_ready
-            or status.index_count == 0
+            or (
+                status.index_count == 0
+                and context.semantic_source_generation is None
+            )
         ):
             return False
         return self.index_semantic() is not None
@@ -1942,6 +2726,8 @@ class AnkiSearchBackend:
         context: _ProfileContext,
         changed_note_ids: Iterable[int],
         deleted_note_ids: Iterable[int],
+        *,
+        start: bool = True,
     ) -> bool:
         """Coalesce an exact lexical delta into one background vector update."""
 
@@ -1954,72 +2740,142 @@ class AnkiSearchBackend:
             or status is None
             or not status.runtime_ready
             or not status.model_ready
-            or status.index_count == 0
         ):
-            context.semantic_needs_reconcile = semantic is not None
+            with self._state_lock:
+                context.semantic_needs_reconcile = semantic is not None
+                if semantic is not None:
+                    context.semantic_exact_delta_chain = False
+                    context.semantic_force_full_refresh = True
+                    context.semantic_pending_note_ids.clear()
+                    context.semantic_pending_deleted_ids.clear()
             return False
         with self._state_lock:
             if self._bundle_update_running:
                 return False
-            context.semantic_pending_note_ids.update(
-                int(note_id)
-                for note_id in changed_note_ids
-                if int(note_id) > 0
-            )
-            context.semantic_pending_deleted_ids.update(
-                int(note_id)
-                for note_id in deleted_note_ids
-                if int(note_id) > 0
-            )
-            context.semantic_pending_note_ids.difference_update(
-                context.semantic_pending_deleted_ids
+            if (
+                context.semantic_force_full_refresh
+                or not context.semantic_exact_delta_chain
+            ):
+                context.semantic_needs_reconcile = True
+                return False
+            self._coalesce_semantic_delta_locked(
+                context,
+                changed_note_ids,
+                deleted_note_ids,
             )
             context.semantic_needs_reconcile = True
-            if self._semantic_phase is not None:
+            if (
+                self._semantic_phase is not None
+                or self._background_maintenance_paused
+                or self._semantic_restart_pending(context)
+                or self._lexical_work_pending(context)
+                or not start
+            ):
                 return True
         return self._start_semantic_delta(context)
 
+    @staticmethod
+    def _coalesce_semantic_delta_locked(
+        context: _ProfileContext,
+        changed_note_ids: Iterable[int],
+        deleted_note_ids: Iterable[int],
+    ) -> None:
+        """Merge exact vector intent with the newest note state winning."""
+
+        changed = set(_positive_ids(changed_note_ids))
+        deleted = set(_positive_ids(deleted_note_ids))
+        # Apply changed first and deleted second so an impossible same-batch
+        # conflict fails closed as a deletion.  Across batches, the later call
+        # always replaces the older state (including delete -> undo/re-add).
+        context.semantic_pending_deleted_ids.difference_update(changed)
+        context.semantic_pending_note_ids.update(changed)
+        context.semantic_pending_note_ids.difference_update(deleted)
+        context.semantic_pending_deleted_ids.update(deleted)
+
     def _start_semantic_delta(self, context: _ProfileContext) -> bool:
         semantic = context.semantic
-        if semantic is None or context is not self._context:
+        if (
+            semantic is None
+            or context is not self._context
+            or self._semantic_restart_pending(context)
+            or self._lexical_work_pending(context)
+        ):
             return False
         with self._state_lock:
-            if self._bundle_update_running:
+            # Internal tests and legacy callers may have populated the exact
+            # queue directly.  Establish a chain only from a generation whose
+            # vector source is still provably identical to the lexical source.
+            if (
+                not context.semantic_exact_delta_chain
+                and not context.semantic_force_full_refresh
+                and not context.semantic_needs_reconcile
+                and bool(
+                    context.semantic_pending_note_ids
+                    or context.semantic_pending_deleted_ids
+                )
+                and context.semantic_source_generation
+                == context.lexical_generation
+            ):
+                context.semantic_exact_delta_chain = True
+            if (
+                self._bundle_update_running
+                or self._background_maintenance_paused
+                or self._semantic_restart_pending(context)
+                or self._lexical_work_pending(context)
+                or context.semantic_force_full_refresh
+                or not context.semantic_exact_delta_chain
+            ):
                 return False
             if self._semantic_phase is not None:
                 return False
-            changed_ids = tuple(sorted(context.semantic_pending_note_ids))
-            deleted_ids = tuple(sorted(context.semantic_pending_deleted_ids))
+            deleted_ids = tuple(sorted(context.semantic_pending_deleted_ids))[
+                :_SEMANTIC_DELTA_BATCH_SIZE
+            ]
+            remaining = _SEMANTIC_DELTA_BATCH_SIZE - len(deleted_ids)
+            changed_ids = tuple(sorted(context.semantic_pending_note_ids))[
+                :remaining
+            ]
             if not changed_ids and not deleted_ids:
                 return False
-            context.semantic_pending_note_ids.clear()
-            context.semantic_pending_deleted_ids.clear()
+            context.semantic_pending_note_ids.difference_update(changed_ids)
+            context.semantic_pending_deleted_ids.difference_update(deleted_ids)
             self._semantic_phase = "updating"
             self._semantic_progress = 0.0
             self._semantic_phase_detail = "Updating semantic search."
 
-        event = self._new_cancellation()
+        event = self._new_cancellation(kind="semantic")
         token = context.token
         lexical_generation = context.lexical_generation
 
         def update(_collection: Any) -> tuple[int, bool]:
             _raise_if_cancelled(event)
-            with self._search_lock, self._engine_lock:
-                _raise_if_cancelled(event)
-                context.engine.semantic_provider = None
-                semantic.index.clear_source_generation()
-
             indexed_documents = context.index.documents(changed_ids)
             documents = _semantic_documents_from_index(
                 indexed_documents,
+                cancel_check=lambda: _raise_if_cancelled(event),
+            )
+            stale_documents = _stale_semantic_documents(
+                semantic,
+                documents,
                 cancel_check=lambda: _raise_if_cancelled(event),
             )
             live_ids = {document.note_id for document in documents}
             removals = tuple(
                 sorted(set(deleted_ids) | (set(changed_ids) - live_ids))
             )
+            if stale_documents or removals:
+                # Drain the last live Semantic reader before mutating vectors.
+                # New Semantic requests already see the published updating
+                # phase, while Smart/Exact remain independent.
+                with self._search_lock, self._engine_lock:
+                    _raise_if_cancelled(event)
+                    context.engine.semantic_provider = None
+                    semantic.index.clear_source_generation()
             if removals:
-                semantic.remove_notes(removals)
+                semantic.remove_notes(
+                    removals,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
 
             def progress(done: int, total: int) -> None:
                 _raise_if_cancelled(event)
@@ -2030,28 +2886,44 @@ class AnkiSearchBackend:
                         f"Updating notes {done:,}/{total:,}."
                     )
 
-            changed = semantic.index_documents(documents, progress=progress)
+            changed = (
+                semantic.index_documents(
+                    stale_documents,
+                    progress=progress,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+                if stale_documents
+                else 0
+            )
             _raise_if_cancelled(event)
-            with self._state_lock:
+            vector_count = int(semantic.status().index_count)
+            with self._search_lock, self._engine_lock, self._state_lock:
+                _raise_if_cancelled(event)
                 pending = bool(
                     context.semantic_pending_note_ids
                     or context.semantic_pending_deleted_ids
                 )
-            with self._search_lock, self._engine_lock:
-                _raise_if_cancelled(event)
                 current = (
                     not pending
+                    and context.semantic_exact_delta_chain
+                    and not context.semantic_force_full_refresh
                     and lexical_generation == context.lexical_generation
                     and lexical_generation == context.index.generation
+                    and vector_count == context.note_count
+                    and not self._maintenance_running
+                    and not self._lexical_work_pending(context)
                 )
+                if not pending and vector_count != context.note_count:
+                    context.semantic_exact_delta_chain = False
+                    context.semantic_force_full_refresh = True
                 if current:
                     semantic.index.mark_source_generation(lexical_generation)
+                    context.semantic_exact_delta_chain = False
                 context.semantic_needs_reconcile = not current
                 context.engine.semantic_provider = semantic if current else None
-                with self._state_lock:
-                    self._semantic_phase = None
-                    self._semantic_progress = None
-                    self._semantic_phase_detail = ""
+                self._semantic_phase = None
+                self._semantic_progress = None
+                self._semantic_phase_detail = ""
                 self._refresh_semantic_snapshot(context)
                 self._forget_cancellation(event)
             return changed, current
@@ -2059,17 +2931,38 @@ class AnkiSearchBackend:
         def success(result: tuple[int, bool]) -> None:
             if self._cancelled(event, token):
                 self._semantic_finished(event, token)
+                self.release_semantic_runtime()
                 return
             _changed, current = result
             if self._start_semantic_delta(context):
                 return
+            if self._finalize_semantic_delta_chain(context):
+                return
             if not current:
                 self._refresh_existing_semantic_index(context)
+            else:
+                self.release_semantic_runtime()
 
         def failure(error: Exception) -> None:
             with self._state_lock:
-                context.semantic_pending_note_ids.update(changed_ids)
-                context.semantic_pending_deleted_ids.update(deleted_ids)
+                if not context.semantic_force_full_refresh:
+                    already_pending = (
+                        context.semantic_pending_note_ids
+                        | context.semantic_pending_deleted_ids
+                    )
+                    self._coalesce_semantic_delta_locked(
+                        context,
+                        (
+                            note_id
+                            for note_id in changed_ids
+                            if note_id not in already_pending
+                        ),
+                        (
+                            note_id
+                            for note_id in deleted_ids
+                            if note_id not in already_pending
+                        ),
+                    )
             self._semantic_failed(error, event, token, context, _noop)
 
         self._run_query_op(
@@ -2078,6 +2971,42 @@ class AnkiSearchBackend:
             success=success,
             failure=failure,
         )
+        return True
+
+    def _finalize_semantic_delta_chain(self, context: _ProfileContext) -> bool:
+        """Publish a drained exact chain after unrelated lexical work settles.
+
+        A journal write can arrive while the last vector batch is finishing.
+        The batch must fail closed at that moment, but if the later lexical
+        maintenance proves to be a no-op, re-embedding the entire profile would
+        be wasteful.  The retained exact-chain invariant lets us safely publish
+        the already-updated vectors once every lexical gate is clear.
+        """
+
+        semantic = context.semantic
+        if semantic is None or context is not self._context:
+            return False
+        with self._search_lock, self._engine_lock, self._state_lock:
+            if (
+                self._bundle_update_running
+                or self._background_maintenance_paused
+                or self._semantic_phase is not None
+                or self._maintenance_running
+                or self._semantic_restart_pending(context)
+                or self._lexical_work_pending(context)
+                or context.semantic_force_full_refresh
+                or not context.semantic_exact_delta_chain
+                or context.semantic_pending_note_ids
+                or context.semantic_pending_deleted_ids
+                or context.lexical_generation != context.index.generation
+            ):
+                return False
+            semantic.index.mark_source_generation(context.lexical_generation)
+            context.semantic_needs_reconcile = False
+            context.semantic_exact_delta_chain = False
+            context.engine.semantic_provider = semantic
+            self._refresh_semantic_snapshot(context)
+        self.release_semantic_runtime()
         return True
 
     def install_semantic(
@@ -2091,6 +3020,9 @@ class AnkiSearchBackend:
             if self._bundle_update_running:
                 on_error("Restart Anki to finish the Smart Search update.")
                 return None
+            if self._background_maintenance_paused:
+                on_error("Finish reviewing before setting up Semantic search.")
+                return None
         context = self._context
         if not bool(self._read_config().get("semantic_enabled", True)):
             on_error("Semantic search is disabled in the add-on configuration.")
@@ -2101,6 +3033,9 @@ class AnkiSearchBackend:
                 return None
             try:
                 context.semantic = self._open_or_recover_semantic(context.key)
+                context.semantic_restart_required = bool(
+                    getattr(context.semantic, "restart_required", False)
+                )
                 context.semantic_error = None
                 context.semantic_error_recovery = None
                 self._refresh_semantic_snapshot(context)
@@ -2109,6 +3044,9 @@ class AnkiSearchBackend:
                 context.semantic_error_recovery = SemanticRecovery.REINDEX
                 on_error("Semantic search setup could not start. Try again.")
                 return None
+        if self._semantic_restart_pending(context):
+            on_error("Restart Anki to finish repairing Semantic search.")
+            return None
         token = context.token
         semantic_status = context.semantic_snapshot
         if semantic_status is None:
@@ -2124,6 +3062,9 @@ class AnkiSearchBackend:
             if self._bundle_update_running:
                 on_error("Restart Anki to finish the Smart Search update.")
                 return None
+            if self._background_maintenance_paused:
+                on_error("Finish reviewing before preparing Semantic search.")
+                return None
             if self._semantic_phase is not None:
                 on_error("Semantic setup is already running.")
                 return None
@@ -2131,7 +3072,7 @@ class AnkiSearchBackend:
             self._semantic_progress = 0.0
             self._semantic_phase_detail = "Setting up semantic search."
 
-        event = self._new_cancellation()
+        event = self._new_cancellation(kind="semantic")
         context.semantic_error = None
         context.semantic_error_recovery = None
 
@@ -2143,17 +3084,27 @@ class AnkiSearchBackend:
                 self._semantic_phase_detail = "Setting up semantic search."
             on_progress(fraction, "setting up semantic search")
 
-        def install(_collection: Any) -> None:
+        def install(_collection: Any) -> bool:
             _raise_if_cancelled(event)
-            context.semantic.install(progress, repair=repair)
+            context.semantic.install(
+                progress,
+                repair=repair,
+                cancel_check=lambda: _raise_if_cancelled(event),
+            )
+            context.semantic_restart_required = bool(
+                getattr(context.semantic, "restart_required", False)
+            )
             self._refresh_semantic_snapshot(context)
             _raise_if_cancelled(event)
+            return bool(getattr(context.semantic, "restart_required", False))
 
-        def success(_result: None) -> None:
+        def success(restart_required: bool) -> None:
             if self._cancelled(event, token):
                 self._semantic_finished(event, token)
+                self.release_semantic_runtime()
                 return
-            context.semantic_needs_reconcile = True
+            context.semantic_restart_required = bool(restart_required)
+            context.semantic_needs_reconcile = not restart_required
             context.semantic_error = None
             context.semantic_error_recovery = None
             self._semantic_finished(event, token)
@@ -2191,6 +3142,9 @@ class AnkiSearchBackend:
                 return None
             try:
                 context.semantic = self._open_or_recover_semantic(context.key)
+                context.semantic_restart_required = bool(
+                    getattr(context.semantic, "restart_required", False)
+                )
                 context.semantic_error = None
                 context.semantic_error_recovery = None
                 self._refresh_semantic_snapshot(context)
@@ -2199,11 +3153,17 @@ class AnkiSearchBackend:
                 context.semantic_error_recovery = SemanticRecovery.REINDEX
                 on_error("Semantic search preparation could not start. Try again.")
                 return None
+        if self._semantic_restart_pending(context):
+            on_error("Restart Anki to finish repairing Semantic search.")
+            return None
+        lexical_pending = self._lexical_work_pending(context)
         with self._state_lock:
             text_index_ready = (
                 not self._bundle_update_running
+                and not self._background_maintenance_paused
                 and self._index_state is IndexState.READY
                 and not self._maintenance_running
+                and not lexical_pending
             )
         if not text_index_ready:
             on_error(
@@ -2222,41 +3182,180 @@ class AnkiSearchBackend:
             return None
         with self._state_lock:
             if self._bundle_update_running:
-                on_error("Restart Anki to finish the Smart Search update.")
-                return None
-            if self._semantic_phase is not None:
-                on_error("Semantic setup is already running.")
-                return None
-            self._semantic_phase = "indexing"
-            self._semantic_progress = 0.0
-            self._semantic_phase_detail = "Reading local search data."
+                claim_error = "Restart Anki to finish the Smart Search update."
+            elif self._background_maintenance_paused:
+                claim_error = "Finish reviewing before preparing Semantic search."
+            elif (
+                self._index_state is not IndexState.READY
+                or self._maintenance_running
+                or self._lexical_work_pending(context)
+            ):
+                claim_error = (
+                    "Wait for Smart & Exact setup to finish before preparing "
+                    "Semantic search."
+                )
+            elif self._semantic_phase is not None:
+                claim_error = "Semantic setup is already running."
+            else:
+                claim_error = None
+                self._semantic_phase = "indexing"
+                self._semantic_progress = 0.0
+                self._semantic_phase_detail = "Reading local search data."
+                # A full pass supersedes every queued exact delta.  Keep the
+                # full-refresh flag set until its captured lexical generation
+                # is atomically proven current at publication time.
+                context.semantic_force_full_refresh = True
+                context.semantic_exact_delta_chain = False
+                context.semantic_pending_note_ids.clear()
+                context.semantic_pending_deleted_ids.clear()
+        if claim_error is not None:
+            on_error(claim_error)
+            return None
 
-        event = self._new_cancellation()
+        event = self._new_cancellation(kind="semantic")
         token = context.token
         lexical_generation = context.lexical_generation
         context.semantic_error = None
         context.semantic_error_recovery = None
+        self._index_semantic_from_lexical_batches(
+            context,
+            event,
+            token,
+            lexical_generation,
+            on_progress,
+            on_success,
+            on_error,
+        )
+        return event.set
+
+    def _index_semantic_from_lexical_batches(
+        self,
+        context: _ProfileContext,
+        event: threading.Event,
+        token: int,
+        lexical_generation: int,
+        on_progress: ProgressCallback,
+        on_success: StatusCallback,
+        on_error: ErrorCallback,
+        *,
+        batch_size: int = 250,
+    ) -> None:
+        """Prepare a full vector generation without retaining all note text."""
+
+        def index(_collection: Any) -> tuple[int, bool]:
+            _raise_if_cancelled(event)
+            semantic = context.semantic
+            if semantic is None:
+                raise RuntimeError("Semantic search is unavailable.")
+            with self._search_lock, self._engine_lock:
+                _raise_if_cancelled(event)
+                context.engine.semantic_provider = None
+                semantic.index.clear_source_generation()
+                context.semantic_needs_reconcile = True
+
+            note_ids = context.index.note_ids()
+            current_ids = set(note_ids)
+            known_ids = set(
+                semantic.index.known_hashes(
+                    cancel_check=lambda: _raise_if_cancelled(event)
+                )
+            )
+            semantic.remove_notes(
+                tuple(sorted(known_ids - current_ids)),
+                cancel_check=lambda: _raise_if_cancelled(event),
+            )
+            total = len(note_ids)
+            changed = 0
+            size = max(1, int(batch_size))
+            for start in range(0, total, size):
+                _raise_if_cancelled(event)
+                ids = note_ids[start : start + size]
+                documents = _semantic_documents_from_index(
+                    context.index.documents(ids),
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+
+                def progress(done: int, _batch_total: int) -> None:
+                    _raise_if_cancelled(event)
+                    completed = min(total, start + done)
+                    fraction = completed / max(1, total)
+                    with self._state_lock:
+                        self._semantic_progress = fraction
+                        self._semantic_phase_detail = (
+                            f"Preparing notes {completed:,}/{total:,}."
+                        )
+                    on_progress(
+                        fraction,
+                        f"preparing notes {completed:,}/{total:,}",
+                    )
+
+                changed += semantic.index_documents(
+                    documents,
+                    progress=progress,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+                completed = min(total, start + len(ids))
+                fraction = completed / max(1, total)
+                with self._state_lock:
+                    self._semantic_progress = fraction
+                    self._semantic_phase_detail = (
+                        f"Preparing notes {completed:,}/{total:,}."
+                    )
+                on_progress(
+                    fraction,
+                    f"preparing notes {completed:,}/{total:,}",
+                )
+                time.sleep(0)
+
+            vector_count = int(semantic.status().index_count)
+            with self._search_lock, self._engine_lock, self._state_lock:
+                _raise_if_cancelled(event)
+                current = (
+                    lexical_generation == context.lexical_generation
+                    and lexical_generation == context.index.generation
+                    and vector_count == context.note_count
+                    and not self._maintenance_running
+                    and not self._lexical_work_pending(context)
+                    and not context.semantic_pending_note_ids
+                    and not context.semantic_pending_deleted_ids
+                )
+                if current:
+                    semantic.index.mark_source_generation(lexical_generation)
+                    context.semantic_force_full_refresh = False
+                    context.semantic_exact_delta_chain = False
+                    context.semantic_pending_note_ids.clear()
+                    context.semantic_pending_deleted_ids.clear()
+                context.semantic_needs_reconcile = not current
+                context.engine.semantic_provider = semantic if current else None
+                self._semantic_phase = None
+                self._semantic_progress = None
+                self._semantic_phase_detail = ""
+                self._refresh_semantic_snapshot(context)
+                self._forget_cancellation(event)
+            return changed, current
+
+        def success(result: tuple[int, bool]) -> None:
+            if self._cancelled(event, token):
+                self._semantic_finished(event, token)
+                self.release_semantic_runtime()
+                return
+            _changed, current = result
+            on_progress(1.0, "semantic search ready")
+            on_success(self.get_status())
+            if not current:
+                if not self._start_semantic_delta(context):
+                    self._refresh_existing_semantic_index(context)
+            else:
+                self.release_semantic_runtime()
+
         self._run_query_op(
             uses_collection=False,
-            op=lambda _collection: _semantic_documents_from_lexical_index(
-                context.index,
-                cancel_check=lambda: _raise_if_cancelled(event),
-            ),
-            success=lambda documents: self._index_semantic_documents(
-                context,
-                documents,
-                event,
-                token,
-                lexical_generation,
-                on_progress,
-                on_success,
-                on_error,
-            ),
+            op=index,
+            success=success,
             failure=lambda error: self._semantic_failed(
                 error, event, token, context, on_error
             ),
         )
-        return event.set
 
     def _index_semantic_snapshot(
         self,
@@ -2323,9 +3422,16 @@ class AnkiSearchBackend:
                 context.engine.semantic_provider = None
                 semantic.index.clear_source_generation()
                 context.semantic_needs_reconcile = True
-            known_ids = set(semantic.index.known_hashes())
+            known_ids = set(
+                semantic.index.known_hashes(
+                    cancel_check=lambda: _raise_if_cancelled(event)
+                )
+            )
             current_ids = {document.note_id for document in documents}
-            semantic.remove_notes(tuple(known_ids - current_ids))
+            semantic.remove_notes(
+                tuple(known_ids - current_ids),
+                cancel_check=lambda: _raise_if_cancelled(event),
+            )
 
             def progress(done: int, total: int) -> None:
                 _raise_if_cancelled(event)
@@ -2337,25 +3443,38 @@ class AnkiSearchBackend:
                     )
                 on_progress(fraction, f"preparing notes {done:,}/{total:,}")
 
-            changed = semantic.index_documents(documents, progress=progress)
+            changed = semantic.index_documents(
+                documents,
+                progress=progress,
+                cancel_check=lambda: _raise_if_cancelled(event),
+            )
             _raise_if_cancelled(event)
+            vector_count = int(semantic.status().index_count)
             # Publish the completed generation in this worker.  QueryOp
             # success callbacks run on Anki's GUI thread and must never wait
             # for a live semantic search to release these locks.
-            with self._search_lock, self._engine_lock:
+            with self._search_lock, self._engine_lock, self._state_lock:
                 _raise_if_cancelled(event)
                 current = (
                     lexical_generation == context.lexical_generation
                     and lexical_generation == context.index.generation
+                    and vector_count == context.note_count
+                    and not self._maintenance_running
+                    and not self._lexical_work_pending(context)
+                    and not context.semantic_pending_note_ids
+                    and not context.semantic_pending_deleted_ids
                 )
                 if current:
                     semantic.index.mark_source_generation(lexical_generation)
+                    context.semantic_force_full_refresh = False
+                    context.semantic_exact_delta_chain = False
+                    context.semantic_pending_note_ids.clear()
+                    context.semantic_pending_deleted_ids.clear()
                 context.semantic_needs_reconcile = not current
                 context.engine.semantic_provider = semantic if current else None
-                with self._state_lock:
-                    self._semantic_phase = None
-                    self._semantic_progress = None
-                    self._semantic_phase_detail = ""
+                self._semantic_phase = None
+                self._semantic_progress = None
+                self._semantic_phase_detail = ""
                 self._refresh_semantic_snapshot(context)
                 self._forget_cancellation(event)
             return changed, current
@@ -2363,6 +3482,7 @@ class AnkiSearchBackend:
         def success(result: tuple[int, bool]) -> None:
             if self._cancelled(event, token):
                 self._semantic_finished(event, token)
+                self.release_semantic_runtime()
                 return
             _changed, current = result
             on_progress(1.0, "semantic search ready")
@@ -2370,6 +3490,8 @@ class AnkiSearchBackend:
             if not current:
                 if not self._start_semantic_delta(context):
                     self._refresh_existing_semantic_index(context)
+            else:
+                self.release_semantic_runtime()
 
         self._run_query_op(
             uses_collection=False,
@@ -2405,7 +3527,13 @@ class AnkiSearchBackend:
                 else SemanticRecovery.REINDEX
             )
         self._semantic_finished(event, token)
-        if not cancelled:
+        self.release_semantic_runtime()
+        if cancelled:
+            try:
+                self._semantic_cancelled_callback()
+            except Exception:
+                pass
+        else:
             recovery = (
                 context.semantic_error_recovery or SemanticRecovery.REINDEX
             )
@@ -2492,18 +3620,104 @@ class AnkiSearchBackend:
             finish()
             raise
 
-    def _new_cancellation(self) -> threading.Event:
+    def _new_cancellation(self, *, kind: str = "interactive") -> threading.Event:
         event = threading.Event()
         with self._state_lock:
-            if self._bundle_update_running:
+            if self._bundle_update_running or (
+                kind in {"maintenance", "semantic"}
+                and self._background_maintenance_paused
+            ):
                 event.set()
             else:
                 self._active_cancellations.add(event)
+                if kind == "maintenance":
+                    self._maintenance_cancellations.add(event)
+                elif kind == "semantic":
+                    self._semantic_cancellations.add(event)
         return event
 
     def _forget_cancellation(self, event: threading.Event) -> None:
         with self._state_lock:
             self._active_cancellations.discard(event)
+            self._maintenance_cancellations.discard(event)
+            self._semantic_cancellations.discard(event)
+
+    def set_background_maintenance_paused(self, paused: bool) -> None:
+        """Apply one central host-activity gate to every background writer.
+
+        Reviewer transitions use this before any timer callback can enqueue a
+        collection read.  Interactive Smart/Exact/Semantic searches are not
+        cancelled; only derived-index and model-maintenance operations are.
+        """
+
+        events: tuple[threading.Event, ...] = ()
+        with self._state_lock:
+            self._background_maintenance_paused = bool(paused)
+            if paused:
+                events = tuple(
+                    self._maintenance_cancellations
+                    | self._semantic_cancellations
+                )
+        for event in events:
+            event.set()
+
+    @property
+    def background_maintenance_paused(self) -> bool:
+        with self._state_lock:
+            return self._background_maintenance_paused
+
+    def release_semantic_runtime(self) -> bool:
+        """Release the optional native model without touching the collection."""
+
+        context = self._context
+        semantic = context.semantic if context is not None else None
+        unload = getattr(semantic, "unload", None)
+        if not callable(unload):
+            return False
+        with self._state_lock:
+            if self._semantic_phase is not None:
+                return False
+
+        def release(_collection: Any) -> None:
+            with self._search_lock:
+                with self._state_lock:
+                    semantic_busy = self._semantic_phase is not None
+                if context is self._context and not semantic_busy:
+                    unload()
+
+        try:
+            self._run_query_op(
+                uses_collection=False,
+                op=release,
+                success=_noop,
+                failure=_noop,
+            )
+        except Exception:
+            return False
+        return True
+
+    def resume_pending_background_work(self) -> bool:
+        """Resume semantic deltas retained while the reviewer gate was closed."""
+
+        if self.background_maintenance_paused:
+            return False
+        context = self._context
+        if context is None:
+            return False
+        if (
+            self._semantic_restart_pending(context)
+            or self._lexical_work_pending(context)
+        ):
+            return False
+        with self._state_lock:
+            force_full_refresh = context.semantic_force_full_refresh
+        if force_full_refresh:
+            return self._refresh_existing_semantic_index(context)
+        if self._start_semantic_delta(context):
+            return True
+        if self._finalize_semantic_delta_chain(context):
+            return True
+        return self._refresh_existing_semantic_index(context)
 
     def _cancelled(self, event: threading.Event, token: int) -> bool:
         return event.is_set() or token != self._profile_token
@@ -2520,16 +3734,23 @@ class AnkiSearchBackend:
         if context is None:
             return False
         with self._state_lock:
-            if self._bundle_update_running or self._vocabulary_refresh_running:
+            if (
+                self._bundle_update_running
+                or self._background_maintenance_paused
+                or self._vocabulary_refresh_running
+            ):
                 return False
             self._vocabulary_refresh_running = True
             self._vocabulary_refresh_token = context.token
         token = context.token
         generation = context.index.generation
+        event = self._new_cancellation(kind="maintenance")
 
         def build(_collection: Any) -> bool:
             replacement = SearchEngine(context.index)
-            replacement.warmup()
+            replacement.warmup(
+                cancel_check=lambda: _raise_if_cancelled(event)
+            )
             with self._engine_lock:
                 if (
                     token != self._profile_token
@@ -2544,6 +3765,7 @@ class AnkiSearchBackend:
             return True
 
         def success(current: bool) -> None:
+            self._forget_cancellation(event)
             with self._state_lock:
                 if self._vocabulary_refresh_token == token:
                     self._vocabulary_refresh_running = False
@@ -2552,6 +3774,7 @@ class AnkiSearchBackend:
                 on_success(bool(current))
 
         def failure(error: Exception) -> None:
+            self._forget_cancellation(event)
             with self._state_lock:
                 if self._vocabulary_refresh_token == token:
                     self._vocabulary_refresh_running = False
@@ -2568,60 +3791,44 @@ class AnkiSearchBackend:
         return True
 
     def _warm_engine(self, context: _ProfileContext) -> None:
+        if self.background_maintenance_paused:
+            return
         token = context.token
+        event = self._new_cancellation(kind="maintenance")
 
         def warm(_collection: Any) -> None:
             with self._search_lock, self._engine_lock:
                 if token != self._profile_token:
                     return
-                context.engine.warmup()
+                context.engine.warmup(
+                    cancel_check=lambda: _raise_if_cancelled(event)
+                )
+
+        def finished(_result: Any) -> None:
+            self._forget_cancellation(event)
+
+        def failed(_error: Exception) -> None:
+            self._forget_cancellation(event)
 
         self._run_query_op(
             uses_collection=False,
             op=warm,
-            success=lambda _result: self._warm_semantic(context),
-            failure=_noop,
+            # Semantic runtime startup is intentionally demand-driven.  A
+            # profile open should never reserve the model's native memory.
+            success=finished,
+            failure=failed,
         )
 
-    def _warm_semantic(self, context: _ProfileContext) -> None:
-        """Prepare the optional model before the first interactive query."""
+    def warm_lexical_on_demand(self) -> bool:
+        """Prepare typo matching only after the user opens Smart Search."""
 
-        semantic = context.semantic
-        status = context.semantic_snapshot
-        if (
-            semantic is None
-            or status is None
-            or not status.ready
-            or context.semantic_needs_reconcile
-            or context.token != self._profile_token
-        ):
-            return
-
-        def warm(_collection: Any) -> None:
-            try:
-                with self._search_lock:
-                    with self._state_lock:
-                        semantic_phase = self._semantic_phase
-                    status = context.semantic_snapshot
-                    if (
-                        context.token != self._profile_token
-                        or semantic_phase is not None
-                        or context.semantic_needs_reconcile
-                        or status is None
-                        or not status.ready
-                    ):
-                        return
-                    semantic.warmup()
-            finally:
-                self._refresh_semantic_snapshot(context)
-
-        self._run_query_op(
-            uses_collection=False,
-            op=warm,
-            success=_noop,
-            failure=_noop,
-        )
-
+        context = self._context
+        if context is None or self.background_maintenance_paused:
+            return False
+        if bool(getattr(context.engine, "_vocabulary_refresh_deferred", False)):
+            return self.refresh_vocabulary()
+        self._warm_engine(context)
+        return True
 
 class SmartSearchAddonController:
     """Own Anki hooks, debounce reconciliation, and the reusable dialog."""
@@ -2654,6 +3861,8 @@ class SmartSearchAddonController:
         self._pending_reconcile_deleted_ids: set[int] = set()
         self._reconcile_full = False
         self._reconcile_startup_check = False
+        self._reconcile_intent_epoch = 0
+        self._reconcile_retry_count = 0
         self._auto_reconcile = True
         self._reconcile_debounce_ms = _DEFAULT_DEBOUNCE_MS
         self._startup_reconcile_delay_ms = 15_000
@@ -2665,12 +3874,16 @@ class SmartSearchAddonController:
         self._semantic_autostart_timer: Any | None = None
         self._semantic_autostart_token: int | None = None
         self._semantic_autostart_attempted_token: int | None = None
+        self._initial_setup_deferred = False
         self._dialog_refresh_timer: Any | None = None
         self._dialog_refresh_lock = threading.Lock()
         self._dialog_refresh_queued = False
         self._dialog_refresh_last = 0.0
         self._card_state_refresh_timer: Any | None = None
         self._vocabulary_refresh_timer: Any | None = None
+        self._semantic_unload_timer: Any | None = None
+        self._post_review_resume_timer: Any | None = None
+        self._review_active = _host_state_name(getattr(mw, "state", "")) == "review"
         self._update_check_running = False
         self._update_profile_was_active = False
         self._hooks: list[tuple[Any, Callable[..., Any]]] = []
@@ -2693,6 +3906,16 @@ class SmartSearchAddonController:
             gui_hooks,
             "operation_did_execute",
             self._on_operation,
+        )
+        self._append_named_hook(
+            gui_hooks,
+            "state_will_change",
+            self._on_state_will_change,
+        )
+        self._append_named_hook(
+            gui_hooks,
+            "state_did_change",
+            self._on_state_did_change,
         )
         self._append_named_hook(
             gui_hooks,
@@ -2755,6 +3978,24 @@ class SmartSearchAddonController:
             self._run_vocabulary_refresh
         )
 
+        self._semantic_unload_timer = QTimer(self.mw)
+        self._semantic_unload_timer.setSingleShot(True)
+        self._semantic_unload_timer.timeout.connect(
+            self.backend.release_semantic_runtime
+        )
+        self._post_review_resume_timer = QTimer(self.mw)
+        self._post_review_resume_timer.setSingleShot(True)
+        self._post_review_resume_timer.timeout.connect(
+            self._resume_after_review
+        )
+        self.backend.set_semantic_activity_callback(
+            lambda: self._run_on_main(self._arm_semantic_idle_unload)
+        )
+        self.backend.set_semantic_cancelled_callback(
+            lambda: self._run_on_main(self._semantic_maintenance_cancelled)
+        )
+        self.backend.set_background_maintenance_paused(self._review_active)
+
         if getattr(self.mw, "col", None) is not None:
             self._on_profile_open()
         return self
@@ -2774,6 +4015,10 @@ class SmartSearchAddonController:
             self._card_state_refresh_timer.stop()
         if self._vocabulary_refresh_timer is not None:
             self._vocabulary_refresh_timer.stop()
+        if self._semantic_unload_timer is not None:
+            self._semantic_unload_timer.stop()
+        if self._post_review_resume_timer is not None:
+            self._post_review_resume_timer.stop()
         with self._dialog_refresh_lock:
             self._dialog_refresh_queued = False
         self._pending_preview_result = None
@@ -2783,6 +4028,8 @@ class SmartSearchAddonController:
         self._semantic_autostart_attempted_token = None
         self._close_dialog()
         self.backend.deactivate_profile()
+        self.backend.set_semantic_activity_callback(None)
+        self.backend.set_semantic_cancelled_callback(None)
         for hook, callback in reversed(self._hooks):
             try:
                 hook.remove(callback)
@@ -2790,6 +4037,159 @@ class SmartSearchAddonController:
                 pass
         self._hooks.clear()
         self._started = False
+
+    def _maintenance_blocked(self) -> bool:
+        """True while background work would compete with core reviewing."""
+
+        current = _host_state_name(getattr(self.mw, "state", ""))
+        return self._review_active or current == "review"
+
+    def _set_backend_maintenance_pause(self, paused: bool) -> None:
+        setter = getattr(self.backend, "set_background_maintenance_paused", None)
+        if callable(setter):
+            setter(bool(paused))
+
+    def _on_state_will_change(self, new_state: Any, *_args: Any) -> None:
+        if _host_state_name(new_state) == "review":
+            self._enter_review_mode()
+
+    def _on_state_did_change(self, new_state: Any, *_args: Any) -> None:
+        if _host_state_name(new_state) == "review":
+            self._enter_review_mode()
+        elif self._review_active:
+            self._leave_review_mode()
+
+    def _enter_review_mode(self) -> None:
+        """Stop all unsolicited index/model/UI work before reviews begin."""
+
+        if self._review_active:
+            return
+        self._review_active = True
+        self._set_backend_maintenance_pause(True)
+        for timer in (
+            self._reconcile_timer,
+            self._semantic_autostart_timer,
+            self._dialog_refresh_timer,
+            self._vocabulary_refresh_timer,
+            self._card_state_refresh_timer,
+            self._preview_open_timer,
+            self._semantic_unload_timer,
+            self._post_review_resume_timer,
+        ):
+            if timer is not None:
+                timer.stop()
+        with self._dialog_refresh_lock:
+            self._dialog_refresh_queued = False
+        self._pending_preview_result = None
+        if not self._dialog_is_visible():
+            self._close_previewer(save=False)
+        release = getattr(self.backend, "release_semantic_runtime", None)
+        if callable(release):
+            release()
+
+    def _leave_review_mode(self) -> None:
+        """Resume queued maintenance only after the reviewer has settled."""
+
+        self._review_active = False
+        self._set_backend_maintenance_pause(False)
+        if self._post_review_resume_timer is not None:
+            self._post_review_resume_timer.start(
+                _POST_REVIEW_MAINTENANCE_DELAY_MS
+            )
+        self._schedule_semantic_autostart(
+            delay_ms=_DEFAULT_SEMANTIC_AUTOSTART_DELAY_MS
+        )
+
+    def _resume_after_review(self) -> None:
+        """Restart durable work after the review UI has had time to settle."""
+
+        if self._maintenance_blocked():
+            return
+        if self._initial_setup_deferred:
+            if not self.backend.active:
+                self._initial_setup_deferred = False
+                self._on_profile_open()
+                return
+            context = self.backend._context
+            status = self.backend.get_status()
+            if (
+                context is not None
+                and context.note_count > 0
+                and status.state is IndexState.READY
+            ):
+                self._initial_setup_deferred = False
+            else:
+                with self.backend._state_lock:
+                    maintenance_running = self.backend._maintenance_running
+                if maintenance_running:
+                    if self._post_review_resume_timer is not None:
+                        self._post_review_resume_timer.start(250)
+                    return
+                self._initial_setup_deferred = False
+                started = self.backend.rebuild_index(
+                    on_progress=lambda _fraction, _detail: self._queue_dialog_refresh(),
+                    on_success=lambda _status: self._profile_activation_ready(_status),
+                    on_error=self._show_error,
+                )
+                if started is not None:
+                    return
+                self._initial_setup_deferred = True
+                if self._post_review_resume_timer is not None:
+                    self._post_review_resume_timer.start(250)
+                return
+        context = self.backend._context
+        journal = context.maintenance if context is not None else None
+        with self._reconcile_request_lock:
+            pending = bool(
+                self._pending_reconcile_note_ids
+                or self._pending_reconcile_deleted_ids
+                or self._reconcile_full
+                or self._reconcile_startup_check
+            )
+        if journal is not None:
+            work_state = journal.try_work_state()
+            if work_state is None:
+                if self._post_review_resume_timer is not None:
+                    self._post_review_resume_timer.start(100)
+                return
+            pending = pending or bool(work_state[0] or work_state[1])
+        if pending and self._reconcile_timer is not None:
+            self._reconcile_timer.start(25)
+            return
+        resume = getattr(self.backend, "resume_pending_background_work", None)
+        resumed = bool(resume()) if callable(resume) else False
+        if not resumed:
+            self._schedule_semantic_autostart(delay_ms=250)
+
+    def _arm_semantic_idle_unload(self) -> None:
+        timer = self._semantic_unload_timer
+        if timer is None:
+            return
+        timer.start(_SEMANTIC_IDLE_UNLOAD_MS)
+
+    def _semantic_maintenance_cancelled(self) -> None:
+        """Re-arm canceled first builds/deltas after their worker has exited."""
+
+        self._semantic_autostart_attempted_token = None
+        if (
+            not self._maintenance_blocked()
+            and self._post_review_resume_timer is not None
+        ):
+            self._post_review_resume_timer.start(250)
+
+    def _dialog_is_visible(self) -> bool:
+        dialog = self._dialog
+        if dialog is None:
+            return False
+        is_visible = getattr(dialog, "isVisible", None)
+        if not callable(is_visible):
+            # Lightweight test doubles and older wrappers may omit it.  A live
+            # dialog reference is the conservative interactive assumption.
+            return True
+        try:
+            return bool(is_visible())
+        except RuntimeError:
+            return False
 
     def show_search(self) -> None:
         """Open or focus the keyboard-first Smart Search palette."""
@@ -2886,6 +4286,9 @@ class SmartSearchAddonController:
         self._dialog.raise_()
         self._dialog.activateWindow()
         self._dialog.focus_query()
+        warm = getattr(self.backend, "warm_lexical_on_demand", None)
+        if callable(warm):
+            warm()
 
     def _addon_version(self) -> str:
         """Canonical add-on version from the bundle manifest."""
@@ -3485,6 +4888,7 @@ class SmartSearchAddonController:
         *,
         note_ids: Iterable[int] | None = None,
         deleted_note_ids: Iterable[int] = (),
+        reasons: DirtyReason | int = DirtyReason.NOTE_CONTENT,
         initial_check: bool = False,
         full: bool = False,
     ) -> None:
@@ -3498,6 +4902,8 @@ class SmartSearchAddonController:
             return
         clean_note_ids = _positive_ids(note_ids or ())
         clean_deleted_ids = _positive_ids(deleted_note_ids)
+        context = self.backend._context
+        journal = context.maintenance if context is not None else None
         if (
             (clean_note_ids or clean_deleted_ids)
             and self._vocabulary_refresh_timer is not None
@@ -3505,6 +4911,9 @@ class SmartSearchAddonController:
             self._vocabulary_refresh_timer.stop()
         if note_ids is None and not clean_deleted_ids and not initial_check:
             full = True
+        audit_reason = (
+            "startup" if initial_check and not full else "unknown-bulk-change"
+        ) if (full or initial_check) else None
         with self._reconcile_request_lock:
             self._pending_reconcile_note_ids.update(clean_note_ids)
             self._pending_reconcile_deleted_ids.update(clean_deleted_ids)
@@ -3515,8 +4924,54 @@ class SmartSearchAddonController:
             self._reconcile_startup_check = (
                 self._reconcile_startup_check or bool(initial_check)
             )
-        if update_running:
+            if full or initial_check:
+                self._reconcile_intent_epoch += 1
+        queued_async = False
+        if journal is not None:
+            queued_async = self.backend.queue_maintenance(
+                note_ids=clean_note_ids,
+                deleted_note_ids=clean_deleted_ids,
+                reasons=reasons,
+                audit_reason=audit_reason,
+                on_ready=lambda saved, startup=bool(initial_check): (
+                    self._maintenance_intent_saved(
+                        saved,
+                        initial_check=startup,
+                    )
+                ),
+            )
+        if update_running or self._maintenance_blocked() or queued_async:
             return
+        self._arm_reconcile_timer(initial_check=initial_check)
+
+    def _maintenance_intent_saved(
+        self,
+        saved: bool,
+        *,
+        initial_check: bool,
+    ) -> None:
+        """Retain a full-audit fallback when durable enqueueing fails."""
+
+        if not saved:
+            with self._reconcile_request_lock:
+                self._reconcile_full = True
+                self._reconcile_intent_epoch += 1
+        self._run_on_main(
+            lambda: self._arm_reconcile_timer(initial_check=initial_check)
+        )
+
+    def _arm_reconcile_timer(self, *, initial_check: bool = False) -> None:
+        if (
+            self.backend.bundle_update_running
+            or self._maintenance_blocked()
+            or self._reconcile_timer is None
+        ):
+            return
+        with self._reconcile_request_lock:
+            has_exact_work = bool(
+                self._pending_reconcile_note_ids
+                or self._pending_reconcile_deleted_ids
+            )
         if initial_check:
             # Opening a healthy profile should not immediately materialize
             # 40k note snapshots.  First run a cheap aggregate fingerprint
@@ -3527,6 +4982,13 @@ class SmartSearchAddonController:
                 60_000,
                 15_000,
             )
+            if has_exact_work:
+                delay = _bounded_int(
+                    self._reconcile_debounce_ms,
+                    250,
+                    10_000,
+                    _DEFAULT_DEBOUNCE_MS,
+                )
         else:
             delay = _bounded_int(
                 self._reconcile_debounce_ms,
@@ -3534,37 +4996,105 @@ class SmartSearchAddonController:
                 10_000,
                 _DEFAULT_DEBOUNCE_MS,
             )
-        self._reconcile_timer.start(delay)
+        remaining = -1
+        try:
+            if self._reconcile_timer.isActive():
+                remaining = int(self._reconcile_timer.remainingTime())
+        except (AttributeError, RuntimeError, TypeError, ValueError):
+            remaining = -1
+        if remaining < 0 or delay < remaining:
+            self._reconcile_timer.start(delay)
 
     def _run_reconcile(self) -> None:
-        if self.backend.bundle_update_running:
+        if self.backend.bundle_update_running or self._maintenance_blocked():
             return
         with self._reconcile_request_lock:
-            note_ids = tuple(sorted(self._pending_reconcile_note_ids))
-            deleted_ids = tuple(sorted(self._pending_reconcile_deleted_ids))
+            note_ids = tuple(sorted(self._pending_reconcile_note_ids))[:250]
+            deleted_ids = tuple(sorted(self._pending_reconcile_deleted_ids))[:250]
             full = self._reconcile_full
             startup_check = self._reconcile_startup_check
-        requested_ids = tuple(sorted(set(note_ids) | set(deleted_ids)))
+            intent_epoch = self._reconcile_intent_epoch
+        context = self.backend._context
+        journal = context.maintenance if context is not None else None
+        journal_entries = journal.try_pending(limit=250) if journal is not None else ()
+        if journal_entries is None:
+            if self._reconcile_timer is not None:
+                self._reconcile_timer.start(100)
+            return
+        audit_request: AuditRequest | None = None
+        if journal is not None:
+            audit_available, audit_request = journal.try_audit_request()
+            if not audit_available:
+                if self._reconcile_timer is not None:
+                    self._reconcile_timer.start(100)
+                return
+        journal_ids = tuple(entry.note_id for entry in journal_entries)
+        requested_ids = tuple(
+            sorted(set(note_ids) | set(deleted_ids) | set(journal_ids))
+        )[:250]
+        if journal_entries:
+            selected_ids = set(requested_ids)
+            journal_entries = tuple(
+                entry for entry in journal_entries if entry.note_id in selected_ids
+            )
 
         ran_targeted = False
-        if full:
-            started = self.backend.reconcile(
-                check_fingerprint=False,
-                on_success=lambda _status: self._refresh_dialog(),
-                on_error=self._show_error,
+        ran_audit = False
+        attempt_failed = False
+
+        def retry_failure(
+            message: str,
+            retry_note_ids: tuple[int, ...] = (),
+        ) -> None:
+            nonlocal attempt_failed
+            attempt_failed = True
+            self._background_reconcile_failed(
+                message,
+                retry_note_ids=retry_note_ids,
             )
-        elif requested_ids:
+
+        if requested_ids:
             ran_targeted = True
             started = self.backend.reconcile_note_ids(
                 requested_ids,
+                journal_entries=journal_entries,
                 on_success=self._targeted_reconcile_succeeded,
-                on_error=self._show_error,
+                on_error=lambda message: retry_failure(
+                    message,
+                    requested_ids,
+                ),
+            )
+        elif journal is not None and audit_request is not None:
+            ran_audit = True
+            started = self.backend.audit_manifest(
+                request=audit_request,
+                on_success=lambda status, epoch=intent_epoch: (
+                    self._manifest_audit_succeeded(
+                        status,
+                        intent_epoch=epoch,
+                    )
+                ),
+                on_error=retry_failure,
+            )
+        elif full:
+            started = self.backend.reconcile(
+                check_fingerprint=False,
+                on_success=lambda status: self._background_reconcile_succeeded(
+                    status,
+                    clear_full=True,
+                    intent_epoch=intent_epoch,
+                ),
+                on_error=retry_failure,
             )
         elif startup_check:
             started = self.backend.reconcile(
                 check_fingerprint=True,
-                on_success=lambda _status: self._refresh_dialog(),
-                on_error=self._show_error,
+                on_success=lambda status: self._background_reconcile_succeeded(
+                    status,
+                    clear_startup=True,
+                    intent_epoch=intent_epoch,
+                ),
+                on_error=retry_failure,
             )
         else:
             return
@@ -3575,27 +5105,136 @@ class SmartSearchAddonController:
             if self._reconcile_timer is not None:
                 self._reconcile_timer.start(250)
             return
-        with self._reconcile_request_lock:
-            self._pending_reconcile_note_ids.difference_update(note_ids)
-            self._pending_reconcile_deleted_ids.difference_update(deleted_ids)
-            if full:
-                self._reconcile_full = False
-            if startup_check:
-                if not ran_targeted:
-                    self._reconcile_startup_check = False
-        if ran_targeted and startup_check and self._reconcile_timer is not None:
+        if not attempt_failed:
+            with self._reconcile_request_lock:
+                selected = set(requested_ids)
+                self._pending_reconcile_note_ids.difference_update(selected)
+                self._pending_reconcile_deleted_ids.difference_update(selected)
+                if full:
+                    if journal is None or ran_audit:
+                        if self._reconcile_intent_epoch == intent_epoch:
+                            self._reconcile_full = False
+                if startup_check:
+                    if (journal is None and not ran_targeted) or ran_audit:
+                        if self._reconcile_intent_epoch == intent_epoch:
+                            self._reconcile_startup_check = False
+        if (
+            ran_targeted
+            and startup_check
+            and journal is None
+            and self._reconcile_timer is not None
+        ):
             # The exact edit wins immediately; the startup audit returns to an
             # idle delay instead of turning that edit into a full-profile scan.
             self._reconcile_timer.start(self._startup_reconcile_delay_ms)
 
     def _targeted_reconcile_succeeded(self, _status: IndexStatus) -> None:
+        self._reconcile_retry_count = 0
         self._refresh_dialog()
+        context = self.backend._context
+        journal = context.maintenance if context is not None else None
+        work_state = journal.try_work_state() if journal is not None else (0, False)
+        if work_state is None:
+            if self._reconcile_timer is not None:
+                self._reconcile_timer.start(100)
+        elif (
+            not self._maintenance_blocked()
+            and self._reconcile_timer is not None
+            and (work_state[0] or work_state[1])
+        ):
+            self._reconcile_timer.start(100)
+        elif (
+            not self._maintenance_blocked()
+            and self._post_review_resume_timer is not None
+        ):
+            self._post_review_resume_timer.start(250)
         timer = self._vocabulary_refresh_timer
-        if timer is not None:
+        if timer is not None and self._dialog_is_visible():
             timer.start(self._vocabulary_refresh_delay_ms)
 
+    def _manifest_audit_succeeded(
+        self,
+        _status: IndexStatus,
+        *,
+        intent_epoch: int | None = None,
+    ) -> None:
+        self._reconcile_retry_count = 0
+        with self._reconcile_request_lock:
+            if (
+                intent_epoch is None
+                or self._reconcile_intent_epoch == intent_epoch
+            ):
+                self._reconcile_full = False
+                self._reconcile_startup_check = False
+        self._refresh_dialog()
+        context = self.backend._context
+        journal = context.maintenance if context is not None else None
+        work_state = journal.try_work_state() if journal is not None else (0, False)
+        if work_state is None:
+            if self._reconcile_timer is not None:
+                self._reconcile_timer.start(100)
+        elif (
+            not self._maintenance_blocked()
+            and self._reconcile_timer is not None
+            and (work_state[0] or work_state[1])
+        ):
+            self._reconcile_timer.start(100)
+        elif (
+            not self._maintenance_blocked()
+            and self._post_review_resume_timer is not None
+        ):
+            self._post_review_resume_timer.start(250)
+
+    def _background_reconcile_succeeded(
+        self,
+        _status: IndexStatus,
+        *,
+        clear_full: bool = False,
+        clear_startup: bool = False,
+        intent_epoch: int | None = None,
+    ) -> None:
+        self._reconcile_retry_count = 0
+        if clear_full or clear_startup:
+            with self._reconcile_request_lock:
+                if (
+                    intent_epoch is None
+                    or self._reconcile_intent_epoch == intent_epoch
+                ):
+                    if clear_full:
+                        self._reconcile_full = False
+                    if clear_startup:
+                        self._reconcile_startup_check = False
+        self._refresh_dialog()
+
+    def _background_reconcile_failed(
+        self,
+        message: str,
+        *,
+        retry_note_ids: Iterable[int] = (),
+    ) -> None:
+        """Retry durable maintenance after transient worker/collection errors."""
+
+        retry_ids = _positive_ids(retry_note_ids)
+        if retry_ids:
+            with self._reconcile_request_lock:
+                self._pending_reconcile_note_ids.update(retry_ids)
+        self._reconcile_retry_count = min(6, self._reconcile_retry_count + 1)
+        if self._reconcile_retry_count == 1:
+            self._show_error(message)
+        if self._maintenance_blocked() or self._reconcile_timer is None:
+            return
+        delay_ms = min(
+            30_000,
+            1_000 * (2 ** (self._reconcile_retry_count - 1)),
+        )
+        self._reconcile_timer.start(delay_ms)
+
     def _run_vocabulary_refresh(self) -> None:
-        if self.backend.bundle_update_running:
+        if (
+            self.backend.bundle_update_running
+            or self._maintenance_blocked()
+            or not self._dialog_is_visible()
+        ):
             return
         started = self.backend.refresh_vocabulary(
             on_success=self._vocabulary_refresh_finished,
@@ -3626,6 +5265,8 @@ class SmartSearchAddonController:
             self._pending_reconcile_deleted_ids.clear()
             self._reconcile_full = False
             self._reconcile_startup_check = False
+            self._reconcile_intent_epoch += 1
+        self._reconcile_retry_count = 0
 
     def _load_reconcile_settings(self) -> None:
         config = self.backend._read_config()
@@ -3654,7 +5295,7 @@ class SmartSearchAddonController:
         already ready.
         """
 
-        if self.backend.bundle_update_running:
+        if self.backend.bundle_update_running or self._maintenance_blocked():
             return
         timer = self._semantic_autostart_timer
         context = self.backend._context
@@ -3696,11 +5337,13 @@ class SmartSearchAddonController:
     def _run_semantic_autostart(self) -> None:
         """Start at most one first-time semantic build per profile opening."""
 
-        if self.backend.bundle_update_running:
+        if self.backend.bundle_update_running or self._maintenance_blocked():
             return
         context = self.backend._context
         token = self._semantic_autostart_token
         if context is None or token is None or context.token != token:
+            return
+        if self.backend._semantic_restart_pending(context):
             return
         config = self.backend._read_config()
         if (
@@ -3712,8 +5355,28 @@ class SmartSearchAddonController:
 
         with self.backend._state_lock:
             maintenance_running = self.backend._maintenance_running
+        with self._reconcile_request_lock:
+            lexical_pending = bool(
+                self._pending_reconcile_note_ids
+                or self._pending_reconcile_deleted_ids
+                or self._reconcile_full
+                or self._reconcile_startup_check
+            )
+        journal = getattr(context, "maintenance", None)
+        if journal is not None:
+            work_state = journal.try_work_state()
+            if work_state is None:
+                lexical_pending = True
+            else:
+                lexical_pending = lexical_pending or bool(
+                    work_state[0] or work_state[1]
+                )
         status = self.backend.get_status()
-        if maintenance_running or status.state is IndexState.BUILDING:
+        if (
+            maintenance_running
+            or lexical_pending
+            or status.state is IndexState.BUILDING
+        ):
             self._schedule_semantic_autostart(
                 delay_ms=_SEMANTIC_AUTOSTART_RETRY_MS
             )
@@ -3726,10 +5389,12 @@ class SmartSearchAddonController:
             # UNSUPPORTED, and ERROR remain explicit user-facing actions.
             return
 
+        if self._semantic_unload_timer is not None:
+            self._semantic_unload_timer.stop()
         started = self.backend.index_semantic(
             on_progress=lambda _fraction, _detail: self._queue_dialog_refresh(),
             on_success=lambda _status: self._run_on_main(
-                self._refresh_dialog_now
+                self._semantic_background_index_complete
             ),
             # Automatic startup errors stay passive in the semantic status
             # area; an unexpected modal dialog at every launch is disruptive.
@@ -3756,10 +5421,26 @@ class SmartSearchAddonController:
             self._card_state_refresh_timer.stop()
         if self._vocabulary_refresh_timer is not None:
             self._vocabulary_refresh_timer.stop()
+        if self._semantic_unload_timer is not None:
+            self._semantic_unload_timer.stop()
+        if self._post_review_resume_timer is not None:
+            self._post_review_resume_timer.stop()
         with self._dialog_refresh_lock:
             self._dialog_refresh_queued = False
         self._semantic_autostart_token = None
         self._semantic_autostart_attempted_token = None
+        self._initial_setup_deferred = False
+        self._set_backend_maintenance_pause(self._maintenance_blocked())
+        if self._maintenance_blocked():
+            # A profile can be opened while Anki is already restoring the
+            # reviewer. Do not even open the disposable indexes in that case;
+            # the post-review lifecycle will activate them once the core UI is
+            # idle. Detach any stale prior-profile context first.
+            if self.backend.active:
+                self.backend.deactivate_profile()
+            self._initial_setup_deferred = True
+            self._refresh_dialog()
+            return
         activate_async = getattr(self.backend, "activate_profile_async", None)
         if callable(activate_async):
             activate_async(
@@ -3775,7 +5456,18 @@ class SmartSearchAddonController:
         if self.backend.bundle_update_running:
             return
         if status.state is IndexState.READY:
+            self._initial_setup_deferred = False
             self.schedule_reconcile(initial_check=True)
+        elif (
+            status.state is IndexState.BUILDING
+            and self.backend._context is not None
+            and self.backend._context.note_count == 0
+        ):
+            # Auto-rebuild is running for a fresh profile. Retain a restart
+            # marker so reviewer cancellation cannot strand initial setup.
+            self._initial_setup_deferred = True
+        elif status.state is IndexState.UNAVAILABLE and self._maintenance_blocked():
+            self._initial_setup_deferred = True
         self._schedule_semantic_autostart()
         self._refresh_dialog()
 
@@ -3790,12 +5482,17 @@ class SmartSearchAddonController:
             self._card_state_refresh_timer.stop()
         if self._vocabulary_refresh_timer is not None:
             self._vocabulary_refresh_timer.stop()
+        if self._semantic_unload_timer is not None:
+            self._semantic_unload_timer.stop()
+        if self._post_review_resume_timer is not None:
+            self._post_review_resume_timer.stop()
         with self._dialog_refresh_lock:
             self._dialog_refresh_queued = False
         self._clear_pending_reconciles()
         self._clear_captured_notes()
         self._semantic_autostart_token = None
         self._semantic_autostart_attempted_token = None
+        self._initial_setup_deferred = False
         self._close_dialog()
         self.backend.deactivate_profile()
 
@@ -3886,7 +5583,7 @@ class SmartSearchAddonController:
         handler_note_id = _handler_note_id(handler)
         if searchable_change and handler_note_id > 0 and not broad_change:
             self.schedule_reconcile(
-                note_ids=self._consume_editor_flush_ids(handler_note_id)
+                note_ids=self._consume_editor_flush_ids(handler_note_id),
             )
             return
 
@@ -3918,6 +5615,14 @@ class SmartSearchAddonController:
             # is the stable fallback when Anki provides no affected IDs.
             self._clear_captured_notes()
             self.schedule_reconcile(full=True)
+        elif (
+            bool(getattr(changes, "card", False))
+            and not self._maintenance_blocked()
+        ):
+            # Browser card creation/deletion and Change Deck may expose only
+            # ``card=True``. Reviewer answers are intentionally excluded: due,
+            # queue, reps, flags, and filtered-deck placement are not indexed.
+            self.schedule_reconcile(full=True)
 
     def _on_sync_finished(self) -> None:
         self.schedule_reconcile()
@@ -3938,6 +5643,11 @@ class SmartSearchAddonController:
         if self.backend.bundle_update_running:
             self._show_error("Restart Anki to finish the Smart Search update.")
             return
+        if self._maintenance_blocked():
+            self._show_message("Finish reviewing before setting up Semantic search.")
+            return
+        if self._semantic_unload_timer is not None:
+            self._semantic_unload_timer.stop()
         self.backend.install_semantic(
             on_progress=lambda _fraction, _detail: self._queue_dialog_refresh(),
             on_success=lambda _status: self._semantic_install_complete(),
@@ -3949,6 +5659,14 @@ class SmartSearchAddonController:
 
     def _semantic_install_complete(self) -> None:
         self._refresh_dialog_now()
+        context = self.backend._context
+        if self.backend._semantic_restart_pending(context):
+            self._semantic_autostart_attempted_token = context.token
+            self._show_message(
+                "Semantic search was repaired. Restart Anki once to load the "
+                "repaired components."
+            )
+            return
         config = self.backend._read_config()
         if bool(config.get("auto_semantic_index", True)):
             # A manual install is fresh user intent, so allow a prior failed
@@ -3978,6 +5696,11 @@ class SmartSearchAddonController:
         if self.backend.bundle_update_running:
             self._show_error("Restart Anki to finish the Smart Search update.")
             return
+        if self._maintenance_blocked():
+            self._show_message("Finish reviewing before preparing Semantic search.")
+            return
+        if self._semantic_unload_timer is not None:
+            self._semantic_unload_timer.stop()
         self.backend.index_semantic(
             on_progress=lambda _fraction, _detail: self._queue_dialog_refresh(),
             on_success=lambda _status: self._semantic_index_complete(),
@@ -3989,7 +5712,12 @@ class SmartSearchAddonController:
 
     def _semantic_index_complete(self) -> None:
         self._refresh_dialog_now()
+        self._arm_semantic_idle_unload()
         self._show_message("Semantic search is ready for this profile.")
+
+    def _semantic_background_index_complete(self) -> None:
+        self._refresh_dialog_now()
+        self._arm_semantic_idle_unload()
 
     def _queue_dialog_refresh(self) -> None:
         """Coalesce worker progress into at most four GUI updates/second."""
@@ -4028,6 +5756,8 @@ class SmartSearchAddonController:
             self._ui_controller.refresh_status()
 
     def _refresh_visible_card_states(self) -> None:
+        if self._maintenance_blocked() or not self._dialog_is_visible():
+            return
         timer = self._card_state_refresh_timer
         if timer is not None:
             timer.start(120)
@@ -4038,7 +5768,11 @@ class SmartSearchAddonController:
         """Refresh only flag/suspension metadata for the current result rows."""
 
         dialog = self._dialog
-        if dialog is None:
+        if (
+            dialog is None
+            or self._maintenance_blocked()
+            or not self._dialog_is_visible()
+        ):
             return
         try:
             results = dialog.results.results_model().results()
@@ -4067,6 +5801,8 @@ class SmartSearchAddonController:
         run_on_main = getattr(taskman, "run_on_main", None)
         if callable(run_on_main):
             run_on_main(callback)
+        else:
+            callback()
 
     def _register_managed_dialog(self, dialog: object | None) -> None:
         if dialog is None:
@@ -4093,7 +5829,9 @@ class SmartSearchAddonController:
     def _search_dialog_closed(self, dialog: object) -> None:
         if self._dialog is not dialog:
             return
-        self._hide_previewer()
+        if self._card_state_refresh_timer is not None:
+            self._card_state_refresh_timer.stop()
+        self._close_previewer()
         self._mark_managed_dialog_closed()
 
     def _close_dialog(self) -> None:
@@ -4573,6 +6311,23 @@ def _semantic_documents_from_index(
     return output
 
 
+def _stale_semantic_documents(
+    semantic: Any,
+    documents: Sequence[SemanticDocument],
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> list[SemanticDocument]:
+    """Return only text-changed vectors without loading the model runtime."""
+
+    stale = getattr(semantic, "stale_documents", None)
+    if callable(stale):
+        return list(stale(documents, cancel_check=cancel_check))
+    # Compatibility with simple test providers and older retained services.
+    if cancel_check is not None:
+        cancel_check()
+    return list(documents)
+
+
 def _semantic_documents_from_lexical_index(
     index: SmartSearchIndex,
     *,
@@ -4692,7 +6447,234 @@ def _collection_path(mw: Any, collection: Any) -> str:
     return str(path)
 
 
-def _collection_fingerprint(collection: Any) -> str:
+def _collection_manifest_inventory(
+    reader: AnkiCollectionReader,
+    collection: Any,
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> tuple[
+    tuple[Any, ...],
+    tuple[Any, ...],
+    tuple[FacetManifest, ...],
+    tuple[int, ...],
+]:
+    """Read bounded manifest pages and discard raw field text after hashing."""
+
+    note_rows: list[Any] = []
+    after_note_id = 0
+    while True:
+        if cancel_check is not None:
+            cancel_check()
+        page = reader.note_manifest_batch(
+            collection,
+            after_note_id=after_note_id,
+            limit=250,
+        )
+        if not page:
+            break
+        note_rows.extend(page)
+        after_note_id = int(page[-1].note_id)
+        if len(page) < 250:
+            break
+
+    card_rows: list[Any] = []
+    after_card_id = 0
+    while True:
+        if cancel_check is not None:
+            cancel_check()
+        page = reader.card_manifest_batch(
+            collection,
+            after_card_id=after_card_id,
+            limit=500,
+        )
+        if not page:
+            break
+        card_rows.extend(page)
+        after_card_id = int(page[-1].card_id)
+        if len(page) < 500:
+            break
+    if cancel_check is not None:
+        cancel_check()
+    filtered_note_ids = tuple(
+        sorted(
+            {
+                int(row[0])
+                for row in collection.db.all(
+                    "SELECT DISTINCT nid FROM cards WHERE odid > 0"
+                )
+                if int(row[0]) > 0
+            }
+        )
+    )
+    return (
+        tuple(note_rows),
+        tuple(card_rows),
+        _collection_facet_manifest(collection),
+        filtered_note_ids,
+    )
+
+
+def _manifest_seed_mismatches(
+    index: SmartSearchIndex,
+    note_rows: Sequence[Any],
+    card_rows: Sequence[Any],
+    facet_rows: Sequence[FacetManifest],
+    *,
+    cancel_check: Callable[[], None] | None = None,
+    batch_size: int = 250,
+) -> tuple[int, ...]:
+    """Verify an old index before seeding the first durable manifest.
+
+    The legacy aggregate fingerprint can collide for compensating deck moves
+    or same-second, same-length edits. Existing index payloads retain the raw
+    fields/tags and stable card scope needed to close that migration gap. The
+    comparison is external to Anki and reads bounded batches, so it does not
+    retain a second copy of the profile or monopolize the collection worker.
+    """
+
+    deck_names = {
+        int(row.object_id): str(row.signature)
+        for row in facet_rows
+        if row.facet == "deck"
+    }
+    notetypes: dict[int, tuple[str, tuple[str, ...]]] = {}
+    for row in facet_rows:
+        if row.facet != "notetype":
+            continue
+        try:
+            name, fields = json.loads(row.signature)
+            notetypes[int(row.object_id)] = (
+                str(name),
+                tuple(str(field) for field in fields),
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # An unreadable compact facet is itself a reason to hydrate notes
+            # of that type instead of trusting the migration seed.
+            continue
+
+    cards_by_note: dict[int, list[tuple[int, int]]] = defaultdict(list)
+    for row in card_rows:
+        cards_by_note[int(row.note_id)].append(
+            (int(row.card_id), int(row.home_deck_id))
+        )
+
+    mismatches: set[int] = set()
+    size = max(1, int(batch_size))
+    for start in range(0, len(note_rows), size):
+        if cancel_check is not None:
+            cancel_check()
+        batch = note_rows[start : start + size]
+        documents = {
+            document.note_id: document
+            for document in index.documents(row.note_id for row in batch)
+        }
+        for row in batch:
+            if cancel_check is not None:
+                cancel_check()
+            note_id = int(row.note_id)
+            document = documents.get(note_id)
+            if document is None:
+                mismatches.add(note_id)
+                continue
+
+            raw_fields = "\x1f".join(str(value) for value in document.fields.values())
+            raw_tags = (
+                " " + " ".join(str(tag) for tag in document.tags) + " "
+                if document.tags
+                else ""
+            )
+            field_digest = hashlib.blake2b(
+                raw_fields.encode("utf-8"),
+                digest_size=16,
+            ).digest()
+            tag_digest = hashlib.blake2b(
+                raw_tags.encode("utf-8"),
+                digest_size=16,
+            ).digest()
+
+            note_type = notetypes.get(int(row.note_type_id))
+            card_scope = sorted(cards_by_note.get(note_id, ()))
+            expected_card_ids = tuple(card_id for card_id, _deck_id in card_scope)
+            expected_decks = {
+                name
+                for _card_id, deck_id in card_scope
+                if (name := deck_names.get(deck_id, ""))
+            }
+            if (
+                field_digest != bytes(row.fields_digest)
+                or tag_digest != bytes(row.tags_digest)
+                or note_type is None
+                or document.note_type != note_type[0]
+                or tuple(document.fields) != note_type[1]
+                or tuple(sorted(document.card_ids)) != expected_card_ids
+                or set(document.decks) != expected_decks
+            ):
+                mismatches.add(note_id)
+        time.sleep(0)
+    if cancel_check is not None:
+        cancel_check()
+    return tuple(sorted(mismatches))
+
+
+def _collection_facet_manifest(
+    collection: Any,
+) -> tuple[FacetManifest, ...]:
+    """Return only metadata that changes indexed deck/notetype facets."""
+
+    rows: list[FacetManifest] = []
+    for item in collection.decks.all_names_and_ids(include_filtered=True):
+        if isinstance(item, Mapping):
+            raw_id = item.get("id", 0)
+            name = item.get("name", "")
+        else:
+            raw_id = getattr(item, "id", 0)
+            name = getattr(item, "name", "")
+        try:
+            object_id = int(raw_id or 0)
+        except (TypeError, ValueError):
+            continue
+        if object_id > 0:
+            rows.append(
+                FacetManifest(
+                    facet="deck",
+                    object_id=object_id,
+                    signature=str(name or ""),
+                )
+            )
+
+    for model in collection.models.all():
+        if not isinstance(model, Mapping):
+            continue
+        try:
+            object_id = int(model.get("id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if object_id <= 0:
+            continue
+        fields = tuple(
+            str(field.get("name", "") or "")
+            for field in model.get("flds", ())
+            if isinstance(field, Mapping)
+        )
+        rows.append(
+            FacetManifest(
+                facet="notetype",
+                object_id=object_id,
+                signature=json.dumps(
+                    (str(model.get("name", "") or ""), fields),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+        )
+    return tuple(sorted(rows, key=lambda row: (row.facet, row.object_id)))
+
+
+def _collection_fingerprint(
+    collection: Any,
+    *,
+    legacy_card_scope: bool = False,
+) -> str:
     """Return a cheap read-only signal for whether searchable data changed.
 
     Aggregate queries avoid transferring note/card text.  Deck/notetype names
@@ -4709,12 +6691,25 @@ def _collection_fingerprint(collection: Any) -> str:
         FROM notes
         """
     )
-    card_row = collection.db.first(
-        """
-        SELECT count(*), coalesce(sum(did), 0), coalesce(sum(odid), 0)
-        FROM cards
-        """
-    )
+    if legacy_card_scope:
+        # v1.0.19 and earlier persisted this form. It is accepted only to seed
+        # the new durable manifest once without hydrating every existing note.
+        card_row = collection.db.first(
+            """
+            SELECT count(*), coalesce(sum(did), 0), coalesce(sum(odid), 0)
+            FROM cards
+            """
+        )
+    else:
+        # Filtered decks temporarily change did but preserve odid. Canonical
+        # home-deck identity makes ordinary reviews fingerprint-invariant.
+        card_row = collection.db.first(
+            """
+            SELECT count(*),
+                   coalesce(sum(CASE WHEN odid > 0 THEN odid ELSE did END), 0)
+            FROM cards
+            """
+        )
     deck_names = tuple(
         sorted(
             (int(item.id), str(item.name))

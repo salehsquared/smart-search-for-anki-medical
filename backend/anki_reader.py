@@ -37,11 +37,17 @@ def snapshot_note(collection: Any, note_id: int) -> IndexedNote:
     deck_names: list[str] = []
     for card_id in card_ids:
         card = collection.get_card(card_id)
-        deck_id = (
-            card.current_deck_id()
-            if callable(getattr(card, "current_deck_id", None))
-            else card.did
-        )
+        try:
+            original_deck_id = int(getattr(card, "odid", 0) or 0)
+        except (TypeError, ValueError):
+            original_deck_id = 0
+        try:
+            current_deck_id = int(getattr(card, "did", 0) or 0)
+        except (TypeError, ValueError):
+            current_deck_id = 0
+        deck_id = original_deck_id if original_deck_id > 0 else current_deck_id
+        if deck_id <= 0 and callable(getattr(card, "current_deck_id", None)):
+            deck_id = int(card.current_deck_id() or 0)
         name = str(collection.decks.name(deck_id))
         if name and name not in deck_names:
             deck_names.append(name)

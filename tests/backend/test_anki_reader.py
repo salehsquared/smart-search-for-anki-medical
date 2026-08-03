@@ -20,6 +20,7 @@ class FakeNote:
 
 class FakeCard:
     did = 50
+    odid = 0
     nid = 1001
 
     def current_deck_id(self):
@@ -78,6 +79,27 @@ class AnkiReaderTests(unittest.TestCase):
         resolver = CollectionFilterResolver(collection)
         self.assertEqual(resolver("tag:Psychiatry"), (1001,))
         self.assertEqual(collection.queries, ["tag:Psychiatry"])
+
+    def test_filtered_card_indexes_its_stable_home_deck(self) -> None:
+        collection = FakeCollection()
+        collection.decks = type(
+            "Decks",
+            (),
+            {
+                "name": lambda _self, deck_id: {
+                    50: "Filtered",
+                    60: "Home",
+                }.get(deck_id, "")
+            },
+        )()
+        card = FakeCard()
+        card.did = 50
+        card.odid = 60
+        collection.get_card = lambda _card_id: card
+
+        [note] = iter_collection_notes(collection)
+
+        self.assertEqual(note.decks, ("Home",))
 
 
 if __name__ == "__main__":

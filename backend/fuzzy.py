@@ -99,6 +99,7 @@ class Vocabulary:
         aliases: Mapping[str, Iterable[str]] | None = None,
         *,
         max_delete_distance: int = 2,
+        cancel_check: Callable[[], None] | None = None,
     ) -> None:
         self.max_delete_distance = max(1, int(max_delete_distance))
         self.frequencies: dict[str, int] = {}
@@ -107,12 +108,18 @@ class Vocabulary:
         self.aliases: dict[str, set[str]] = defaultdict(set)
         self.reverse_aliases: dict[str, set[str]] = defaultdict(set)
         self.trusted_terms: set[str] = set()
-        for term, frequency in entries:
+        for index, (term, frequency) in enumerate(entries, start=1):
+            if cancel_check is not None and index % 256 == 0:
+                cancel_check()
             self.add(term, frequency)
         if aliases:
-            for alias, canonicals in aliases.items():
+            for index, (alias, canonicals) in enumerate(aliases.items(), start=1):
+                if cancel_check is not None and index % 128 == 0:
+                    cancel_check()
                 for canonical in canonicals:
                     self.add_alias(alias, canonical)
+        if cancel_check is not None:
+            cancel_check()
 
     def add(self, term: str, frequency: int = 1) -> None:
         tokens = tokenize(term)

@@ -586,7 +586,7 @@ def about_privacy() -> str:
             text(
                 720,
                 440,
-                "Version 1.0.19 · Updates managed by Anki",
+                "Version 1.0.20 · Updates managed by Anki",
                 size=14,
                 fill=FAINT,
                 weight=600,

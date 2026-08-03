@@ -4,10 +4,10 @@
 
 - Smart Search runs in Anki Desktop only. AnkiMobile and AnkiDroid do not load
   desktop add-ons.
-- v1.0.19 supports Anki Desktop 24.11 through 26.08, including the 25.02,
+- v1.0.20 supports Anki Desktop 24.11 through 26.08, including the 25.02,
   25.07, 25.09, 26.05, and 26.08 release families.
 - The supported-version matrix was exercised on macOS with Apple silicon.
-  Windows, Linux, and Intel Mac integration are not part of the v1.0.19 support
+  Windows, Linux, and Intel Mac integration are not part of the v1.0.20 support
   claim.
 - Semantic Search currently supports **macOS 14 or later on Apple-silicon Macs
   only**.
@@ -31,12 +31,15 @@
 - Smart and Exact remain available while Semantic indexes.
 - Adds, edits, and deletes are normally refreshed incrementally. Sync, import,
   undo/redo, native bulk operations, deck changes, and note-type changes may
-  require a later full reconciliation because Anki does not always expose the
-  affected note IDs.
+  require a later compact manifest audit because Anki does not always expose
+  the affected note IDs. Only detected candidates are then hydrated.
 - Collection reads share Anki's serialized collection worker. They run away from
   the graphical interface but can briefly queue behind other collection work.
 - Local model inference competes for CPU and memory with Anki even though it is
   not performed on the graphical interface thread.
+- The Semantic model is released after use, but native libraries and allocator
+  caches can remain mapped in Anki's process. Guaranteed hard memory
+  reclamation would require a separate helper process.
 
 ## Search behavior
 

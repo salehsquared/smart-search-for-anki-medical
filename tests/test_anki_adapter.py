@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
 from pathlib import Path
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +127,118 @@ class _Collection:
 
 
 class TargetedAnkiReaderTests(unittest.TestCase):
+    @staticmethod
+    def _paged_snapshot_collection():
+        class _SnapshotDB:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, tuple[int, ...]]] = []
+                self.notes = (
+                    (1, "g1", 100, 10, " tag1 ", "one\x1ffirst"),
+                    (2, "g2", 100, 20, " tag2 ", "two\x1fsecond"),
+                    (3, "g3", 100, 30, "", "three\x1fthird"),
+                )
+                self.cards = (
+                    (11, 1, 99, 10),
+                    (12, 1, 20, 0),
+                    (13, 2, 20, 0),
+                )
+
+            def first(self, sql):
+                if "count(*) FROM notes" not in sql:
+                    raise AssertionError(sql)
+                return (len(self.notes),)
+
+            def all(self, sql, *args):
+                self.calls.append((sql, tuple(int(value) for value in args)))
+                after, limit = (int(args[0]), int(args[1]))
+                rows = self.cards if "FROM cards" in sql else self.notes
+                return tuple(row for row in rows if int(row[0]) > after)[:limit]
+
+        class _Models:
+            @staticmethod
+            def get(model_id):
+                if int(model_id) != 100:
+                    return None
+                return {
+                    "name": "Basic",
+                    "flds": [{"name": "Front"}, {"name": "Back"}],
+                }
+
+        class _Decks:
+            @staticmethod
+            def all_names_and_ids(*, include_filtered):
+                if not include_filtered:
+                    raise AssertionError("filtered decks were unexpectedly excluded")
+                return (
+                    types.SimpleNamespace(id=10, name="Medicine"),
+                    types.SimpleNamespace(id=20, name="Pharmacology"),
+                    types.SimpleNamespace(id=99, name="Temporary filtered"),
+                )
+
+        database = _SnapshotDB()
+        collection = types.SimpleNamespace(
+            db=database,
+            models=_Models(),
+            decks=_Decks(),
+            tags=types.SimpleNamespace(
+                split=lambda value: tuple(str(value).strip().split())
+            ),
+        )
+        return collection, database
+
+    def test_full_snapshot_uses_bounded_keyset_pages(self) -> None:
+        collection, database = self._paged_snapshot_collection()
+        progress = []
+        anki = types.ModuleType("anki")
+        utils = types.ModuleType("anki.utils")
+        utils.split_fields = lambda value: str(value).split("\x1f")
+        anki.utils = utils
+
+        with patch.dict(sys.modules, {"anki": anki, "anki.utils": utils}):
+            notes = adapter.AnkiCollectionReader().snapshot(
+                collection,
+                page_size=2,
+                progress=lambda done, total: progress.append((done, total)),
+            )
+
+        self.assertEqual(tuple(note.note_id for note in notes), (1, 2, 3))
+        self.assertEqual(notes[0].decks, ("Medicine", "Pharmacology"))
+        self.assertEqual(notes[0].card_ids, (11, 12))
+        self.assertEqual(dict(notes[1].fields), {"Front": "two", "Back": "second"})
+        self.assertEqual(progress[-1], (3, 3))
+        self.assertEqual(len(database.calls), 4)
+        for sql, args in database.calls:
+            self.assertIn("WHERE id > ?", sql)
+            self.assertIn("LIMIT ?", sql)
+            self.assertEqual(args[1], 2)
+
+    def test_full_snapshot_cancels_between_collection_pages(self) -> None:
+        collection, database = self._paged_snapshot_collection()
+        checkpoints = 0
+        anki = types.ModuleType("anki")
+        utils = types.ModuleType("anki.utils")
+        utils.split_fields = lambda value: str(value).split("\x1f")
+        anki.utils = utils
+
+        def cancel() -> None:
+            nonlocal checkpoints
+            checkpoints += 1
+            if checkpoints == 4:
+                raise RuntimeError("review started")
+
+        with (
+            patch.dict(sys.modules, {"anki": anki, "anki.utils": utils}),
+            self.assertRaisesRegex(RuntimeError, "review started"),
+        ):
+            adapter.AnkiCollectionReader().snapshot(
+                collection,
+                page_size=2,
+                cancel_check=cancel,
+            )
+
+        self.assertEqual(len(database.calls), 1)
+        self.assertIn("FROM cards", database.calls[0][0])
+
     def test_deck_catalog_uses_public_api_and_marks_current_deck(self) -> None:
         class _CatalogDecks:
             def __init__(self) -> None:
@@ -422,9 +536,154 @@ class TargetedAnkiReaderTests(unittest.TestCase):
         self.assertEqual(note.card_ids, (401, 402))
         self.assertEqual(
             note.decks,
-            ("Filtered study", "AnKing", "Pharmacology"),
+            ("AnKing", "Pharmacology"),
         )
         self.assertEqual(collection.card_lookups, [401, 402])
+
+    def test_filtered_deck_uses_only_the_cards_canonical_home_deck(self) -> None:
+        collection = _Collection(
+            notes={51: _Note(51, fields=(("Front", "stable deck"),))},
+            cards_by_note={51: (501,)},
+            cards={501: _Card(did=99, odid=20)},
+            deck_names={20: "Medicine", 99: "Temporary filtered deck"},
+        )
+
+        [note] = adapter.AnkiCollectionReader().snapshot_note_ids(collection, (51,))
+
+        self.assertEqual(note.decks, ("Medicine",))
+        self.assertEqual(collection.decks.lookups, [20])
+
+    def test_bounded_hydration_rejects_accidental_oversized_batches(self) -> None:
+        collection = _Collection(
+            notes={
+                1: _Note(1, fields=(("Front", "one"),)),
+                2: _Note(2, fields=(("Front", "two"),)),
+            }
+        )
+        reader = adapter.AnkiCollectionReader()
+
+        notes = reader.snapshot_note_batch(
+            collection,
+            (2, 1, 2, 0),
+            max_notes=2,
+        )
+        self.assertEqual(tuple(note.note_id for note in notes), (2, 1))
+        with self.assertRaises(ValueError):
+            reader.snapshot_note_batch(collection, (1, 2), max_notes=1)
+
+    def test_targeted_hydration_honors_cancellation_between_notes(self) -> None:
+        collection = _Collection(
+            notes={
+                1: _Note(1, fields=(("Front", "one"),)),
+                2: _Note(2, fields=(("Front", "two"),)),
+            }
+        )
+        checkpoints = 0
+
+        def cancel() -> None:
+            nonlocal checkpoints
+            checkpoints += 1
+            if checkpoints == 2:
+                raise RuntimeError("review started")
+
+        with self.assertRaisesRegex(RuntimeError, "review started"):
+            adapter.AnkiCollectionReader().snapshot_note_batch(
+                collection,
+                (1, 2),
+                max_notes=2,
+                cancel_check=cancel,
+            )
+
+        self.assertEqual(collection.note_lookups, [1])
+
+    def test_compact_manifest_hashes_bounded_note_content(self) -> None:
+        class _ManifestDB:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def all(self, sql, *args):
+                self.calls.append((sql, args))
+                return (
+                    (11, 101, -1, 7, 120, 18, 999, "front\x1fback", " foo "),
+                    (15, 102, 4, 8, 80, 0, 123, "other", ""),
+                )
+
+        database = _ManifestDB()
+        collection = types.SimpleNamespace(db=database)
+
+        manifest = adapter.AnkiCollectionReader.note_manifest_batch(
+            collection,
+            after_note_id=10,
+            limit=2,
+        )
+
+        self.assertEqual(tuple(entry.note_id for entry in manifest), (11, 15))
+        self.assertEqual(
+            manifest[0].signature,
+            (
+                101,
+                -1,
+                7,
+                120,
+                18,
+                999,
+                hashlib.blake2b(b"front\x1fback", digest_size=16).digest(),
+                hashlib.blake2b(b" foo ", digest_size=16).digest(),
+            ),
+        )
+        self.assertEqual(database.calls[0][1], (10, 2))
+        query = database.calls[0][0].casefold()
+        self.assertIn("flds", query)
+        self.assertIn("tags", query)
+        self.assertNotIn("front\x1fback", repr(manifest))
+
+    def test_card_manifest_excludes_scheduling_and_uses_home_deck(self) -> None:
+        class _ManifestDB:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def all(self, sql, *args):
+                self.calls.append((sql, args))
+                # SQL computes odid-or-did; this is the resulting stable row.
+                return ((501, 51, 20),)
+
+        database = _ManifestDB()
+        manifest = adapter.AnkiCollectionReader.card_manifest_batch(
+            types.SimpleNamespace(db=database),
+            after_card_id=500,
+            limit=25,
+        )
+
+        self.assertEqual(manifest, ((501, 51, 20),))
+        self.assertEqual(manifest[0].signature, (51, 20))
+        self.assertEqual(database.calls[0][1], (500, 25))
+        query = database.calls[0][0].casefold()
+        for scheduling_column in ("queue", "due", "ivl", "reps", "flags"):
+            self.assertNotIn(scheduling_column, query)
+
+    def test_exact_manifest_ids_are_chunked_ordered_and_omit_deleted(self) -> None:
+        class _ManifestDB:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def all(self, _sql, *args):
+                self.calls.append(args)
+                rows = {
+                    11: (11, 101, -1, 7, 120, 18, 999, "one", " a "),
+                    15: (15, 102, 4, 8, 80, 0, 123, "two", " b "),
+                }
+                # Deliberately reverse database order; the API restores the
+                # exact caller order and omits nonexistent ID 13.
+                return tuple(rows[value] for value in reversed(args) if value in rows)
+
+        database = _ManifestDB()
+        manifest = adapter.AnkiCollectionReader.note_manifest_for_ids(
+            types.SimpleNamespace(db=database),
+            (15, 13, 11, 15, 0),
+        )
+
+        self.assertEqual(tuple(entry.note_id for entry in manifest), (15, 11))
+        self.assertEqual(database.calls, [(15, 13, 11)])
 
     def test_all_missing_ids_return_an_empty_snapshot(self) -> None:
         collection = _Collection(notes={})
