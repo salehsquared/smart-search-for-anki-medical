@@ -1,18 +1,19 @@
-# Local release verification record — v1.0.21
+# Release record — v1.0.21
 
 ## Status and identity
 
-- Status: local release candidate; not yet committed, tagged, or published
+- Status: public beta
 - Prepared: 2026-08-02 America/Phoenix
+- Published: 2026-08-03 UTC (2026-08-02 America/Phoenix)
 - Version: `1.0.21`
 - Supported Anki range: 24.11 through 26.08
 - AnkiWeb point-version range: minimum `241100`, hard maximum `-260800`
 - Semantic Search: macOS 14 or later on Apple silicon
 - Existing AnkiWeb item: `677438639`
 
-This file records local evidence only. It must not be changed to “published”
-until the live GitHub and AnkiWeb paths have independently passed the checks
-at the end of this record.
+v1.0.21 is live under the existing AnkiWeb item `677438639` and GitHub tag
+`v1.0.21`. The existing listing and its single compatibility branch were
+updated in place; no duplicate item or overlapping branch was created.
 
 ## Frozen candidate artifact
 
@@ -149,13 +150,73 @@ worker executes, and that path passed. The embedded Python also passes
 it. If a future Anki/Python extraction path begins preserving quarantine, the
 worker launch must be recertified.
 
-## Publication gates — do not complete locally
+## GitHub distribution
 
-- [ ] Commit and annotated tag `v1.0.21` point to the certified tree.
-- [ ] GitHub release assets exactly match the frozen archive and checksum.
-- [ ] Existing AnkiWeb item `677438639` is updated in place with the certified
-  archive and the existing compatibility range.
-- [ ] Boundary downloads at `241100` and `260800` hash-match the frozen file;
+- Pull request:
+  https://github.com/salehsquared/smart-search-for-anki-medical/pull/6
+- Merge commit: `d345015772aa9178154634f728fa6cbe25e89b63`
+- Annotated tag: `v1.0.21`
+- Public release:
+  https://github.com/salehsquared/smart-search-for-anki-medical/releases/tag/v1.0.21
+- Release validation:
+  https://github.com/salehsquared/smart-search-for-anki-medical/actions/runs/30791610404
+
+The ten-job GitHub matrix passed on Python 3.9, 3.11, and 3.13 and Anki 24.11,
+25.02.7, 25.07.5, 25.09.4, 25.09.5, 26.05, and 26.08. The public release
+contains the frozen `.ankiaddon` and its checksum sidecar. A fresh
+unauthenticated GitHub download was byte-identical to the frozen artifact, and
+the tagged screenshots used by AnkiWeb returned HTTP 200.
+
+## AnkiWeb distribution
+
+- Add-on code: `677438639`
+- Public listing: https://ankiweb.net/shared/info/677438639
+- Server range: `minpt=241100`, hard `maxpt=-260800`, `bidx=0`
+- Listing date: 2026-08-03 UTC (2026-08-02 America/Phoenix)
+
+The rendered listing shows v1.0.21, the memory-lifecycle change, both
+publication images, the expected support link, and Anki 24.11–26.08. Requests
+at point versions `241100`, `250207`, `250705`, `250904`, `250905`, `260500`,
+and `260800` reached the same compatibility branch. Requests at `241099`,
+`260801`, and `260900` returned HTTP 404.
+
+Boundary downloads at `241100` and `260800` each contained `58,084,711` bytes
+with SHA-256
+`9f3640fffaa964cd2fd1b530d6626ba7ce2fe32c1f07c4b572a731b2dc95375a`.
+Both were byte-identical to the frozen artifact, and the served manifest
+reported `human_version=1.0.21`, minimum `241100`, and package maximum
+`260800`.
+
+## Public numeric-code installation
+
+Anki's official `download_and_install_addon()` path completed clean installs
+from code `677438639` in disposable Anki 24.11 and 26.08 environments. Both
+returned `InstallOk`; all 66 archive members matched the frozen artifact
+byte-for-byte, the server metadata reported minimum `241100`, hard maximum
+`-260800`, and branch `0`, and each install contained only numeric folder
+`677438639` plus Anki-managed `meta.json`.
+
+A disposable Anki 26.05 environment then installed v1.0.20, added customized
+configuration, a `user_files` persistence sentinel, and a synthetic
+`search.sqlite3` database before updating through the same live numeric-code
+path. The update returned `InstallOk`, installed v1.0.21, preserved the stored
+configuration values and both files byte-for-byte, retained the database probe
+row, and left no named duplicate or `files_backup` directory. Anki correctly
+merged the preserved user configuration with defaults newly supplied by the
+release.
+
+No real Anki profile or installed add-on was opened or modified by these
+public-route tests.
+
+## Publication gates
+
+- [x] Commit and annotated tag `v1.0.21` point to the certified tree.
+- [x] GitHub release assets exactly match the frozen archive and checksum.
+- [x] Existing AnkiWeb item `677438639` was updated in place with the certified
+  archive and the existing compatibility branch.
+- [x] Boundary downloads at `241100` and `260800` hash-match the frozen file;
   `241099`, `260801`, and `260900` remain unavailable.
-- [ ] Numeric-code clean installs and a live v1.0.20-to-v1.0.21 upgrade preserve
+- [x] Numeric-code clean installs and a live v1.0.20-to-v1.0.21 upgrade preserve
   configuration and `user_files` without a duplicate add-on folder.
+
+First-window support monitoring remains ongoing.
