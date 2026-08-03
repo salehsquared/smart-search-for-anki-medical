@@ -52,6 +52,8 @@ usable while Semantic prepares.
 - Preview and edit the selected card in a resizable pane without leaving the
   search window; close it temporarily or expand it when more room is useful.
 - See compact suspension and flag indicators on each result.
+- Flag, suspension, and tag changes keep the current list in place; press
+  **Enter** or search again whenever you want filters to be reapplied.
 - Check one result, Shift-click a range, or choose **All shown**, **None**, or
   **Invert**.
 - Open exactly the checked cards in Anki's Browser.

@@ -110,7 +110,10 @@ _DEFAULT_DEBOUNCE_MS = 1200
 _DEFAULT_SEMANTIC_AUTOSTART_DELAY_MS = 20_000
 _SEMANTIC_AUTOSTART_RETRY_MS = 2_000
 _POST_REVIEW_MAINTENANCE_DELAY_MS = 5_000
-_SEMANTIC_IDLE_UNLOAD_MS = 2_000
+# Keep the isolated worker warm across an ordinary burst of searches. It lives
+# outside Anki and is still terminated immediately when the search window
+# closes, review begins, or the profile is retired.
+_SEMANTIC_IDLE_UNLOAD_MS = 90_000
 _SEMANTIC_DELTA_BATCH_SIZE = 250
 _RXTERMS_RESOURCE = Path("resources") / "medical_vocab" / "rxterms_202607.json.gz"
 _DIALOG_MANAGER_NAME = "SmartSearchMedical"
@@ -266,7 +269,7 @@ class AnkiSearchBackend:
         self._semantic_phase_detail = ""
         self._semantic_enabled = True
         self._auto_semantic_index = True
-        self._semantic_activity_callback: Callable[[], None] = _noop
+        self._semantic_activity_callback: Callable[[bool], None] = _noop
         self._semantic_cancelled_callback: Callable[[], None] = _noop
 
     # ------------------------------------------------------------------
@@ -288,9 +291,9 @@ class AnkiSearchBackend:
             return self._bundle_update_running
 
     def set_semantic_activity_callback(
-        self, callback: Callable[[], None] | None
+        self, callback: Callable[[bool], None] | None
     ) -> None:
-        """Notify host UI after a real Semantic query uses the local model."""
+        """Notify host UI when Semantic inference starts or becomes idle."""
 
         self._semantic_activity_callback = callback or _noop
 
@@ -1348,19 +1351,30 @@ class AnkiSearchBackend:
                     )
                     if semantic_provider is not None:
                         try:
-                            self._semantic_activity_callback()
+                            self._semantic_activity_callback(True)
                         except Exception:
                             pass
-                    with self._engine_lock:
-                        context.engine.semantic_provider = semantic_provider
-                    _raise_if_cancelled(event)
-                    response = context.engine.search(
-                        query,
-                        limit=request.limit,
-                        allowed_note_ids=allowed,
-                        mode=mode.value,
-                        cancel_check=lambda: _raise_if_cancelled(event),
-                    )
+                    try:
+                        with self._engine_lock:
+                            context.engine.semantic_provider = semantic_provider
+                        _raise_if_cancelled(event)
+                        response = context.engine.search(
+                            query,
+                            limit=request.limit,
+                            allowed_note_ids=allowed,
+                            mode=mode.value,
+                            cancel_check=lambda: _raise_if_cancelled(event),
+                        )
+                    finally:
+                        if semantic_provider is not None:
+                            # A superseded typing request may finish its one
+                            # bounded inference but discard the result. Reset
+                            # the lease from that completion so the replacement
+                            # request can reuse the warm helper.
+                            try:
+                                self._semantic_activity_callback(False)
+                            except Exception:
+                                pass
                 self._refresh_semantic_snapshot(context)
             else:
                 with self._engine_lock:
@@ -4034,7 +4048,9 @@ class SmartSearchAddonController:
             self._resume_after_review
         )
         self.backend.set_semantic_activity_callback(
-            lambda: self._run_on_main(self._arm_semantic_idle_unload)
+            lambda active: self._run_on_main(
+                lambda: self._semantic_activity_changed(active)
+            )
         )
         self.backend.set_semantic_cancelled_callback(
             lambda: self._run_on_main(self._semantic_maintenance_cancelled)
@@ -4219,7 +4235,24 @@ class SmartSearchAddonController:
         timer = self._semantic_unload_timer
         if timer is None:
             return
+        if self._maintenance_blocked() or not self._dialog_is_visible():
+            timer.stop()
+            abort = getattr(self.backend, "abort_semantic_runtime_now", None)
+            if callable(abort):
+                abort()
+            return
         timer.start(_SEMANTIC_IDLE_UNLOAD_MS)
+
+    def _semantic_activity_changed(self, active: bool) -> None:
+        """Stop the idle countdown during inference; arm it after completion."""
+
+        timer = self._semantic_unload_timer
+        if timer is None:
+            return
+        if active:
+            timer.stop()
+            return
+        self._arm_semantic_idle_unload()
 
     def _semantic_maintenance_cancelled(self) -> None:
         """Re-arm canceled first builds/deltas after their worker has exited."""
@@ -4328,9 +4361,12 @@ class SmartSearchAddonController:
                 config.get("debounce_ms", 160), 50, 2000, 160
             )
             try:
-                dialog._debounce.setInterval(debounce)
+                dialog.set_debounce_interval(debounce)
             except Exception:
-                pass
+                try:
+                    dialog._debounce.setInterval(debounce)
+                except Exception:
+                    pass
             self._dialog = dialog
             self._ui_controller = ui_controller
 
@@ -4783,6 +4819,7 @@ class SmartSearchAddonController:
         """Clear stale Python wrappers after an unexpected native deletion."""
 
         if self._dialog is dialog:
+            self._end_semantic_search_session()
             self._close_previewer(save=False)
             self._dialog = None
             self._mark_managed_dialog_closed()
@@ -4886,22 +4923,7 @@ class SmartSearchAddonController:
             return
 
         dialog = self._dialog
-        search_generation = None
-        ui_controller = self._ui_controller
         context = self.backend._context
-        if (
-            dialog is not None
-            and ui_controller is not None
-            and context is not None
-            and _collection_action_requires_requery(
-                action,
-                dialog.query(),
-                field_names=context.field_names,
-            )
-        ):
-            capture = getattr(ui_controller, "capture_search_generation", None)
-            if callable(capture):
-                search_generation = capture()
         if dialog is not None:
             try:
                 dialog.set_batch_action_busy(True, "Applying change…")
@@ -4918,7 +4940,6 @@ class SmartSearchAddonController:
                 on_success=lambda outcome: self._collection_action_succeeded(
                     action,
                     outcome,
-                    search_generation=search_generation,
                 ),
                 on_failure=self._collection_action_failed,
             )
@@ -4929,8 +4950,6 @@ class SmartSearchAddonController:
         self,
         action,
         outcome,
-        *,
-        search_generation: Any | None = None,
     ) -> None:
         message = format_action_message(action, outcome)
         dialog = self._dialog
@@ -4956,12 +4975,6 @@ class SmartSearchAddonController:
                 pass
         self._refresh_previewer()
         self._show_message(message)
-        if search_generation is None or int(getattr(outcome, "changed", 0)) <= 0:
-            return
-        ui_controller = self._ui_controller
-        rerun = getattr(ui_controller, "rerun_search_if_current", None)
-        if callable(rerun):
-            rerun(search_generation)
 
     def _collection_action_failed(self, error: Exception) -> None:
         message = f"Could not apply the selected change: {error}"
@@ -5675,8 +5688,8 @@ class SmartSearchAddonController:
 
     def _on_operation(self, changes: Any, handler: object | None) -> None:
         # Owned flag/suspension operations update their exact targets in the
-        # success callback and may rerun a card-filtered query there. Avoid a
-        # redundant state refresh racing that newer response.
+        # success callback. Keep the visible result set stable until the user
+        # explicitly searches again, and avoid a redundant state refresh.
         if bool(getattr(changes, "card", False)) and not isinstance(
             handler, _OwnedMutation
         ):
@@ -5983,8 +5996,18 @@ class SmartSearchAddonController:
             return
         if self._card_state_refresh_timer is not None:
             self._card_state_refresh_timer.stop()
+        self._end_semantic_search_session()
         self._close_previewer()
         self._mark_managed_dialog_closed()
+
+    def _end_semantic_search_session(self) -> None:
+        """Release the disposable model for every dialog-close path."""
+
+        if self._semantic_unload_timer is not None:
+            self._semantic_unload_timer.stop()
+        abort = getattr(self.backend, "abort_semantic_runtime_now", None)
+        if callable(abort):
+            abort()
 
     def _close_dialog(self) -> None:
         self._close_dialog_with_callback(lambda: None)
@@ -6010,6 +6033,10 @@ class SmartSearchAddonController:
                 ui_controller.pause()
             except (AttributeError, RuntimeError):
                 pass
+        # The managed close handshake clears ``self._dialog`` before Qt emits
+        # ``dialogClosed``, so release the worker here as well as in the direct
+        # close signal path.
+        self._end_semantic_search_session()
         if self._preview_open_timer is not None:
             self._preview_open_timer.stop()
         self._pending_preview_result = None
@@ -6532,48 +6559,6 @@ def _canonical_query(query: str) -> str:
         lambda match: f"{match.group('neg')}note:{match.group('value')}",
         str(query or "").strip(),
     )
-
-
-def _collection_action_requires_requery(
-    action: CollectionAction,
-    query: str,
-    *,
-    field_names: Iterable[str] = (),
-) -> bool:
-    """Whether an action can change membership in the visible native filter.
-
-    Most actions can be represented immediately by updating the row's live
-    state. Native card/note filters are different: after ``is:suspended`` is
-    unsuspended, for example, the card must disappear. Complex expressions
-    are conservatively rerun because their full meaning is delegated to Anki.
-    """
-
-    relevant_keys = {
-        ActionKind.FLAG: {"flag"},
-        ActionKind.SUSPEND: {"is", "prop"},
-        ActionKind.UNSUSPEND: {"is", "prop"},
-        ActionKind.ADD_TAGS: {"tag"},
-        ActionKind.REMOVE_TAGS: {"tag"},
-    }.get(action.kind, set())
-    if not relevant_keys:
-        return False
-
-    parsed = QueryParser(field_names=field_names).parse(_canonical_query(query))
-    if parsed.native_search_required:
-        # The complete expression is evaluated by Anki. Rerunning is cheap,
-        # asynchronous, and safer than trying to infer Boolean membership.
-        return True
-
-    for raw_filter in parsed.anki_filters:
-        candidate = str(raw_filter).strip()
-        if candidate.startswith("-"):
-            candidate = candidate[1:]
-        if len(candidate) >= 2 and candidate[0] == candidate[-1] == '"':
-            candidate = candidate[1:-1]
-        key, separator, _value = candidate.partition(":")
-        if separator and key.strip('"').casefold() in relevant_keys:
-            return True
-    return False
 
 
 def _profile_name(mw: Any) -> str:

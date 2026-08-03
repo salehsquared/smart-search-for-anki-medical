@@ -241,6 +241,46 @@ class SemanticServiceTests(unittest.TestCase):
             manager.activate_vector_runtime.assert_called_once_with()
             service.index.search.assert_called_once()
 
+    def test_superseded_search_keeps_completed_interactive_worker_warm(self) -> None:
+        class Cancelled(RuntimeError):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            service, manager = self._service(Path(directory))
+            service.index = MagicMock()
+            service.index.count.return_value = 1
+            cancelled = threading.Event()
+
+            class CancelAfterInference(_FakeWorker):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.worker_cancel_checks = []
+
+                def embed(self, texts, *, background, cancel_check=None):
+                    self.worker_cancel_checks.append(cancel_check)
+                    result = super().embed(
+                        texts,
+                        background=background,
+                        cancel_check=cancel_check,
+                    )
+                    cancelled.set()
+                    return result
+
+            worker = CancelAfterInference()
+            service._worker = worker
+
+            def checkpoint() -> None:
+                if cancelled.is_set():
+                    raise Cancelled()
+
+            with self.assertRaises(Cancelled):
+                service.search("heart failure", cancel_check=checkpoint)
+
+            self.assertEqual(worker.worker_cancel_checks, [None])
+            self.assertTrue(worker.running)
+            manager.activate_vector_runtime.assert_not_called()
+            service.index.search.assert_not_called()
+
     def test_repair_install_reaps_worker_before_runtime_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             service, manager = self._service(Path(directory))

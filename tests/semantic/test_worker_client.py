@@ -309,8 +309,26 @@ class SemanticWorkerClientTests(unittest.TestCase):
             )
 
         self.assertEqual(command[:4], ["/usr/sbin/taskpolicy", "-m", "256", "-d"])
+        self.assertEqual(command[4], "throttle")
         self.assertIn("background", command)
         self.assertIn("-b", command)
+
+        with patch("semantic.worker_client.Path.is_file", return_value=True):
+            interactive = client._worker_command(
+                9,
+                self.root / "semantic" / "worker_main.py",
+                background=False,
+            )
+
+        self.assertEqual(interactive[:5], [
+            "/usr/sbin/taskpolicy",
+            "-m",
+            "256",
+            "-d",
+            "default",
+        ])
+        self.assertIn("utility", interactive)
+        self.assertNotIn("-b", interactive)
 
     def test_policy_change_restarts_worker_instead_of_reusing_wrong_qos(self) -> None:
         client = self._client()

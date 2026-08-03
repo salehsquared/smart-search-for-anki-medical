@@ -543,6 +543,22 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertNotEqual(dialog.summary.text(), "Searching…")
         dialog.deleteLater()
 
+    def test_semantic_typing_uses_a_cold_start_safe_debounce(self) -> None:
+        dialog = SearchDialog()
+        dialog.set_debounce_interval(160)
+
+        dialog.set_mode(SearchMode.SMART)
+        dialog._on_text_edited("heart")
+        self.assertTrue(dialog._debounce.isActive())
+        self.assertEqual(dialog._debounce.interval(), 160)
+
+        dialog.set_mode(SearchMode.SEMANTIC)
+        dialog._on_text_edited("heart failure")
+        self.assertTrue(dialog._debounce.isActive())
+        self.assertEqual(dialog._debounce.interval(), 450)
+
+        dialog.deleteLater()
+
     def test_searching_keeps_prior_results_until_worker_replaces_them(self) -> None:
         dialog = SearchDialog()
         dialog.show_status(IndexStatus(IndexState.READY))
@@ -1395,7 +1411,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.21")
+        self.assertEqual(fallback.version, "1.0.22")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())

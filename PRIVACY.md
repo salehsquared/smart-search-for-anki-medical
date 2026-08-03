@@ -1,7 +1,7 @@
 # Privacy
 
 **Effective date:** July 29, 2026
-**Applies to:** Smart Search for Anki — Medical 1.0.21
+**Applies to:** Smart Search for Anki — Medical 1.0.22
 
 ## Plain-language summary
 

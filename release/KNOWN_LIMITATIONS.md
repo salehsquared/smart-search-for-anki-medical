@@ -4,10 +4,10 @@
 
 - Smart Search runs in Anki Desktop only. AnkiMobile and AnkiDroid do not load
   desktop add-ons.
-- v1.0.21 supports Anki Desktop 24.11 through 26.08, including the 25.02,
+- v1.0.22 supports Anki Desktop 24.11 through 26.08, including the 25.02,
   25.07, 25.09, 26.05, and 26.08 release families.
 - The supported-version matrix was exercised on macOS with Apple silicon.
-  Windows, Linux, and Intel Mac integration are not part of the v1.0.21 support
+  Windows, Linux, and Intel Mac integration are not part of the v1.0.22 support
   claim.
 - Semantic Search currently supports **macOS 14 or later on Apple-silicon Macs
   only**.
@@ -40,9 +40,10 @@
   bounded messages, and a 256 MiB macOS process-memory ceiling, but a full
   first-time Semantic build is intentionally substantial work.
 - Inference runs in a standalone helper process, not inside Anki. The helper is
-  stopped before review and after Semantic work, so its model, native libraries,
-  and allocator caches are reclaimed by the operating system. A small
-  NumPy-only vector layer remains available in Anki for Semantic ranking.
+  stopped before review and after a short warm search session, so its model,
+  native libraries, and allocator caches are reclaimed by the operating
+  system. A small NumPy-only vector layer remains available in Anki for
+  Semantic ranking.
 - The bundled standalone interpreter increases add-on download and installed
   disk size. The downloaded model and per-profile vector index add further
   local disk use.

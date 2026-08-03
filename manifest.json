@@ -1,9 +1,9 @@
 {
   "package": "smart_search_medical",
   "name": "Smart Search for Anki — Medical",
-  "mod": 1785728669,
+  "mod": 1785785156,
   "conflicts": [],
   "min_point_version": 241100,
   "max_point_version": 260800,
-  "human_version": "1.0.21"
+  "human_version": "1.0.22"
 }
