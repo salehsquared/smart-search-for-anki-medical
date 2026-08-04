@@ -1047,7 +1047,7 @@ class ControllerTests(unittest.TestCase):
             [(2001, 4, True), (2002, 0, False)],
         )
 
-    def test_smart_filter_keeps_only_matching_sibling_through_refresh(self) -> None:
+    def test_combined_smart_filters_keep_only_matching_sibling(self) -> None:
         context = self.backend._context
         assert context
         context.index.rebuild(
@@ -1081,13 +1081,24 @@ class ControllerTests(unittest.TestCase):
             queue=2,
             user_flag=lambda: 0,
         )
-        collection.card_query_results["is:suspended"] = (2001,)
+        native_filter = "deck:AnKing tag:Psychiatry is:suspended"
+        collection.card_query_results[native_filter] = (2001,)
 
+        unfiltered = []
+        self.backend.submit_search(
+            contracts.SearchRequest(
+                request_id=71,
+                query="bupropion",
+                mode=contracts.SearchMode.SMART,
+            ),
+            unfiltered.append,
+            self.fail,
+        )
         received = []
         self.backend.submit_search(
             contracts.SearchRequest(
                 request_id=72,
-                query="is:suspended bupropion",
+                query=f"{native_filter} bupropion",
                 mode=contracts.SearchMode.SMART,
             ),
             received.append,
@@ -1095,16 +1106,19 @@ class ControllerTests(unittest.TestCase):
         )
 
         result = received[0].results[0]
-        self.assertEqual(collection.queries, ["is:suspended"])
+        base_result = unfiltered[0].results[0]
+        self.assertEqual(collection.queries, [native_filter])
+        self.assertEqual(base_result.card_ids, (2001, 2002))
         self.assertEqual(result.card_ids, (2001,))
         self.assertEqual(result.sibling_count, 1)
+        self.assertEqual(result.score, base_result.score)
         self.assertEqual(
             [(state.card_id, state.flag, state.suspended) for state in result.card_states],
             [(2001, 1, True)],
         )
         self.assertEqual(
             tuple(chip.token for chip in received[0].active_filters),
-            ("is:suspended",),
+            ("deck:AnKing", "tag:Psychiatry", "is:suspended"),
         )
 
         refreshed = []

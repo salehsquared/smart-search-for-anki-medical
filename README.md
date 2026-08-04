@@ -23,6 +23,8 @@ type naturally, and press **Return** to open the result in Anki's Browser.
 - Native filters such as `deck:`, `tag:`, `note:`, `is:`, `flag:`, `prop:`,
   `rated:`, field searches, Boolean groups, and wildcards are delegated to
   Anki.
+- In Smart and Semantic modes, simple filters constrain the final eligible
+  cards without changing the free-text relevance calculation.
 - Card-specific filters return only the sibling cards that actually match.
 - Choose one or several nested decks from the searchable deck picker without
   having to remember or type their full paths.

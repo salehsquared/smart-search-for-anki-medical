@@ -146,14 +146,6 @@ class SearchEngine:
                     warnings=warnings,
                     filters_applied=False,
                 )
-        if allowed is not None and not allowed:
-            return self._response(
-                parsed,
-                started,
-                warnings=warnings,
-                filters_applied=filters_applied,
-            )
-
         if not parsed.positive_terms:
             if parsed.requires_anki_filter and filters_applied:
                 documents = self.index.documents(allowed)
@@ -201,9 +193,29 @@ class SearchEngine:
                 alias_expansions = self._aliases(effective_terms, vocabulary)
             checkpoint()
 
+        # Preserve query-level behavior even when a valid filter happens to
+        # match no cards. There is no relevance work to perform, but typo and
+        # alias feedback must remain identical to the unfiltered free text.
+        if allowed is not None and not allowed:
+            return self._response(
+                parsed,
+                started,
+                corrections=tuple(corrections),
+                alias_expansions=tuple(alias_expansions),
+                warnings=warnings,
+                filters_applied=filters_applied,
+            )
+
         ranked: dict[int, RankedCandidate] = {}
         documents: dict[int, IndexedDocument] = {}
         source_hits: list[tuple[str, Sequence[FTSDocumentHit], float, MatchReason]] = []
+
+        # Native filters are an eligibility mask, not part of relevance.
+        # Retrieve and rank the free-text query against the same global corpus
+        # regardless of deck/tag/card state, then intersect the ranked output
+        # below. This guarantees that adding a simple filter cannot alter a
+        # surviving note's score, order, typo/alias expansion, or cutoff.
+        relevance_scope = None
 
         if normalized_mode != "semantic":
             literal_strict = _fts_expression(positive_terms, joiner="AND")
@@ -214,7 +226,7 @@ class SearchEngine:
                         self.index.search_fts(
                             literal_strict,
                             limit=max(250, limit * 5),
-                            allowed_note_ids=allowed,
+                            allowed_note_ids=relevance_scope,
                             cancel_check=checkpoint,
                         ),
                         4.0,
@@ -234,7 +246,7 @@ class SearchEngine:
                         self.index.search_fts(
                             literal_broad,
                             limit=max(300, limit * 6),
-                            allowed_note_ids=allowed,
+                            allowed_note_ids=relevance_scope,
                             cancel_check=checkpoint,
                         ),
                         1.0,
@@ -255,7 +267,7 @@ class SearchEngine:
                         self.index.search_fts(
                             corrected_expression,
                             limit=max(250, limit * 5),
-                            allowed_note_ids=allowed,
+                            allowed_note_ids=relevance_scope,
                             cancel_check=checkpoint,
                         ),
                         2.8,
@@ -282,7 +294,7 @@ class SearchEngine:
                         self.index.search_fts(
                             alias_expression,
                             limit=max(250, limit * 5),
-                            allowed_note_ids=allowed,
+                            allowed_note_ids=relevance_scope,
                             cancel_check=checkpoint,
                         ),
                         2.4,
@@ -320,7 +332,7 @@ class SearchEngine:
                 semantic_hits = self.semantic_provider.search(
                     semantic_query,
                     limit=max(100, limit * 3),
-                    allowed_note_ids=allowed,
+                    allowed_note_ids=relevance_scope,
                     cancel_check=checkpoint,
                 )
             except Exception as error:
@@ -383,13 +395,22 @@ class SearchEngine:
             ordered,
             mode=normalized_mode,
         )
+        eligible = (
+            relevant
+            if allowed is None
+            else tuple(
+                candidate
+                for candidate in relevant
+                if candidate.note_id in allowed
+            )
+        )
         results = tuple(
             _to_search_result(
                 candidate,
                 documents[candidate.note_id],
                 all_needles,
             )
-            for candidate in relevant[:limit]
+            for candidate in eligible[:limit]
         )
         return self._response(
             parsed,
@@ -397,7 +418,7 @@ class SearchEngine:
             results=results,
             corrections=tuple(corrections),
             alias_expansions=tuple(alias_expansions),
-            total_candidates=len(relevant),
+            total_candidates=len(eligible),
             warnings=warnings,
             filters_applied=filters_applied,
         )

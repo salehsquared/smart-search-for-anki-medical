@@ -372,6 +372,205 @@ class IndexSearchTests(unittest.TestCase):
         )
         self.assertEqual(resolved.results[0].note_id, 1001)
 
+    def test_positive_filters_are_post_ranking_eligibility_masks(self) -> None:
+        unfiltered = self.engine.search("bupropion", limit=50)
+
+        with mock.patch.object(
+            self.index,
+            "search_fts",
+            wraps=self.index.search_fts,
+        ) as search_fts:
+            filtered = self.engine.search(
+                "deck:AnKing bupropion",
+                allowed_note_ids={1001},
+                limit=50,
+            )
+
+        # The free-text retrieval universe must be identical. Native filters
+        # are applied only after global scoring and relevance cutoff.
+        self.assertTrue(search_fts.call_args_list)
+        self.assertTrue(
+            all(
+                call.kwargs["allowed_note_ids"] is None
+                for call in search_fts.call_args_list
+            )
+        )
+        expected = [
+            result for result in unfiltered.results if result.note_id == 1001
+        ]
+        self.assertEqual(
+            [result.note_id for result in filtered.results],
+            [result.note_id for result in expected],
+        )
+        self.assertEqual(
+            [result.score for result in filtered.results],
+            [result.score for result in expected],
+        )
+
+    def test_empty_filter_scope_preserves_typo_and_alias_feedback(self) -> None:
+        self.index.set_aliases(
+            {"wellbutrin": ("bupropion",)},
+            source="test",
+        )
+        unfiltered = self.engine.search("buproprion")
+        filtered = self.engine.search(
+            "deck:NoMatches buproprion",
+            allowed_note_ids=set(),
+        )
+
+        self.assertFalse(filtered.results)
+        self.assertEqual(filtered.corrections, unfiltered.corrections)
+        self.assertEqual(filtered.alias_expansions, unfiltered.alias_expansions)
+
+    def test_filter_preserves_global_order_with_limit_and_negative_term(self) -> None:
+        notes = [
+            IndexedNote(
+                note_id,
+                {
+                    "Text": (
+                        "A1c diabetes pediatric"
+                        if note_id == 6
+                        else "A1c diabetes monitoring"
+                    )
+                },
+            )
+            for note_id in range(1, 7)
+        ]
+        allowed = {2, 4, 5, 6}
+
+        with tempfile.TemporaryDirectory() as directory:
+            index = SmartSearchIndex(Path(directory) / "index.sqlite3")
+            index.rebuild(notes)
+            try:
+                engine = SearchEngine(index)
+                global_results = engine.search(
+                    "a1c -pediatric",
+                    mode="smart",
+                    limit=50,
+                )
+                visible_unfiltered = engine.search(
+                    "a1c -pediatric",
+                    mode="smart",
+                    limit=3,
+                )
+                filtered = engine.search(
+                    "deck:xyz a1c -pediatric",
+                    mode="smart",
+                    allowed_note_ids=allowed,
+                    limit=3,
+                )
+            finally:
+                index.close()
+
+        global_eligible = [
+            result
+            for result in global_results.results
+            if result.note_id in allowed
+        ]
+        self.assertEqual(
+            [result.note_id for result in visible_unfiltered.results],
+            [1, 2, 3],
+        )
+        self.assertEqual(
+            [result.note_id for result in filtered.results],
+            [result.note_id for result in global_eligible[:3]],
+        )
+        self.assertEqual(
+            [result.score for result in filtered.results],
+            [result.score for result in global_eligible[:3]],
+        )
+        self.assertIn(2, [result.note_id for result in filtered.results])
+        self.assertNotIn(6, [result.note_id for result in filtered.results])
+
+    def test_filter_cannot_change_smart_rank_fusion_before_limit(self) -> None:
+        from backend.index import FTSDocumentHit, IndexedDocument
+        from backend.models import AliasExpansion, Correction
+
+        def document(note_id: int, text: str) -> IndexedDocument:
+            return IndexedDocument(
+                note_id,
+                (note_id,),
+                text,
+                text,
+                text,
+                {"Text": text},
+                (),
+                (),
+                "Cloze",
+            )
+
+        first = document(1, "orig")
+        second = document(2, "orig corr alias")
+        literal_fillers = [
+            document(10_000 + offset, "orig") for offset in range(98)
+        ]
+        corrected_fillers = [
+            document(20_000 + offset, "corr") for offset in range(100)
+        ]
+        alias_fillers = [
+            document(30_000 + offset, "alias") for offset in range(100)
+        ]
+
+        class FakeIndex:
+            generation = 1
+
+            @staticmethod
+            def field_names():
+                return ()
+
+            @staticmethod
+            def search_fts(
+                expression,
+                *,
+                limit=250,
+                allowed_note_ids=None,
+                cancel_check=None,
+            ):
+                if cancel_check:
+                    cancel_check()
+                if "alias" in expression:
+                    sequence = [*alias_fillers, second]
+                elif "corr" in expression:
+                    sequence = [*corrected_fillers, second]
+                else:
+                    sequence = [first, *literal_fillers, second]
+                if allowed_note_ids is not None:
+                    sequence = [
+                        item
+                        for item in sequence
+                        if item.note_id in allowed_note_ids
+                    ]
+                return tuple(
+                    FTSDocumentHit(item, rank, float(rank))
+                    for rank, item in enumerate(sequence[:limit], start=1)
+                )
+
+        class DeterministicEngine(SearchEngine):
+            def _ensure_vocabulary(self, **_kwargs):
+                return object()
+
+            def _corrections(self, _parsed, _vocabulary, **_kwargs):
+                return [Correction("orig", "corr", 1, 0.99, True)]
+
+            def _aliases(self, _terms, _vocabulary):
+                return [AliasExpansion("corr", "alias", "forward")]
+
+        engine = DeterministicEngine(FakeIndex())
+        unfiltered = engine.search("orig", mode="smart", limit=1)
+        filtered = engine.search(
+            "deck:F orig",
+            mode="smart",
+            limit=1,
+            allowed_note_ids={1, 2},
+        )
+
+        self.assertEqual([item.note_id for item in unfiltered.results], [1])
+        self.assertEqual([item.note_id for item in filtered.results], [1])
+        self.assertEqual(
+            filtered.results[0].score,
+            unfiltered.results[0].score,
+        )
+
     def test_filter_only_query_returns_allowed_documents(self) -> None:
         response = self.engine.search("tag:Cardiology", allowed_note_ids={1002})
         self.assertEqual(response.total_candidates, 1)
@@ -658,6 +857,82 @@ class SemanticFusionTests(unittest.TestCase):
                 self.assertIn(notes[-1].note_id, [item.note_id for item in response.results])
             finally:
                 index.close()
+
+    def test_semantic_filter_cannot_raise_cutoff_or_remove_global_match(self) -> None:
+        from backend.search import SemanticHit
+
+        deck_ids = set(range(1, 16))
+        notes = [
+            IndexedNote(note_id, {"Text": f"indexed note {note_id}"})
+            for note_id in range(1, 31)
+        ]
+        scores = {
+            note_id: (0.50 if note_id == 1 else 0.90)
+            for note_id in deck_ids
+        }
+        scores.update({note_id: 0.10 for note_id in range(16, 31)})
+        received_scopes = []
+
+        class FakeSemantic:
+            def search(
+                self,
+                query,
+                *,
+                limit=50,
+                allowed_note_ids=None,
+                cancel_check=None,
+            ):
+                del query
+                if cancel_check:
+                    cancel_check()
+                received_scopes.append(allowed_note_ids)
+                eligible = (
+                    scores
+                    if allowed_note_ids is None
+                    else {
+                        note_id: score
+                        for note_id, score in scores.items()
+                        if note_id in allowed_note_ids
+                    }
+                )
+                return [
+                    SemanticHit(note_id, score)
+                    for note_id, score in sorted(
+                        eligible.items(),
+                        key=lambda item: (-item[1], item[0]),
+                    )[:limit]
+                ]
+
+        with tempfile.TemporaryDirectory() as directory:
+            index = SmartSearchIndex(Path(directory) / "index.sqlite3")
+            index.rebuild(notes)
+            try:
+                engine = SearchEngine(index, semantic_provider=FakeSemantic())
+                unfiltered = engine.search("a1c", mode="semantic", limit=50)
+                filtered = engine.search(
+                    "deck:xyz a1c",
+                    mode="semantic",
+                    allowed_note_ids=deck_ids,
+                    limit=50,
+                )
+            finally:
+                index.close()
+
+        expected = [
+            result
+            for result in unfiltered.results
+            if result.note_id in deck_ids
+        ]
+        self.assertEqual(received_scopes, [None, None])
+        self.assertIn(1, [result.note_id for result in expected])
+        self.assertEqual(
+            [result.note_id for result in filtered.results],
+            [result.note_id for result in expected],
+        )
+        self.assertEqual(
+            [result.score for result in filtered.results],
+            [result.score for result in expected],
+        )
 
     def test_semantic_mode_corrects_high_confidence_typo_before_embedding(self) -> None:
         from backend.search import SemanticHit

@@ -11,6 +11,13 @@
   **Answer**, or editable fields. Accepted changes apply immediately to an
   already-visible preview and are remembered per installation.
 
+### Changed
+
+- Simple native filters now act only as final card-eligibility constraints in
+  Smart and Semantic modes. Adding `deck:`, `tag:`, `is:`, or another simple
+  filter no longer changes free-text scores, ordering, aliases, corrections,
+  or adaptive relevance cutoffs for cards that remain eligible.
+
 ## [1.0.24] — 2026-08-03
 
 ### Added
