@@ -1,7 +1,7 @@
 # Privacy
 
 **Effective date:** July 29, 2026
-**Applies to:** Smart Search for Anki — Medical 1.0.23
+**Applies to:** Smart Search for Anki — Medical 1.0.24
 
 ## Plain-language summary
 
@@ -118,14 +118,19 @@ destination's privacy policy.
 ## Changes to the Anki collection
 
 Searching and indexing are read-only. If a user explicitly chooses an action
-such as adding/removing tags, changing a flag, or suspending/unsuspending
-cards, the add-on asks Anki to perform that operation through Anki's supported,
-undoable collection operations.
+such as adding/removing tags, changing a flag, suspending/unsuspending, burying,
+or moving cards, the add-on asks Anki to perform that operation through Anki's
+supported, undoable collection operations.
 
-Those user-requested changes become ordinary Anki collection data. If the user
-has Anki synchronization enabled, Anki may synchronize them under Anki's own
-terms and privacy practices. Smart Search does not independently transmit
-them.
+Choosing **Create Copy…** saves any pending inline edit, then asks Anki to open
+its native Add Cards editor prefilled from the selected note. No new note or
+card is created unless the user clicks **Add**. At that point Anki creates
+ordinary new collection data with fresh note/card identities and scheduling.
+
+Those user-requested changes and newly added copies become ordinary Anki
+collection data. If the user has Anki synchronization enabled, Anki may
+synchronize them under Anki's own terms and privacy practices. Smart Search
+does not independently transmit them.
 
 ## Retention and deletion
 
