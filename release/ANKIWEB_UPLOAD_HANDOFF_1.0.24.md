@@ -1,10 +1,10 @@
-# AnkiWeb upload handoff — v1.0.24
+# Completed AnkiWeb upload handoff — v1.0.24
 
-## Candidate status
+## Publication status
 
-- Existing item `677438639` must be updated in place.
-- Keep its single compatibility branch; do not create a duplicate listing or
-  overlapping branch.
+- Existing item `677438639` was updated in place on 2026-08-04 UTC.
+- Its single compatibility branch was retained; no duplicate listing or
+  overlapping branch was created.
 
 ## Upload fields
 
@@ -18,17 +18,17 @@
 
 Use `release/ANKIWEB_DESCRIPTION_1.0.24.md` as the exact description source.
 
-## Required post-upload checks
+## Completed post-upload checks
 
-1. Confirm AnkiWeb reports human version `1.0.24`, minimum `241100`, and hard
+1. AnkiWeb reports human version `1.0.24`, minimum `241100`, and hard
    maximum `-260800`.
-2. Confirm boundary downloads at `241100` and `260800` are byte-identical to
-   the frozen archive; reject `241099`, `260801`, and `260900`.
-3. Install code `677438639` into disposable Anki 24.11 and 26.08 environments
+2. Boundary downloads at `241100` and `260800` are byte-identical to the frozen
+   archive; `241099`, `260801`, and `260900` are rejected.
+3. Code `677438639` passed disposable clean installs on Anki 24.11 and 26.08
    through Anki's official installer.
-4. Run a live v1.0.23-to-v1.0.24 update in disposable Anki 26.05 while
+4. A live v1.0.23-to-v1.0.24 update passed on disposable Anki 26.05 while
    preserving customized configuration, `user_files`, and synthetic SQLite
    data.
-5. Verify the rendered listing, images, support links, GitHub assets, and
-   compatibility text.
-6. Record final evidence in `release/RELEASE_RECORD_1.0.24.md`.
+5. The rendered listing, image, support links, GitHub assets, and compatibility
+   text were verified.
+6. Final evidence is recorded in `release/RELEASE_RECORD_1.0.24.md`.
