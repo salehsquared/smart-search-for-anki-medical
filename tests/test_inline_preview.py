@@ -197,5 +197,240 @@ class InlinePreviewSideTests(unittest.TestCase):
         self.assertEqual(self.render_requests, [True, True, True])
 
 
+class InlinePreviewDefaultTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.inspector = inline_preview.InlineResultInspector.__new__(
+            inline_preview.InlineResultInspector
+        )
+        self.inspector._disposed = False
+        self.inspector._hidden = False
+        self.inspector._default_view = "answer"
+        self.inspector._default_apply_generation = 0
+        self.inspector._default_detach_pending = False
+        self.inspector._result = None
+        self.inspector._card_ids = ()
+        self.inspector._sibling_index = 0
+        self.inspector._state = "question"
+        self.inspector._editor = None
+        self.inspector._editor_switching = False
+        self.inspector._editor_target_generation = 0
+        self.inspector._editor_target_force = False
+        self.inspector._update_controls = lambda: None
+        self.inspector._schedule_render = lambda *, force=False: None
+        self.inspector._sync_editor_to_target = lambda: None
+        self.titles = []
+        self.mode = ["card"]
+        self.inspector.pane = types.SimpleNamespace(
+            set_target_title=self.titles.append,
+            mode=lambda: self.mode[0],
+            set_mode=lambda value: self.mode.__setitem__(0, value),
+        )
+
+    def test_new_target_applies_default_but_force_refresh_preserves_manual_side(self) -> None:
+        applied = []
+        self.inspector._apply_default_view = lambda: applied.append(True)
+        result = types.SimpleNamespace(
+            note_id=7,
+            card_ids=(71,),
+            title="Seven",
+        )
+
+        self.inspector.set_result(result)
+        self.inspector._state = "question"
+        self.inspector.set_result(result, force=True)
+
+        self.assertEqual(applied, [True])
+        self.assertEqual(self.inspector._state, "question")
+        self.assertEqual(self.titles, ["Seven", "Seven"])
+
+    def test_answer_default_sets_card_surface_and_answer_side(self) -> None:
+        surfaces = []
+        renders = []
+        self.inspector._set_surface_mode = surfaces.append
+        self.inspector._schedule_render = (
+            lambda *, force=False: renders.append(bool(force))
+        )
+
+        self.inspector._apply_card_default()
+
+        self.assertEqual(self.mode[0], "card")
+        self.assertEqual(self.inspector._state, "answer")
+        self.assertEqual(surfaces, ["card"])
+        self.assertEqual(renders, [True])
+
+    def test_visible_default_change_applies_immediately_but_hidden_change_waits(self) -> None:
+        applied = []
+        self.inspector._apply_default_view = lambda: applied.append(
+            self.inspector._default_view
+        )
+
+        self.inspector.set_default_view("EDIT", apply_now=True)
+        self.inspector._hidden = True
+        self.inspector.set_default_view("answer", apply_now=True)
+
+        self.assertEqual(applied, ["edit"])
+        self.assertEqual(self.inspector._default_view, "answer")
+
+    def test_switching_from_edit_to_answer_waits_for_editor_save(self) -> None:
+        self.mode[0] = "edit"
+        callbacks = []
+        applied = []
+        self.inspector.prepare_for_external_change = callbacks.append
+        self.inspector._apply_card_default = lambda: applied.append(
+            self.inspector._default_view
+        )
+
+        self.inspector._apply_default_view()
+
+        self.assertEqual(applied, [])
+        self.assertEqual(len(callbacks), 1)
+        callbacks.pop()()
+        self.assertEqual(applied, ["answer"])
+
+
+class _EditorNote:
+    def __init__(self, note_id: int) -> None:
+        self.id = note_id
+
+
+class _EditorCard:
+    def __init__(self, note_id: int) -> None:
+        self._note = _EditorNote(note_id)
+
+    def note(self):
+        return self._note
+
+
+class _EditorBase:
+    def __init__(self) -> None:
+        self.card = None
+        self.set_calls = []
+        self.save_callbacks = []
+        self.reload_calls = 0
+
+    def call_after_note_saved(self, callback) -> None:
+        self.save_callbacks.append(callback)
+
+    def finish_save(self) -> None:
+        self.save_callbacks.pop(0)()
+
+
+class _LegacyEditor(_EditorBase):
+    def __init__(self, note=None) -> None:
+        super().__init__()
+        self.note = note
+
+    def set_note(self, note) -> None:
+        self.set_calls.append(note)
+        self.note = note
+
+
+class _ModernEditor(_EditorBase):
+    """Anki 26.08 shape: no .note and set_note(None) keeps stale nid."""
+
+    def __init__(self, nid=None) -> None:
+        super().__init__()
+        self.nid = nid
+
+    def set_note(self, note) -> None:
+        self.set_calls.append(note)
+        if note is not None:
+            self.nid = note.id
+
+    def reload_note(self) -> None:
+        self.reload_calls += 1
+
+
+class InlinePreviewEditorCompatibilityTests(unittest.TestCase):
+    def _inspector(self, editor, card):
+        inspector = inline_preview.InlineResultInspector.__new__(
+            inline_preview.InlineResultInspector
+        )
+        inspector._editor = editor
+        inspector._attached_editor_note_id = 0
+        inspector._editor_switching = False
+        inspector._editor_target_force = False
+        inspector._disposed = False
+        inspector._hidden = False
+        inspector._default_detach_pending = False
+        inspector._current_card = lambda: card
+        inspector.pane = types.SimpleNamespace(mode=lambda: "edit")
+        return inspector
+
+    def test_modern_editor_initial_target_does_not_require_note_attribute(self) -> None:
+        card = _EditorCard(20)
+        editor = _ModernEditor()
+        inspector = self._inspector(editor, card)
+
+        inspector._sync_editor_to_target()
+
+        self.assertEqual(inspector._attached_editor_note_id, 20)
+        self.assertIs(editor.card, card)
+        self.assertEqual(editor.nid, 20)
+
+    def test_legacy_editor_initial_target_uses_the_same_owned_identity(self) -> None:
+        card = _EditorCard(20)
+        editor = _LegacyEditor()
+        inspector = self._inspector(editor, card)
+
+        inspector._sync_editor_to_target()
+
+        self.assertEqual(inspector._attached_editor_note_id, 20)
+        self.assertEqual(editor.note.id, 20)
+
+    def test_switch_saves_old_note_and_rapid_motion_uses_latest_target(self) -> None:
+        current = [_EditorCard(20)]
+        editor = _ModernEditor(nid=10)
+        inspector = self._inspector(editor, current[0])
+        inspector._attached_editor_note_id = 10
+        inspector._current_card = lambda: current[0]
+
+        inspector._sync_editor_to_target()
+        self.assertTrue(inspector._editor_switching)
+        self.assertEqual(editor.set_calls, [])
+
+        current[0] = _EditorCard(30)
+        inspector._sync_editor_to_target()
+        self.assertEqual(len(editor.save_callbacks), 1)
+        editor.finish_save()
+
+        self.assertFalse(inspector._editor_switching)
+        self.assertEqual(inspector._attached_editor_note_id, 30)
+        self.assertEqual(editor.set_calls[-1].id, 30)
+
+    def test_flush_and_detach_work_when_modern_nid_remains_stale(self) -> None:
+        editor = _ModernEditor(nid=20)
+        inspector = self._inspector(editor, _EditorCard(20))
+        inspector._attached_editor_note_id = 20
+        completed = []
+
+        inspector.flush(lambda: completed.append(True))
+        self.assertEqual(completed, [])
+        editor.finish_save()
+        self.assertEqual(completed, [True])
+
+        inspector._detach_editor()
+        self.assertEqual(inspector._attached_editor_note_id, 0)
+        self.assertEqual(editor.nid, 20)
+        self.assertIsNone(editor.set_calls[-1])
+
+        inspector.flush(lambda: completed.append(False))
+        self.assertEqual(completed, [True, False])
+
+    def test_foreign_note_change_never_reloads_live_unsaved_editor(self) -> None:
+        editor = _ModernEditor(nid=20)
+        inspector = self._inspector(editor, _EditorCard(20))
+        inspector._attached_editor_note_id = 20
+        inspector.refresh = lambda: None
+
+        inspector._on_operation_did_execute(
+            types.SimpleNamespace(note_text=True, card=False),
+            object(),
+        )
+
+        self.assertEqual(editor.reload_calls, 0)
+        self.assertEqual(editor.set_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

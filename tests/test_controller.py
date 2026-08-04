@@ -372,8 +372,13 @@ class ControllerTests(unittest.TestCase):
         settings = self.backend.load_settings()
         self.assertEqual(settings.result_limit, 70)
         self.assertTrue(settings.preview_enabled)
+        self.assertIs(
+            settings.preview_default,
+            contracts.PreviewDefault.QUESTION,
+        )
         settings.mode = contracts.SearchMode.EXACT
         settings.preview_enabled = False
+        settings.preview_default = contracts.PreviewDefault.ANSWER
         settings.width = 1234
         self.backend.save_settings(settings)
         saved = self.backend.mw.addonManager.config
@@ -381,7 +386,36 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(saved["ui"]["mode"], "exact")
         self.assertFalse(saved["preview_enabled"])
         self.assertFalse(saved["ui"]["preview_enabled"])
+        self.assertEqual(saved["preview_default"], "answer")
+        self.assertEqual(saved["ui"]["preview_default"], "answer")
         self.assertEqual(saved["ui"]["width"], 1234)
+
+    def test_preview_default_config_is_case_insensitive_and_safely_falls_back(self) -> None:
+        self.backend.mw.addonManager.config = {
+            "preview_default": "answer",
+            "ui": {"preview_default": "EdIt"},
+        }
+        self.assertIs(
+            self.backend.load_settings().preview_default,
+            contracts.PreviewDefault.EDIT,
+        )
+
+        self.backend.mw.addonManager.config = {
+            "preview_default": "not-a-surface",
+        }
+        self.assertIs(
+            self.backend.load_settings().preview_default,
+            contracts.PreviewDefault.QUESTION,
+        )
+
+        self.backend.mw.addonManager.config = {
+            "preview_default": "answer",
+            "ui": {"preview_default": "not-a-surface"},
+        }
+        self.assertIs(
+            self.backend.load_settings().preview_default,
+            contracts.PreviewDefault.ANSWER,
+        )
 
     def test_load_decks_uses_serialized_collection_query(self) -> None:
         self.backend.mw.col.decks = types.SimpleNamespace(
@@ -2867,7 +2901,10 @@ class ControllerTests(unittest.TestCase):
         )
         addon._dialog = dialog
         addon._ui_controller = types.SimpleNamespace(
-            settings=types.SimpleNamespace(preview_enabled=True)
+            settings=types.SimpleNamespace(
+                preview_enabled=True,
+                preview_default=contracts.PreviewDefault.QUESTION,
+            )
         )
 
         class _Preview:
@@ -2882,8 +2919,14 @@ class ControllerTests(unittest.TestCase):
             def show(self) -> None:
                 self.show_count += 1
 
-            def set_result(self, current, *, force=False) -> None:
-                self.updated.append((current, force))
+            def set_result(
+                self,
+                current,
+                *,
+                force=False,
+                apply_default=False,
+            ) -> None:
+                self.updated.append((current, force, apply_default))
 
             def hide(self) -> None:
                 self.hide_count += 1
@@ -2914,6 +2957,10 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(factory.call_args.kwargs["initial_result"], result)
         self.assertIs(factory.call_args.kwargs["pane"], pane)
         self.assertIs(factory.call_args.kwargs["parent_window"], dialog)
+        self.assertIs(
+            factory.call_args.kwargs["default_view"],
+            contracts.PreviewDefault.QUESTION,
+        )
         self.assertEqual(preview.show_count, 1)
         self.assertEqual(active_states, [True])
 
@@ -2921,7 +2968,10 @@ class ControllerTests(unittest.TestCase):
         addon._refresh_previewer()
         self.assertEqual(
             preview.updated,
-            [(replacement, False), (replacement, True)],
+            [
+                (replacement, False, False),
+                (replacement, True, False),
+            ],
         )
 
         addon._toggle_previewer(None)
@@ -2956,6 +3006,43 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(preview.cleanup_count, 1)
         self.assertFalse(addon._preview_auto_suppressed)
         self.assertIsNone(addon._previewer)
+
+    def test_preview_default_change_applies_only_to_an_open_enabled_pane(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        pane = types.SimpleNamespace(visible=True)
+        pane.isVisible = lambda: pane.visible
+        addon._dialog = types.SimpleNamespace(preview_pane=pane)
+        settings = types.SimpleNamespace(
+            preview_enabled=True,
+            preview_default=contracts.PreviewDefault.QUESTION,
+        )
+        addon._ui_controller = types.SimpleNamespace(settings=settings)
+        changes = []
+        addon._previewer = types.SimpleNamespace(
+            set_default_view=lambda value, *, apply_now: changes.append(
+                (value, apply_now)
+            )
+        )
+
+        addon._preview_default_changed(contracts.PreviewDefault.ANSWER)
+        pane.visible = False
+        addon._preview_default_changed(contracts.PreviewDefault.EDIT)
+        pane.visible = True
+        settings.preview_enabled = False
+        addon._preview_default_changed(contracts.PreviewDefault.QUESTION)
+
+        self.assertEqual(
+            changes,
+            [
+                (contracts.PreviewDefault.ANSWER, True),
+                (contracts.PreviewDefault.EDIT, False),
+                (contracts.PreviewDefault.QUESTION, False),
+            ],
+        )
 
     def test_preview_side_request_opens_card_mode_and_is_safely_scoped(
         self,
@@ -3898,6 +3985,138 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(captures, [])
         self.assertEqual(reruns, [])
 
+    def test_successful_action_arms_one_click_undo_without_requery(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        offers = []
+        addon._dialog = types.SimpleNamespace(
+            set_undo_available=lambda *args: offers.append(args),
+            apply_card_state_change=lambda *_args, **_kwargs: None,
+            finish_batch_action=lambda _ok, _message: None,
+        )
+        addon._show_message = lambda _message: None
+        addon._refresh_previewer = lambda: None
+        token = controller.UndoToken(
+            9,
+            "Suspend",
+            self.backend._context.collection_path,
+        )
+        action = controller.CollectionAction(
+            controller.ActionKind.SUSPEND,
+            note_ids=(11,),
+            card_ids=(101,),
+        )
+        outcome = types.SimpleNamespace(
+            changed=1,
+            requested=1,
+            live=1,
+            eligible=1,
+            stale=0,
+            skipped=0,
+            note_count=1,
+            changed_card_ids=(101,),
+            undo_token=token,
+        )
+
+        addon._collection_action_succeeded(action, outcome)
+
+        self.assertEqual(offers[-1], (True, "Suspend"))
+        self.assertEqual(addon._pending_undo.token, token)
+
+    def test_one_click_undo_uses_guarded_worker_and_keeps_results(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        events = []
+        addon._dialog = types.SimpleNamespace(
+            set_undo_available=lambda *args: events.append(("offer", args)),
+            set_batch_action_busy=lambda *args: events.append(("busy", args)),
+            finish_undo_action=lambda *args: events.append(("finish", args)),
+        )
+        addon._show_message = lambda message: events.append(("message", message))
+        addon._show_error = lambda message: events.append(("error", message))
+        addon._refresh_visible_card_states = lambda: events.append(("refresh",))
+        addon._refresh_previewer = lambda: events.append(("preview",))
+        addon._with_preview_saved = (
+            lambda callback, *, detach_editor: callback()
+        )
+        action = controller.CollectionAction(
+            controller.ActionKind.SUSPEND,
+            note_ids=(11,),
+            card_ids=(101,),
+        )
+        pending = controller._PendingUndo(
+            self.backend._context.token,
+            controller.UndoToken(
+                12,
+                "Suspend",
+                self.backend._context.collection_path,
+            ),
+            action,
+        )
+        addon._pending_undo = pending
+        scheduled = []
+
+        def complete(**kwargs):
+            scheduled.append(kwargs)
+            kwargs["on_success"](types.SimpleNamespace(changes=object()))
+
+        with patch.object(controller, "start_guarded_undo", side_effect=complete):
+            addon._undo_last_change()
+
+        self.assertEqual(len(scheduled), 1)
+        self.assertEqual(scheduled[0]["token"], pending.token)
+        self.assertIsInstance(scheduled[0]["initiator"], controller._OwnedUndo)
+        self.assertIsNone(addon._pending_undo)
+        self.assertIn(("finish", (True, "Undid Suspend")), events)
+        self.assertIn(("refresh",), events)
+        self.assertIn(("preview",), events)
+
+    def test_editor_save_lifecycle_cancellation_retires_undo_silently(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        errors = []
+        finished = []
+        addon._dialog = types.SimpleNamespace(
+            set_undo_available=lambda *_args: None,
+            set_batch_action_busy=lambda *_args: None,
+            finish_undo_action=lambda *args: finished.append(args),
+        )
+        addon._show_error = errors.append
+        action = controller.CollectionAction(
+            controller.ActionKind.SUSPEND,
+            card_ids=(101,),
+        )
+        addon._pending_undo = controller._PendingUndo(
+            self.backend._context.token,
+            controller.UndoToken(12, "Suspend", "/tmp/collection.anki2"),
+            action,
+        )
+
+        def save_then_change(callback, *, detach_editor):
+            self.assertTrue(detach_editor)
+            addon._clear_undo_offer()
+            callback()
+
+        addon._with_preview_saved = save_then_change
+        with patch.object(controller, "start_guarded_undo") as start:
+            addon._undo_last_change()
+
+        start.assert_not_called()
+        self.assertEqual(errors, [])
+        self.assertEqual(finished, [(False, "Undo is no longer available.")])
+
     def test_bury_and_change_deck_build_exact_card_actions(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),
@@ -4231,6 +4450,93 @@ class ControllerTests(unittest.TestCase):
             [{"note_ids": (22, 11)}],
         )
         self.assertFalse(any(request.get("full") for request in requests))
+
+    def test_owned_tag_undo_reconciles_exact_ids_and_retires_offer(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        addon._dialog = types.SimpleNamespace(
+            set_undo_available=lambda *_args: None
+        )
+        requests = []
+        addon.schedule_reconcile = lambda **kwargs: requests.append(kwargs)
+        context = self.backend._context
+        assert context
+        action = controller.CollectionAction(
+            controller.ActionKind.ADD_TAGS,
+            note_ids=(22, 11),
+            tags="review",
+        )
+        addon._pending_undo = controller._PendingUndo(
+            context.token,
+            controller.UndoToken(
+                5,
+                "Add Tags",
+                context.collection_path,
+            ),
+            action,
+        )
+
+        addon._on_operation(
+            types.SimpleNamespace(
+                card=False,
+                note=True,
+                deck=False,
+                tag=True,
+                notetype=False,
+                note_text=True,
+            ),
+            controller._OwnedUndo(context.token, action),
+        )
+
+        self.assertIsNone(addon._pending_undo)
+        self.assertEqual(requests, [{"note_ids": (22, 11)}])
+
+    def test_foreign_collection_operation_invalidates_the_undo_offer(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        offers = []
+        addon._dialog = types.SimpleNamespace(
+            set_undo_available=lambda *args: offers.append(args)
+        )
+        context = self.backend._context
+        assert context
+        action = controller.CollectionAction(
+            controller.ActionKind.SUSPEND,
+            card_ids=(101,),
+        )
+        addon._pending_undo = controller._PendingUndo(
+            context.token,
+            controller.UndoToken(
+                5,
+                "Suspend",
+                context.collection_path,
+            ),
+            action,
+        )
+        addon.schedule_reconcile = lambda **_kwargs: None
+
+        addon._on_operation(
+            types.SimpleNamespace(
+                card=False,
+                note=False,
+                deck=False,
+                tag=False,
+                notetype=False,
+                note_text=False,
+            ),
+            object(),
+        )
+
+        self.assertIsNone(addon._pending_undo)
+        self.assertEqual(offers[-1], (False,))
 
     def test_owned_deck_move_reconciles_exact_notes_but_bury_does_not(self) -> None:
         addon = controller.SmartSearchAddonController(

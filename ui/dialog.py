@@ -20,6 +20,7 @@ from .contracts import (
     DeckCatalog,
     IndexState,
     IndexStatus,
+    PreviewDefault,
     SearchMode,
     SearchResponse,
     SemanticRecovery,
@@ -167,6 +168,7 @@ class _SettingsDialog(QDialog):
         parent: Optional[QWidget] = None,
         *,
         preview_enabled: bool = True,
+        preview_default: PreviewDefault = PreviewDefault.QUESTION,
         text_index_ready: bool = True,
         about: Optional[AboutInfo] = None,
     ) -> None:
@@ -240,6 +242,34 @@ class _SettingsDialog(QDialog):
         )
         form.addRow("Card preview", self.preview_check)
 
+        try:
+            preview_default = PreviewDefault(preview_default)
+        except (TypeError, ValueError):
+            preview_default = PreviewDefault.QUESTION
+        self.preview_default_combo = QComboBox(search_page)
+        for value in (
+            PreviewDefault.QUESTION,
+            PreviewDefault.ANSWER,
+            PreviewDefault.EDIT,
+        ):
+            self.preview_default_combo.addItem(value.label, value)
+        self.preview_default_combo.setCurrentIndex(
+            self.preview_default_combo.findData(preview_default)
+        )
+        self.preview_default_combo.setAccessibleName(
+            "Default card preview surface"
+        )
+        self.preview_default_combo.setToolTip(
+            "Choose how each newly selected card first appears"
+        )
+        self.preview_default_combo.setMinimumWidth(control_width)
+        self.preview_default_combo.setMaximumWidth(control_width)
+        self.preview_default_combo.setSizePolicy(
+            QSizePolicy.Policy.Fixed,
+            QSizePolicy.Policy.Preferred,
+        )
+        form.addRow("Open previews as", self.preview_default_combo)
+
         # The status copy and action share one expanding field column. Native
         # height-for-width sizing keeps wrapped copy readable without forcing
         # a large fixed row in compact dialogs.
@@ -300,11 +330,12 @@ class _SettingsDialog(QDialog):
         root.addWidget(self.button_box)
         self._apply_theme()
 
-    def values(self) -> tuple[SearchMode, int, bool]:
+    def values(self) -> tuple[SearchMode, int, bool, PreviewDefault]:
         return (
             self.mode_combo.currentData(),
             self.limit_spin.value(),
             self.preview_check.isChecked(),
+            self.preview_default_combo.currentData(),
         )
 
     def _request_update(self) -> None:
@@ -459,7 +490,7 @@ class SearchDialog(QDialog):
     semanticInstallRequested = pyqtSignal()
     semanticIndexRequested = pyqtSignal()
     updateRequested = pyqtSignal()
-    settingsChanged = pyqtSignal(object, int, bool)  # mode, limit, preview?
+    settingsChanged = pyqtSignal(object, int, bool, object)
     flagRequested = pyqtSignal(object, int)  # tuple[SearchResult, ...], 0..7
     suspensionRequested = pyqtSignal(object, bool)  # results, suspend?
     burialRequested = pyqtSignal(object, bool)  # results, bury?
@@ -469,6 +500,7 @@ class SearchDialog(QDialog):
     # until CollectionAction validates it at the collection boundary.
     deckChangeRequested = pyqtSignal(object, object, str)  # results, deck id/name
     tagActionRequested = pyqtSignal(object, bool)  # results, add?
+    undoRequested = pyqtSignal()
     deckPickerRequested = pyqtSignal()
     dialogClosed = pyqtSignal()
 
@@ -497,10 +529,13 @@ class SearchDialog(QDialog):
         self._message_kind = ""
         self._result_limit = 50
         self._preview_enabled = True
+        self._preview_default = PreviewDefault.QUESTION
         self._deck_catalog: Optional[DeckCatalog] = None
         self._pending_deck_move_results: tuple = ()
         self._close_notified = False
         self._batch_busy = False
+        self._undo_available = False
+        self._undo_label = ""
         self._batch_results_available = False
         self._batch_control_states: list[tuple[QWidget, bool]] = []
         self._preview_restore_sizes: list[int] = [620, 400]
@@ -759,6 +794,14 @@ class SearchDialog(QDialog):
         )
         self.open_selected_button.clicked.connect(self._open_selected_results)
         batch.addWidget(self.open_selected_button)
+
+        self.undo_button = QToolButton(self.batch_bar)
+        self.undo_button.setObjectName("batchUndo")
+        self.undo_button.setText("Undo")
+        self.undo_button.setAccessibleName("Undo last Smart Search change")
+        self.undo_button.setVisible(False)
+        self.undo_button.clicked.connect(self._request_undo)
+        batch.addWidget(self.undo_button)
 
         batch.addStretch(1)
 
@@ -1132,6 +1175,12 @@ class SearchDialog(QDialog):
             self.set_preview_active(False)
         self._update_batch_bar()
 
+    def set_preview_default(self, value: PreviewDefault) -> None:
+        try:
+            self._preview_default = PreviewDefault(value)
+        except (TypeError, ValueError):
+            self._preview_default = PreviewDefault.QUESTION
+
     def _remember_preview_split(self) -> None:
         if not self.preview_pane.isVisible() or self.preview_pane.is_expanded():
             return
@@ -1206,6 +1255,10 @@ class SearchDialog(QDialog):
         self.flag_button.setEnabled(has_selection and card_count > 0)
         self.suspend_button.setEnabled(has_selection and card_count > 0)
         self.tags_button.setEnabled(has_selection and note_count > 0)
+        self.undo_button.setVisible(self._undo_available)
+        self.undo_button.setEnabled(
+            self._undo_available and not self._batch_busy
+        )
         self.batch_bar.setVisible(
             self._batch_results_available
             and self.stack.currentIndex() == _PAGE_RESULTS
@@ -1219,6 +1272,12 @@ class SearchDialog(QDialog):
             and len(model.checked_results()) == model.count()
         )
         model.set_all_checked(not all_selected)
+
+    def _request_undo(self, _checked: bool = False) -> None:
+        if not self._undo_available or self._batch_busy:
+            return
+        self.undo_button.setEnabled(False)
+        self.undoRequested.emit()
 
     def _selected_results(self):
         return self.results.results_model().checked_results()
@@ -1528,6 +1587,16 @@ class SearchDialog(QDialog):
             self.set_summary(message)
         self._update_batch_bar()
 
+    def set_undo_available(self, available: bool, label: str = "") -> None:
+        self._undo_available = bool(available)
+        self._undo_label = str(label or "").strip() if available else ""
+        description = "Undo the last Smart Search change"
+        if self._undo_label:
+            description += f": {self._undo_label}"
+        self.undo_button.setToolTip(description)
+        self.undo_button.setAccessibleDescription(description)
+        self._update_batch_bar()
+
     def apply_card_state_change(
         self,
         card_ids: Sequence[int],
@@ -1554,6 +1623,13 @@ class SearchDialog(QDialog):
         self.set_batch_action_busy(False)
         if success:
             self.results.results_model().set_all_checked(False)
+        self.set_summary(message)
+        self._update_batch_bar()
+
+    def finish_undo_action(self, success: bool, message: str) -> None:
+        """Finish Undo without discarding the user's current selection."""
+
+        self.set_batch_action_busy(False)
         self.set_summary(message)
         self._update_batch_bar()
 
@@ -2220,6 +2296,7 @@ class SearchDialog(QDialog):
             semantic,
             self,
             preview_enabled=self._preview_enabled,
+            preview_default=self._preview_default,
             text_index_ready=text_index_ready,
             about=self._about,
         )
@@ -2233,8 +2310,13 @@ class SearchDialog(QDialog):
 
         dialog.updateRequested.connect(remember_update_request)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            mode, limit, preview_enabled = dialog.values()
-            self.settingsChanged.emit(mode, limit, preview_enabled)
+            mode, limit, preview_enabled, preview_default = dialog.values()
+            self.settingsChanged.emit(
+                mode,
+                limit,
+                preview_enabled,
+                preview_default,
+            )
             if update_requested:
                 self.updateRequested.emit()
         self.focus_query()

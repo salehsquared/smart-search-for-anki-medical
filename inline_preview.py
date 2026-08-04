@@ -36,6 +36,12 @@ def _result_identity(result: object | None) -> tuple[int, tuple[int, ...]]:
     return note_id, _result_card_ids(result)
 
 
+def _default_view_value(value: object) -> str:
+    candidate = getattr(value, "value", value)
+    text = str(candidate or "").strip().casefold()
+    return text if text in {"question", "answer", "edit"} else "question"
+
+
 class InlineResultInspector:
     """Own the rendered card page and lazily-created native Anki Editor."""
 
@@ -47,6 +53,7 @@ class InlineResultInspector:
         parent_window: Any,
         initial_result: object,
         on_error: Callable[[str], None],
+        default_view: object = "question",
     ) -> None:
         from aqt import gui_hooks
         from aqt.qt import (
@@ -73,10 +80,18 @@ class InlineResultInspector:
         self._card_ids: tuple[int, ...] = ()
         self._sibling_index = 0
         self._state = "question"
+        self._default_view = _default_view_value(default_view)
+        self._default_apply_generation = 0
+        self._default_detach_pending = False
         self._last_render_at = 0.0
         self._disposed = False
         self._hidden = False
         self._editor: Any | None = None
+        # Anki 24.11-26.05 exposes Editor.note, while 26.08 exposes only nid
+        # and set_note(None) intentionally leaves that nid behind. Keep the
+        # attachment identity we own instead of depending on either private
+        # representation.
+        self._attached_editor_note_id = 0
         self._editor_switching = False
         self._editor_target_generation = 0
         self._editor_target_force = False
@@ -163,7 +178,7 @@ class InlineResultInspector:
         )
         gui_hooks.operation_did_execute.append(self._on_operation_did_execute)
 
-        self.set_result(initial_result, force=True)
+        self.set_result(initial_result, force=True, apply_default=True)
 
     def _install_card_shortcuts(self) -> None:
         from aqt.qt import QKeySequence, QShortcut, Qt
@@ -184,18 +199,24 @@ class InlineResultInspector:
 
     # ---------------------------------------------------------------- target
 
-    def set_result(self, result: object | None, *, force: bool = False) -> None:
+    def set_result(
+        self,
+        result: object | None,
+        *,
+        force: bool = False,
+        apply_default: bool = False,
+    ) -> None:
         if self._disposed:
             return
         note_id, card_ids = _result_identity(result)
         old_note_id, _old_result_card_ids = _result_identity(self._result)
         old_key = (old_note_id, self._card_ids)
         new_key = (note_id, card_ids)
+        target_changed = old_key != new_key
         self._result = result
         self._card_ids = card_ids
-        if force or old_key != new_key:
+        if target_changed:
             self._sibling_index = 0
-            self._state = "question"
         elif card_ids:
             self._sibling_index = min(self._sibling_index, len(card_ids) - 1)
         else:
@@ -206,13 +227,73 @@ class InlineResultInspector:
         self._update_controls()
         self._editor_target_generation += 1
         self._editor_target_force = self._editor_target_force or bool(force)
-        self._schedule_render(force=force)
+        should_apply_default = bool(target_changed or apply_default)
+        if should_apply_default:
+            self._apply_default_view()
+        else:
+            self._schedule_render(force=force)
         if (
-            not self._hidden
+            not should_apply_default
+            and not self._hidden
             and self._editor is not None
             and self.pane.mode() == "edit"
         ):
             self._sync_editor_to_target()
+
+    def set_default_view(self, value: object, *, apply_now: bool = False) -> None:
+        """Store the preference and optionally apply it to the visible card."""
+
+        self._default_view = _default_view_value(value)
+        if apply_now and not self._hidden:
+            self._apply_default_view()
+
+    def _apply_default_view(self) -> None:
+        if self._disposed:
+            return
+        self._default_apply_generation += 1
+        generation = self._default_apply_generation
+        if self._default_detach_pending:
+            return
+        if self._default_view == "edit":
+            if self._hidden:
+                self.pane.set_mode("edit")
+                self._set_surface_mode("hidden")
+                return
+            self.set_mode("edit")
+            return
+        if self.pane.mode() == "edit":
+            self._default_detach_pending = True
+            if self._editor_switching:
+                return
+            self.prepare_for_external_change(
+                lambda: self._finish_default_after_detach(generation)
+            )
+            return
+        self._apply_card_default()
+
+    def _finish_default_after_detach(self, generation: int) -> None:
+        self._default_detach_pending = False
+        if self._disposed:
+            return
+        if generation != self._default_apply_generation:
+            self._apply_default_view()
+            return
+        if self._default_view == "edit":
+            self.set_mode("edit")
+            return
+        self._apply_card_default()
+
+    def _apply_card_default(self) -> None:
+        if self._disposed:
+            return
+        side = self._default_view
+        if side not in {"question", "answer"}:
+            side = "question"
+        self.pane.set_mode("card")
+        self._set_surface_mode("hidden" if self._hidden else "card")
+        self._state = side
+        self._update_controls()
+        self._schedule_render(force=True)
 
     def is_targeting(self, result: object | None) -> bool:
         """Return whether ``result`` is the card target already in the pane."""
@@ -269,16 +350,9 @@ class InlineResultInspector:
         if not 0 <= target < len(self._card_ids):
             return False
         self._sibling_index = target
-        self._state = "question"
         self._editor_target_generation += 1
         self._update_controls()
-        self._schedule_render(force=True)
-        if (
-            not self._hidden
-            and self._editor is not None
-            and self.pane.mode() == "edit"
-        ):
-            self._sync_editor_to_target()
+        self._apply_default_view()
         return True
 
     # -------------------------------------------------------------- rendering
@@ -319,7 +393,7 @@ class InlineResultInspector:
             self._sibling_index = 0
             self._update_controls()
             if self._editor is not None:
-                self._editor.set_note(None)
+                self._detach_editor()
             return
 
         flag = int(card.user_flag())
@@ -540,7 +614,7 @@ class InlineResultInspector:
                 target_note_id = int(card.note().id)
             except Exception:
                 card = None
-        current_note_id = int(getattr(getattr(editor, "note", None), "id", 0) or 0)
+        current_note_id = self._attached_editor_note_id
         if current_note_id and current_note_id != target_note_id:
             self._editor_switching = True
             editor.call_after_note_saved(self._finish_editor_switch)
@@ -551,6 +625,10 @@ class InlineResultInspector:
         if self._disposed:
             return
         self._editor_switching = False
+        if self._default_detach_pending:
+            self._default_detach_pending = False
+            self._apply_default_view()
+            return
         if self._hidden or self.pane.mode() != "edit":
             return
         self._apply_editor_target(self._current_card())
@@ -562,14 +640,24 @@ class InlineResultInspector:
         force = self._editor_target_force
         self._editor_target_force = False
         if card is None:
-            editor.card = None
-            editor.set_note(None)
+            self._detach_editor()
             return
         note = card.note()
-        current_note_id = int(getattr(getattr(editor, "note", None), "id", 0) or 0)
+        current_note_id = self._attached_editor_note_id
         editor.card = card
         if force or current_note_id != int(note.id):
             editor.set_note(note)
+            self._attached_editor_note_id = int(note.id)
+
+    def _detach_editor(self) -> None:
+        """Detach our editor target across legacy and 26.08 Editor APIs."""
+
+        editor = self._editor
+        self._attached_editor_note_id = 0
+        if editor is None:
+            return
+        editor.card = None
+        editor.set_note(None)
 
     def _on_operation_did_execute(self, changes: Any, handler: object | None) -> None:
         if self._disposed:
@@ -578,30 +666,21 @@ class InlineResultInspector:
         card_changed = bool(getattr(changes, "card", False))
         if note_text_changed or card_changed:
             self.refresh()
-        if not note_text_changed:
-            return
-        editor = self._editor
-        if (
-            editor is None
-            or self._hidden
-            or self.pane.mode() != "edit"
-            or handler is editor
-            or editor.note is None
-        ):
-            return
-        try:
-            editor.note.load()
-        except Exception:
-            editor.set_note(None)
-            return
-        editor.set_note(editor.note)
+        # OpChanges does not identify which note a foreign operation touched.
+        # Reloading a live editor here could replace unsaved JS field state,
+        # especially when an unrelated add-on changes another note. The
+        # rendered Card surface is safe to refresh; the editor remains the
+        # authority for its attached note until it saves or detaches.
 
     # --------------------------------------------------------------- lifecycle
 
     def show(self) -> None:
         self._hidden = False
-        self._set_surface_mode(self.pane.mode())
-        self._schedule_render(force=True)
+        if self.pane.mode() == "edit":
+            self.set_mode("edit")
+        else:
+            self._set_surface_mode("card")
+            self._schedule_render(force=True)
 
     def hide(self) -> None:
         self._hidden = True
@@ -619,7 +698,7 @@ class InlineResultInspector:
     def flush(self, callback: Callable[[], None] | None = None) -> None:
         callback = callback or (lambda: None)
         editor = self._editor
-        if editor is None or editor.note is None:
+        if editor is None or self._attached_editor_note_id <= 0:
             callback()
             return
         try:
@@ -642,8 +721,7 @@ class InlineResultInspector:
             editor = self._editor
             if editor is not None:
                 try:
-                    editor.card = None
-                    editor.set_note(None)
+                    self._detach_editor()
                 except Exception:
                     pass
             try:
@@ -710,6 +788,7 @@ class InlineResultInspector:
             except RuntimeError:
                 pass
             self._editor = None
+            self._attached_editor_note_id = 0
         if self.web is not None:
             try:
                 self.web.cleanup()
@@ -748,6 +827,7 @@ def create_inline_result_inspector(
     parent_window: Any,
     initial_result: object,
     on_error: Callable[[str], None],
+    default_view: object = "question",
 ) -> InlineResultInspector:
     """Create the Anki-specific contents for an existing inline pane."""
 
@@ -757,4 +837,5 @@ def create_inline_result_inspector(
         parent_window=parent_window,
         initial_result=initial_result,
         on_error=on_error,
+        default_view=default_view,
     )

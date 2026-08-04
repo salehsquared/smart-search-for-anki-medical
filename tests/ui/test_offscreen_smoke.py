@@ -20,6 +20,7 @@ try:
         IndexState,
         IndexStatus,
         MatchKind,
+        PreviewDefault,
         SearchMode,
         SearchResponse,
         SearchResult,
@@ -190,6 +191,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         burials = []
         copies = []
         moves = []
+        undo_requests = []
         controller.burialRequested.connect(
             lambda target, bury: burials.append((target, bury))
         )
@@ -199,6 +201,7 @@ class OffscreenSmokeTests(unittest.TestCase):
             )
         )
         controller.createCopyRequested.connect(copies.append)
+        controller.undoRequested.connect(lambda: undo_requests.append(True))
 
         # Real Anki deck IDs are timestamp-sized and exceed Qt's signed
         # 32-bit ``int`` range.  Both UI signal hops must preserve every bit.
@@ -206,10 +209,37 @@ class OffscreenSmokeTests(unittest.TestCase):
         dialog.burialRequested.emit((result,), True)
         dialog.createCopyRequested.emit((result,))
         dialog.deckChangeRequested.emit((result,), deck_id, "Cardiology")
+        dialog.undoRequested.emit()
 
         self.assertEqual(burials, [((result,), True)])
         self.assertEqual(copies, [(result,)])
         self.assertEqual(moves, [((result,), deck_id, "Cardiology")])
+        self.assertEqual(undo_requests, [True])
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_preview_default_setting_persists_and_emits_immediately(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        changed = []
+        controller.previewDefaultChanged.connect(changed.append)
+
+        dialog.settingsChanged.emit(
+            SearchMode.SMART,
+            50,
+            True,
+            PreviewDefault.ANSWER,
+        )
+
+        self.assertIs(
+            controller.settings.preview_default,
+            PreviewDefault.ANSWER,
+        )
+        self.assertIs(dialog._preview_default, PreviewDefault.ANSWER)
+        self.assertEqual(changed, [PreviewDefault.ANSWER])
+        self.assertEqual(len(backend.saved_settings), 1)
+        self.assertEqual(backend.requests, [])
         controller.deleteLater()
         dialog.deleteLater()
 
@@ -1254,6 +1284,7 @@ class OffscreenSmokeTests(unittest.TestCase):
                     for control in (
                         dialog.mode_combo,
                         dialog.limit_spin,
+                        dialog.preview_default_combo,
                         dialog.semantic_action,
                     ):
                         self.assertNotEqual(
@@ -1265,6 +1296,10 @@ class OffscreenSmokeTests(unittest.TestCase):
                     self.assertEqual(
                         dialog.mode_combo.width(),
                         dialog.limit_spin.width(),
+                    )
+                    self.assertEqual(
+                        dialog.mode_combo.width(),
+                        dialog.preview_default_combo.width(),
                     )
                     self.assertNotIn(
                         "searchSettingsPage QComboBox",
@@ -1305,11 +1340,20 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(dialog.tabs.tabText(0), "Search")
         self.assertEqual(dialog.tabs.tabText(1), "About")
         # Existing settings behavior and values are unchanged.
-        self.assertEqual(dialog.values(), (SearchMode.EXACT, 80, True))
+        self.assertEqual(
+            dialog.values(),
+            (SearchMode.EXACT, 80, True, PreviewDefault.QUESTION),
+        )
         dialog.mode_combo.setCurrentIndex(0)
         dialog.limit_spin.setValue(120)
         dialog.preview_check.setChecked(False)
-        self.assertEqual(dialog.values(), (SearchMode.SMART, 120, False))
+        dialog.preview_default_combo.setCurrentIndex(
+            dialog.preview_default_combo.findData(PreviewDefault.EDIT)
+        )
+        self.assertEqual(
+            dialog.values(),
+            (SearchMode.SMART, 120, False, PreviewDefault.EDIT),
+        )
         dialog.tabs.setCurrentIndex(1)
         self.app.processEvents()
         self.assertTrue(dialog.button_box.isVisibleTo(dialog))
@@ -1417,7 +1461,10 @@ class OffscreenSmokeTests(unittest.TestCase):
 
         self.assertEqual(requests, [True])
         self.assertEqual(dialog.result(), QDialog.DialogCode.Accepted)
-        self.assertEqual(dialog.values(), (SearchMode.EXACT, 80, True))
+        self.assertEqual(
+            dialog.values(),
+            (SearchMode.EXACT, 80, True, PreviewDefault.QUESTION),
+        )
         dialog.deleteLater()
 
     def test_about_link_activation_routes_to_desktop_services(self) -> None:
@@ -2197,6 +2244,9 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertFalse(dialog.rebuild_button.isEnabled())
         self.assertFalse(dialog.flag_button.isEnabled())
         self.assertFalse(dialog.tags_button.isEnabled())
+        dialog.set_undo_available(True, "Suspend")
+        self.assertTrue(dialog.undo_button.isVisibleTo(dialog))
+        self.assertFalse(dialog.undo_button.isEnabled())
         dialog.finish_batch_action(
             True,
             "Suspended 3 cards from 2 notes — Undo available",
@@ -2207,6 +2257,12 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertTrue(dialog.settings_button.isEnabled())
         self.assertTrue(dialog.rebuild_button.isEnabled())
         self.assertEqual(model.checked_results(), ())
+        self.assertTrue(dialog.undo_button.isEnabled())
+        undo_requests: list[bool] = []
+        dialog.undoRequested.connect(lambda: undo_requests.append(True))
+        dialog.undo_button.click()
+        dialog.undo_button.click()
+        self.assertEqual(undo_requests, [True])
         self.assertEqual(
             dialog.summary.text(),
             "Suspended 3 cards from 2 notes — Undo available",

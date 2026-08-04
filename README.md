@@ -45,7 +45,8 @@ usable while Semantic prepares.
 ## Work with results without losing context
 
 - Move into the result list and the rendered inline card preview opens
-  automatically; disable it at any time in **Settings → Card preview**.
+  automatically; disable it or choose whether new previews start on the
+  question, answer, or editable fields in **Search Settings**.
 - Press **Space** or **Right Arrow** to reveal the selected card's answer;
   press **Left Arrow** to return to its front. These controls keep working
   after you click inside the rendered card.
@@ -54,6 +55,8 @@ usable while Semantic prepares.
 - See compact suspension and flag indicators on each result.
 - Flag, suspension, and tag changes keep the current list in place; press
   **Enter** or search again whenever you want filters to be reapplied.
+- Undo the latest Smart Search collection action directly from the result
+  toolbar; the button disables itself if another Anki change happens first.
 - Check one result, Shift-click a range, or choose **All shown**, **None**, or
   **Invert**.
 - Open exactly the checked cards in Anki's Browser.

@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Successful card and note actions now expose a one-click **Undo** button in
+  the result toolbar. The button is tied to the exact native Anki undo step and
+  safely retires if another collection change happens first.
+- Search Settings can now open each newly selected preview as its **Question**,
+  **Answer**, or editable fields. Accepted changes apply immediately to an
+  already-visible preview and are remembered per installation.
+
 ## [1.0.24] — 2026-08-03
 
 ### Added

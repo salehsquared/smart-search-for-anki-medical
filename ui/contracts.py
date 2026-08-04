@@ -21,6 +21,7 @@ except ImportError:  # plain-Python tests import ``ui`` as a top-level package
 
 __all__ = [
     "SearchMode",
+    "PreviewDefault",
     "MatchKind",
     "IndexState",
     "SemanticState",
@@ -66,6 +67,22 @@ class SearchMode(enum.Enum):
             SearchMode.SMART: "Smart",
             SearchMode.EXACT: "Exact",
             SearchMode.SEMANTIC: "Semantic",
+        }[self]
+
+
+class PreviewDefault(enum.Enum):
+    """Surface shown when a card preview is opened for a new target."""
+
+    QUESTION = "question"
+    ANSWER = "answer"
+    EDIT = "edit"
+
+    @property
+    def label(self) -> str:
+        return {
+            PreviewDefault.QUESTION: "Question",
+            PreviewDefault.ANSWER: "Answer",
+            PreviewDefault.EDIT: "Edit",
         }[self]
 
 
@@ -362,6 +379,7 @@ class UISettings:
     filters: tuple[FilterChip, ...] = ()
     result_limit: int = 50
     preview_enabled: bool = True
+    preview_default: PreviewDefault = PreviewDefault.QUESTION
     width: int = 1040
     height: int = 700
 

@@ -29,6 +29,19 @@ class ActionKind(enum.Enum):
     REMOVE_TAGS = "remove_tags"
 
 
+class UndoUnavailable(RuntimeError):
+    """Raised when the offered Smart Search undo is no longer the latest."""
+
+
+@dataclass(frozen=True, slots=True)
+class UndoToken:
+    """Exact identity of one native Anki undo step."""
+
+    step: int
+    label: str
+    collection_path: str = ""
+
+
 def normalize_ids(values: Iterable[object]) -> tuple[int, ...]:
     """Return unique positive integer IDs while preserving input order."""
 
@@ -126,6 +139,7 @@ class ActionOutcome:
     skipped: int
     note_count: int
     changed_card_ids: tuple[int, ...] | None = None
+    undo_token: UndoToken | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,7 +264,7 @@ def _changes_and_count(result: Any, fallback_count: int) -> tuple[Any, int]:
     return changes, max(0, int(count))
 
 
-def execute_collection_action(
+def _execute_collection_action_impl(
     collection: Any,
     action: CollectionAction,
 ) -> ActionOutcome:
@@ -407,6 +421,104 @@ def execute_collection_action(
     )
 
 
+def _collection_path(collection: Any) -> str:
+    value = getattr(collection, "path", "")
+    if callable(value):
+        try:
+            value = value()
+        except Exception:
+            value = ""
+    return str(value or "")
+
+
+def _undo_token(collection: Any) -> UndoToken | None:
+    observed, token = _read_undo_token(collection)
+    return token if observed else None
+
+
+def _read_undo_token(collection: Any) -> tuple[bool, UndoToken | None]:
+    """Return whether native undo state was read, plus its current identity.
+
+    A successful read with no available step is different from a failed read.
+    Keeping that distinction makes capture fail closed: if either observation
+    fails, Smart Search never offers a button that could target an older,
+    unrelated native undo entry.
+    """
+
+    status_getter = getattr(collection, "undo_status", None)
+    if not callable(status_getter):
+        return False, None
+    try:
+        status = status_getter()
+        label = str(getattr(status, "undo", "") or "").strip()
+        step = int(getattr(status, "last_step", 0) or 0)
+    except Exception:
+        return False, None
+    collection_path = _collection_path(collection)
+    if not collection_path:
+        return False, None
+    if not label or step <= 0:
+        return True, None
+    return True, UndoToken(
+        step=step, label=label, collection_path=collection_path
+    )
+
+
+def _attach_undo_token(
+    outcome: ActionOutcome,
+    token: UndoToken | None,
+) -> ActionOutcome:
+    return ActionOutcome(
+        changes=outcome.changes,
+        kind=outcome.kind,
+        requested=outcome.requested,
+        live=outcome.live,
+        eligible=outcome.eligible,
+        changed=outcome.changed,
+        stale=outcome.stale,
+        skipped=outcome.skipped,
+        note_count=outcome.note_count,
+        changed_card_ids=outcome.changed_card_ids,
+        undo_token=token,
+    )
+
+
+def execute_collection_action(
+    collection: Any,
+    action: CollectionAction,
+) -> ActionOutcome:
+    """Execute one action and capture the exact native undo step it creates."""
+
+    before_observed, before = _read_undo_token(collection)
+    outcome = _execute_collection_action_impl(collection, action)
+    after_observed, after = _read_undo_token(collection)
+    token = None
+    if (
+        outcome.changed > 0
+        and before_observed
+        and after_observed
+        and after is not None
+        and (before is None or after.step != before.step)
+    ):
+        token = after
+    return _attach_undo_token(outcome, token)
+
+
+def execute_guarded_undo(collection: Any, token: UndoToken) -> Any:
+    """Undo ``token`` only if it is still Anki's exact latest undo step."""
+
+    observed, current = _read_undo_token(collection)
+    if not observed or current != token:
+        raise UndoUnavailable(
+            "That change can no longer be undone because another change "
+            "happened afterward."
+        )
+    undo = getattr(collection, "undo", None)
+    if not callable(undo):
+        raise UndoUnavailable("Undo is not available in this Anki version.")
+    return undo()
+
+
 def start_collection_action(
     *,
     parent: Any,
@@ -426,6 +538,31 @@ def start_collection_action(
     operation = collection_op_factory(
         parent=parent,
         op=lambda collection: execute_collection_action(collection, action),
+    )
+    operation.success(on_success)
+    operation.failure(on_failure)
+    return operation.run_in_background(initiator=initiator)
+
+
+def start_guarded_undo(
+    *,
+    parent: Any,
+    initiator: object,
+    token: UndoToken,
+    on_success: Callable[[Any], None],
+    on_failure: Callable[[Exception], None],
+    collection_op_factory: Any | None = None,
+) -> Any:
+    """Schedule one guarded native undo on Anki's collection worker."""
+
+    if collection_op_factory is None:
+        from aqt.operations import CollectionOp
+
+        collection_op_factory = CollectionOp
+
+    operation = collection_op_factory(
+        parent=parent,
+        op=lambda collection: execute_guarded_undo(collection, token),
     )
     operation.success(on_success)
     operation.failure(on_failure)
@@ -498,7 +635,8 @@ def format_action_message(
                 f"Removed “{action.tags}” from "
                 f"{_count_label(outcome.changed, 'note')}"
             )
-        message += " — Undo available"
+        if getattr(outcome, "undo_token", None) is not None:
+            message += " — Undo available"
     else:
         target = (
             "notes"
@@ -534,10 +672,14 @@ __all__ = [
     "ActionKind",
     "ActionOutcome",
     "CollectionAction",
+    "UndoToken",
+    "UndoUnavailable",
     "execute_collection_action",
+    "execute_guarded_undo",
     "format_action_message",
     "normalize_ids",
     "normalize_tag_text",
     "result_ids",
     "start_collection_action",
+    "start_guarded_undo",
 ]

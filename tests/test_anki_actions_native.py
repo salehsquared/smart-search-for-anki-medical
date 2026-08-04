@@ -4,7 +4,12 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from anki_actions import ActionKind, CollectionAction, execute_collection_action
+from anki_actions import (
+    ActionKind,
+    CollectionAction,
+    execute_collection_action,
+    execute_guarded_undo,
+)
 
 try:
     from anki.collection import Collection
@@ -53,8 +58,9 @@ class NativeCollectionActionTests(unittest.TestCase):
         )
 
         self.assertEqual(outcome.changed, 1)
+        self.assertIsNotNone(outcome.undo_token)
         self.assertEqual(self.collection.get_card(self.card_id).did, self.target_deck)
-        self.collection.undo()
+        execute_guarded_undo(self.collection, outcome.undo_token)
         self.assertEqual(self.collection.get_card(self.card_id).did, self.source_deck)
 
     def test_manual_bury_and_undo_use_native_scheduler_state(self) -> None:

@@ -38,9 +38,12 @@ from .backend.compat import dataclass, optional_hook
 from .anki_actions import (
     ActionKind,
     CollectionAction,
+    UndoToken,
+    UndoUnavailable,
     format_action_message,
     result_ids,
     start_collection_action,
+    start_guarded_undo,
 )
 from .anki_adapter import (
     AnkiCollectionReader,
@@ -89,6 +92,7 @@ from .ui.contracts import (
     IndexState,
     IndexStatus,
     MatchKind,
+    PreviewDefault,
     SearchMode,
     SearchRequest,
     SearchResponse,
@@ -166,6 +170,23 @@ class _OwnedMutation:
     """Exact scope carried through Anki's operation initiator hook."""
 
     profile_token: int
+    action: CollectionAction
+
+
+@dataclass(frozen=True, slots=True)
+class _OwnedUndo:
+    """Undo of one exact Smart Search mutation."""
+
+    profile_token: int
+    action: CollectionAction
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingUndo:
+    """The exact native undo step currently offered by the search window."""
+
+    profile_token: int
+    token: UndoToken
     action: CollectionAction
 
 
@@ -863,6 +884,18 @@ class AnkiSearchBackend:
             mode = SearchMode(mode_text)
         except ValueError:
             mode = SearchMode.SMART
+        preview_default = PreviewDefault.QUESTION
+        for candidate in (
+            ui.get("preview_default"),
+            config.get("preview_default"),
+        ):
+            try:
+                preview_default = PreviewDefault(
+                    str(candidate or "").strip().casefold()
+                )
+                break
+            except ValueError:
+                continue
 
         filters: list[FilterChip] = []
         for value in ui.get("filters", ()):
@@ -893,6 +926,7 @@ class AnkiSearchBackend:
                     config.get("preview_enabled", True),
                 )
             ),
+            preview_default=preview_default,
             width=_bounded_int(ui.get("width", 1040), 760, 4000, 1040),
             height=_bounded_int(ui.get("height", 700), 520, 3000, 700),
         )
@@ -903,10 +937,16 @@ class AnkiSearchBackend:
             settings.result_limit, 10, 200, _DEFAULT_RESULT_LIMIT
         )
         config["preview_enabled"] = bool(settings.preview_enabled)
+        try:
+            preview_default = PreviewDefault(settings.preview_default)
+        except (TypeError, ValueError):
+            preview_default = PreviewDefault.QUESTION
+        config["preview_default"] = preview_default.value
         config["ui"] = {
             "mode": settings.mode.value,
             "result_limit": config["result_limit"],
             "preview_enabled": config["preview_enabled"],
+            "preview_default": config["preview_default"],
             "width": _bounded_int(settings.width, 760, 4000, 1040),
             "height": _bounded_int(settings.height, 520, 3000, 700),
             "filters": [
@@ -3911,6 +3951,8 @@ class SmartSearchAddonController:
         self._preview_open_timer: Any | None = None
         self._pending_preview_result: object | None = None
         self._preview_auto_suppressed = False
+        self._pending_undo: _PendingUndo | None = None
+        self._undo_in_flight = False
         self._dialog_close_in_progress = False
         self._dialog_close_callbacks: list[Callable[[], None]] = []
         self._reconcile_timer: Any | None = None
@@ -4344,8 +4386,12 @@ class SmartSearchAddonController:
                 self._change_results_deck
             )
             ui_controller.tagActionRequested.connect(self._change_result_tags)
+            ui_controller.undoRequested.connect(self._undo_last_change)
             ui_controller.previewPreferenceChanged.connect(
                 self._preview_preference_changed
+            )
+            ui_controller.previewDefaultChanged.connect(
+                self._preview_default_changed
             )
             dialog.previewToggleRequested.connect(self._toggle_previewer)
             dialog.previewResultChanged.connect(
@@ -4585,6 +4631,10 @@ class SmartSearchAddonController:
         dialog = self._dialog
         if dialog is None or getattr(self.mw, "col", None) is None:
             return
+        try:
+            restore_result_focus = bool(dialog.results.hasFocus())
+        except (AttributeError, RuntimeError):
+            restore_result_focus = False
         self._preview_auto_suppressed = False
         try:
             if self._previewer is None:
@@ -4594,11 +4644,22 @@ class SmartSearchAddonController:
                     parent_window=dialog,
                     initial_result=result,
                     on_error=self._show_error,
+                    default_view=self._preview_default_view(),
                 )
             else:
-                self._previewer.set_result(result)
+                self._previewer.set_result(result, apply_default=True)
             dialog.set_preview_active(True)
             self._previewer.show()
+            if restore_result_focus:
+                try:
+                    from aqt.qt import QTimer
+
+                    QTimer.singleShot(
+                        0,
+                        lambda d=dialog: self._restore_dialog_result_focus(d),
+                    )
+                except (ImportError, RuntimeError):
+                    pass
         except Exception as error:
             self._close_previewer()
             try:
@@ -4606,6 +4667,14 @@ class SmartSearchAddonController:
             except RuntimeError:
                 pass
             self._show_error(f"Could not open the inline card preview: {error}")
+
+    def _restore_dialog_result_focus(self, dialog: object) -> None:
+        if self._dialog is not dialog:
+            return
+        try:
+            dialog.results.setFocus()
+        except (AttributeError, RuntimeError):
+            pass
 
     def _preview_selection_changed(self, result: object | None) -> None:
         if not self._preview_feature_enabled():
@@ -4683,6 +4752,18 @@ class SmartSearchAddonController:
             and ui_controller.settings.preview_enabled
         )
 
+    def _preview_default_view(self) -> PreviewDefault:
+        ui_controller = self._ui_controller
+        value = getattr(
+            getattr(ui_controller, "settings", None),
+            "preview_default",
+            PreviewDefault.QUESTION,
+        )
+        try:
+            return PreviewDefault(value)
+        except (TypeError, ValueError):
+            return PreviewDefault.QUESTION
+
     def _schedule_auto_previewer(self, result: object) -> None:
         self._pending_preview_result = result
         timer = self._preview_open_timer
@@ -4726,6 +4807,24 @@ class SmartSearchAddonController:
                 if preview_card_ids(result):
                     self._schedule_auto_previewer(result)
         except RuntimeError:
+            return
+
+    def _preview_default_changed(self, value: object) -> None:
+        """Apply the accepted default immediately without reopening a pane."""
+
+        previewer = self._previewer
+        dialog = self._dialog
+        if previewer is None:
+            return
+        visible = False
+        if dialog is not None and self._preview_feature_enabled():
+            try:
+                visible = bool(dialog.preview_pane.isVisible())
+            except RuntimeError:
+                visible = False
+        try:
+            previewer.set_default_view(value, apply_now=visible)
+        except (AttributeError, RuntimeError):
             return
 
     def _move_preview_result(self, offset: int) -> bool:
@@ -4825,6 +4924,7 @@ class SmartSearchAddonController:
     ) -> None:
         """Clear stale Python wrappers after an unexpected native deletion."""
 
+        self._clear_undo_offer()
         if self._dialog is dialog:
             self._end_semantic_search_session()
             self._close_previewer(save=False)
@@ -4843,6 +4943,147 @@ class SmartSearchAddonController:
         open_native_query_in_browser(_canonical_query(query))
 
     # ------------------------------------------------------- collection ops
+
+    def _clear_undo_offer(self) -> None:
+        self._pending_undo = None
+        self._undo_in_flight = False
+        dialog = self._dialog
+        if dialog is not None:
+            try:
+                dialog.set_undo_available(False)
+            except (AttributeError, RuntimeError):
+                pass
+
+    def _arm_undo_offer(
+        self,
+        action: CollectionAction,
+        token: UndoToken | None,
+        *,
+        profile_token: int | None = None,
+    ) -> None:
+        context = self.backend._context
+        dialog = self._dialog
+        if (
+            token is None
+            or context is None
+            or dialog is None
+            or (
+                profile_token is not None
+                and context.token != profile_token
+            )
+            or (
+                not token.collection_path
+                or not context.collection_path
+                or token.collection_path != context.collection_path
+            )
+        ):
+            self._clear_undo_offer()
+            return
+        self._pending_undo = _PendingUndo(context.token, token, action)
+        self._undo_in_flight = False
+        try:
+            dialog.set_undo_available(True, token.label)
+        except (AttributeError, RuntimeError):
+            self._clear_undo_offer()
+
+    def _undo_last_change(self) -> None:
+        pending = self._pending_undo
+        if pending is None or self._undo_in_flight:
+            return
+        self._undo_in_flight = True
+        dialog = self._dialog
+        if dialog is not None:
+            try:
+                dialog.set_undo_available(False)
+                dialog.set_batch_action_busy(True, "Undoing change…")
+            except (AttributeError, RuntimeError):
+                pass
+        self._with_preview_saved(
+            lambda: self._run_guarded_undo_after_save(pending),
+            detach_editor=True,
+        )
+
+    def _run_guarded_undo_after_save(self, pending: _PendingUndo) -> None:
+        context = self.backend._context
+        if (
+            self._pending_undo != pending
+            or context is None
+            or context.token != pending.profile_token
+            or getattr(self.mw, "col", None) is None
+        ):
+            # Profile/dialog/sync teardown can invalidate the offer while an
+            # inline-editor save is finishing. That is an expected lifecycle
+            # cancellation, not an operation failure worth a modal alert.
+            self._undo_cancelled_after_save()
+            return
+        try:
+            start_guarded_undo(
+                parent=self.mw,
+                initiator=_OwnedUndo(context.token, pending.action),
+                token=pending.token,
+                on_success=lambda output: self._undo_succeeded(
+                    pending,
+                    output,
+                ),
+                on_failure=self._undo_failed,
+            )
+        except Exception as error:
+            self._undo_failed(error)
+
+    def _undo_succeeded(self, pending: _PendingUndo, output: Any) -> None:
+        self._clear_undo_offer()
+        try:
+            from aqt import gui_hooks
+
+            gui_hooks.state_did_undo(output)
+        except (AttributeError, ImportError, RuntimeError):
+            pass
+        message = f"Undid {pending.token.label}"
+        dialog = self._dialog
+        if dialog is not None:
+            try:
+                finisher = getattr(dialog, "finish_undo_action", None)
+                if callable(finisher):
+                    finisher(True, message)
+                else:
+                    dialog.finish_batch_action(False, message)
+            except (AttributeError, RuntimeError):
+                pass
+        self._refresh_visible_card_states()
+        self._refresh_previewer()
+        self._show_message(message)
+
+    def _undo_failed(self, error: Exception) -> None:
+        self._clear_undo_offer()
+        if isinstance(error, UndoUnavailable):
+            message = str(error)
+        else:
+            message = f"Could not undo the selected change: {error}"
+        dialog = self._dialog
+        if dialog is not None:
+            try:
+                finisher = getattr(dialog, "finish_undo_action", None)
+                if callable(finisher):
+                    finisher(False, message)
+                else:
+                    dialog.finish_batch_action(False, message)
+            except (AttributeError, RuntimeError):
+                pass
+        self._show_error(message)
+
+    def _undo_cancelled_after_save(self) -> None:
+        self._clear_undo_offer()
+        dialog = self._dialog
+        if dialog is None:
+            return
+        try:
+            finisher = getattr(dialog, "finish_undo_action", None)
+            if callable(finisher):
+                finisher(False, "Undo is no longer available.")
+            else:
+                dialog.set_batch_action_busy(False)
+        except (AttributeError, RuntimeError):
+            pass
 
     def _flag_results(self, results: Sequence[object], flag: int) -> None:
         note_ids, card_ids = result_ids(results)
@@ -5049,6 +5290,9 @@ class SmartSearchAddonController:
         self._run_collection_action(action)
 
     def _run_collection_action(self, action: CollectionAction) -> None:
+        # Starting any later action retires the previous offer, including a
+        # tag operation Anki records as an undo step despite changing 0 notes.
+        self._clear_undo_offer()
         self._with_preview_saved(
             lambda: self._run_collection_action_after_save(action),
             detach_editor=True,
@@ -5088,6 +5332,7 @@ class SmartSearchAddonController:
                 on_success=lambda outcome: self._collection_action_succeeded(
                     action,
                     outcome,
+                    profile_token=context.token,
                 ),
                 on_failure=self._collection_action_failed,
             )
@@ -5098,7 +5343,15 @@ class SmartSearchAddonController:
         self,
         action,
         outcome,
+        *,
+        profile_token: int | None = None,
     ) -> None:
+        undo_token = getattr(outcome, "undo_token", None)
+        self._arm_undo_offer(
+            action,
+            undo_token,
+            profile_token=profile_token,
+        )
         message = format_action_message(action, outcome)
         dialog = self._dialog
         if dialog is not None:
@@ -5147,6 +5400,7 @@ class SmartSearchAddonController:
         self._show_message(message)
 
     def _collection_action_failed(self, error: Exception) -> None:
+        self._clear_undo_offer()
         message = f"Could not apply the selected change: {error}"
         dialog = self._dialog
         if dialog is not None:
@@ -5713,6 +5967,7 @@ class SmartSearchAddonController:
         if self.backend.bundle_update_running:
             return
         self._collection_temporarily_closed = False
+        self._clear_undo_offer()
         self._close_dialog()
         self._clear_pending_reconciles()
         self._clear_captured_notes()
@@ -5776,6 +6031,7 @@ class SmartSearchAddonController:
         self._refresh_dialog()
 
     def _on_profile_will_close(self) -> None:
+        self._clear_undo_offer()
         if self._reconcile_timer is not None:
             self._reconcile_timer.stop()
         if self._semantic_autostart_timer is not None:
@@ -5857,11 +6113,13 @@ class SmartSearchAddonController:
             self._captured_deleted_ids.clear()
 
     def _on_operation(self, changes: Any, handler: object | None) -> None:
+        if not isinstance(handler, (_OwnedMutation, _OwnedUndo)):
+            self._clear_undo_offer()
         # Owned card-state operations update their exact targets in the
         # success callback. Keep the visible result set stable until the user
         # explicitly searches again, and avoid a redundant state refresh.
         if bool(getattr(changes, "card", False)) and not isinstance(
-            handler, _OwnedMutation
+            handler, (_OwnedMutation, _OwnedUndo)
         ):
             self._refresh_visible_card_states()
 
@@ -5878,6 +6136,19 @@ class SmartSearchAddonController:
                 self.schedule_reconcile(
                     note_ids=action.note_ids,
                 )
+            return
+
+        if isinstance(handler, _OwnedUndo):
+            self._clear_undo_offer()
+            if context is None or handler.profile_token != context.token:
+                return
+            action = handler.action
+            if action.kind in (
+                ActionKind.ADD_TAGS,
+                ActionKind.REMOVE_TAGS,
+                ActionKind.CHANGE_DECK,
+            ):
+                self.schedule_reconcile(note_ids=action.note_ids)
             return
 
         broad_change = any(
@@ -5933,6 +6204,7 @@ class SmartSearchAddonController:
             self.schedule_reconcile(full=True)
 
     def _on_sync_finished(self) -> None:
+        self._clear_undo_offer()
         self.schedule_reconcile()
         self._refresh_visible_card_states()
 
@@ -5943,6 +6215,7 @@ class SmartSearchAddonController:
         # Match Anki's Browser: a live Editor must save and close before sync
         # temporarily swaps out the collection beneath its note/card objects.
         self._collection_temporarily_closed = True
+        self._clear_undo_offer()
         self._set_backend_maintenance_pause(True)
         for timer in (
             self._reconcile_timer,
@@ -6168,6 +6441,7 @@ class SmartSearchAddonController:
     def _search_dialog_closed(self, dialog: object) -> None:
         if self._dialog is not dialog:
             return
+        self._clear_undo_offer()
         if self._card_state_refresh_timer is not None:
             self._card_state_refresh_timer.stop()
         self._end_semantic_search_session()
@@ -6190,6 +6464,7 @@ class SmartSearchAddonController:
         self,
         callback: Callable[[], None],
     ) -> None:
+        self._clear_undo_offer()
         self._dialog_close_callbacks.append(callback)
         if self._dialog_close_in_progress:
             return

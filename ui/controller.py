@@ -19,6 +19,7 @@ from .contracts import (
     CancelCallback,
     Correction,
     IndexState,
+    PreviewDefault,
     SearchBackend,
     SearchRequest,
     SearchResponse,
@@ -50,7 +51,9 @@ class SearchController(QObject):
     # Preserve Anki's timestamp-sized 64-bit deck IDs across this signal hop.
     deckChangeRequested = pyqtSignal(object, object, str)
     tagActionRequested = pyqtSignal(object, bool)
+    undoRequested = pyqtSignal()
     previewPreferenceChanged = pyqtSignal(bool)
+    previewDefaultChanged = pyqtSignal(object)
 
     # Internal marshalling signals (emitted from arbitrary threads).
     _sig_search_success = pyqtSignal(int, object)
@@ -116,6 +119,7 @@ class SearchController(QObject):
         dialog.createCopyRequested.connect(self.createCopyRequested)
         dialog.deckChangeRequested.connect(self.deckChangeRequested)
         dialog.tagActionRequested.connect(self.tagActionRequested)
+        dialog.undoRequested.connect(self.undoRequested)
         dialog.deckPickerRequested.connect(self.load_decks)
         dialog.settingsChanged.connect(self._on_settings_changed)
         dialog.dialogClosed.connect(self._on_dialog_closed)
@@ -124,6 +128,7 @@ class SearchController(QObject):
         dialog.set_mode(self._settings.mode)
         dialog.set_result_limit(self._settings.result_limit)
         dialog.set_preview_enabled(self._settings.preview_enabled)
+        dialog.set_preview_default(self._settings.preview_default)
         dialog.resize(self._settings.width, self._settings.height)
 
         self._status_timer = QTimer(self)
@@ -476,16 +481,25 @@ class SearchController(QObject):
         mode,
         limit: int,
         preview_enabled: bool,
+        preview_default,
     ) -> None:
         self._settings.mode = mode
         self._settings.result_limit = limit
         previous_preview = self._settings.preview_enabled
         self._settings.preview_enabled = bool(preview_enabled)
+        previous_default = self._settings.preview_default
+        try:
+            self._settings.preview_default = PreviewDefault(preview_default)
+        except (TypeError, ValueError):
+            self._settings.preview_default = PreviewDefault.QUESTION
         self._dialog.set_result_limit(limit)
         self._dialog.set_preview_enabled(self._settings.preview_enabled)
+        self._dialog.set_preview_default(self._settings.preview_default)
         self._backend.save_settings(self._settings)
         if previous_preview != self._settings.preview_enabled:
             self.previewPreferenceChanged.emit(self._settings.preview_enabled)
+        if previous_default != self._settings.preview_default:
+            self.previewDefaultChanged.emit(self._settings.preview_default)
         if mode != self._dialog.mode():
             self._dialog.set_mode(mode)  # emits modeSelected → re-search
 

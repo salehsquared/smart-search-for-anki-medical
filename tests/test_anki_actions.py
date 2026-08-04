@@ -169,6 +169,32 @@ class _Collection:
         return self.set_deck_result
 
 
+class _UndoCollection(_Collection):
+    path = "/tmp/undo-collection.anki2"
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.undo_step = 40
+        self.undo_label = "Previous change"
+        self.undo_calls = 0
+
+    def undo_status(self):
+        return types.SimpleNamespace(
+            last_step=self.undo_step,
+            undo=self.undo_label,
+        )
+
+    def set_user_flag_for_cards(self, flag: int, card_ids) -> object:
+        result = super().set_user_flag_for_cards(flag, card_ids)
+        self.undo_step += 1
+        self.undo_label = "Set Flag"
+        return result
+
+    def undo(self):
+        self.undo_calls += 1
+        return types.SimpleNamespace(changes="undo-changes")
+
+
 def _outcome(
     kind,
     *,
@@ -179,6 +205,7 @@ def _outcome(
     stale: int = 0,
     skipped: int = 0,
     note_count: int = 0,
+    undo: bool = True,
 ):
     return actions.ActionOutcome(
         changes=object(),
@@ -190,6 +217,11 @@ def _outcome(
         stale=stale,
         skipped=skipped,
         note_count=note_count,
+        undo_token=(
+            actions.UndoToken(7, "Smart Search change", "/tmp/collection")
+            if changed and undo
+            else None
+        ),
     )
 
 
@@ -650,6 +682,23 @@ class TagActionTests(unittest.TestCase):
 
 
 class MessageFormattingTests(unittest.TestCase):
+    def test_changed_message_only_promises_undo_for_a_captured_step(self) -> None:
+        action = actions.CollectionAction(
+            actions.ActionKind.SUSPEND,
+            card_ids=(1,),
+        )
+        outcome = _outcome(
+            actions.ActionKind.SUSPEND,
+            changed=1,
+            note_count=1,
+            undo=False,
+        )
+
+        self.assertEqual(
+            actions.format_action_message(action, outcome),
+            "Suspended 1 card from 1 note",
+        )
+
     def test_changed_action_messages_include_exact_scope_and_undo(self) -> None:
         cases = (
             (
@@ -819,6 +868,124 @@ class MessageFormattingTests(unittest.TestCase):
             ),
             "No selected notes needed changing",
         )
+
+
+class GuardedUndoTests(unittest.TestCase):
+    def test_changed_action_captures_the_exact_new_undo_step(self) -> None:
+        collection = _UndoCollection(
+            cards={1: _Card(nid=10, flag=0)},
+        )
+        action = actions.CollectionAction(
+            actions.ActionKind.FLAG,
+            card_ids=(1,),
+            flag=4,
+        )
+
+        outcome = actions.execute_collection_action(collection, action)
+
+        self.assertEqual(
+            outcome.undo_token,
+            actions.UndoToken(
+                41,
+                "Set Flag",
+                "/tmp/undo-collection.anki2",
+            ),
+        )
+
+    def test_guarded_undo_runs_only_for_the_exact_step_label_and_collection(self) -> None:
+        collection = _UndoCollection()
+        token = actions.UndoToken(
+            40,
+            "Previous change",
+            "/tmp/undo-collection.anki2",
+        )
+
+        output = actions.execute_guarded_undo(collection, token)
+
+        self.assertEqual(collection.undo_calls, 1)
+        self.assertEqual(output.changes, "undo-changes")
+
+        mismatches = (
+            actions.UndoToken(39, token.label, token.collection_path),
+            actions.UndoToken(token.step, "Other change", token.collection_path),
+            actions.UndoToken(token.step, token.label, "/tmp/other.anki2"),
+        )
+        for mismatch in mismatches:
+            with self.subTest(token=mismatch):
+                with self.assertRaises(actions.UndoUnavailable):
+                    actions.execute_guarded_undo(collection, mismatch)
+        self.assertEqual(collection.undo_calls, 1)
+
+    def test_noop_never_exposes_an_older_undo_step(self) -> None:
+        collection = _UndoCollection(
+            cards={1: _Card(nid=10, flag=4)},
+        )
+        action = actions.CollectionAction(
+            actions.ActionKind.FLAG,
+            card_ids=(1,),
+            flag=4,
+        )
+
+        outcome = actions.execute_collection_action(collection, action)
+
+        self.assertEqual(outcome.changed, 0)
+        self.assertIsNone(outcome.undo_token)
+
+    def test_failed_pre_action_status_read_never_exposes_an_older_step(self) -> None:
+        collection = _UndoCollection(cards={1: _Card(nid=10, flag=0)})
+        original = collection.undo_status
+        calls = 0
+
+        def fail_first_read():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("status unavailable")
+            return original()
+
+        collection.undo_status = fail_first_read
+        outcome = actions.execute_collection_action(
+            collection,
+            actions.CollectionAction(
+                actions.ActionKind.FLAG,
+                card_ids=(1,),
+                flag=4,
+            ),
+        )
+
+        self.assertEqual(outcome.changed, 1)
+        self.assertIsNone(outcome.undo_token)
+
+    def test_missing_collection_identity_disables_one_click_undo(self) -> None:
+        collection = _UndoCollection(cards={1: _Card(nid=10, flag=0)})
+        collection.path = ""
+
+        outcome = actions.execute_collection_action(
+            collection,
+            actions.CollectionAction(
+                actions.ActionKind.FLAG,
+                card_ids=(1,),
+                flag=4,
+            ),
+        )
+
+        self.assertEqual(outcome.changed, 1)
+        self.assertIsNone(outcome.undo_token)
+
+    def test_guarded_undo_fails_closed_when_status_cannot_be_read(self) -> None:
+        collection = _UndoCollection()
+        token = actions.UndoToken(
+            40,
+            "Previous change",
+            "/tmp/undo-collection.anki2",
+        )
+        collection.undo_status = lambda: (_ for _ in ()).throw(
+            RuntimeError("status unavailable")
+        )
+
+        with self.assertRaises(actions.UndoUnavailable):
+            actions.execute_guarded_undo(collection, token)
+        self.assertEqual(collection.undo_calls, 0)
 
 
 class CollectionOpTests(unittest.TestCase):
