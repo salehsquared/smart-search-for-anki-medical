@@ -91,10 +91,10 @@ not part of the public package.
 - [x] Ensure the public repository does not contain generated profile indexes or
       expanded runtimes.
 
-## 6. Distribution-path validation — v1.0.23 public release
+## 6. Distribution-path validation — v1.0.24 public release
 
-Complete local and public v1.0.23 evidence is in
-`RELEASE_RECORD_1.0.23.md`. Historical releases remain in their versioned
+Complete local and public v1.0.24 evidence is in
+`RELEASE_RECORD_1.0.24.md`. Historical releases remain in their versioned
 release records.
 
 ### A. Isolated clean-install matrix
@@ -125,7 +125,7 @@ release records.
 - [x] Install the oldest version users could reasonably have.
 - [x] Create synthetic indexes and non-default settings.
 - [x] Upgrade through Anki's native `AddonManager.install()` mechanism to the
-      release candidate on every supported version. v1.0.22-to-v1.0.23 passed
+      release candidate on every supported version. v1.0.23-to-v1.0.24 passed
       on all seven supported environments.
 - [x] Confirm intended `user_files` survive, stale generated assets are migrated
       or safely rebuilt, and no duplicate menu item appears.
@@ -160,7 +160,7 @@ fully usable.
 - [x] Update the existing public item in place with the frozen archive; no
       duplicate staging item or compatibility branch was created.
 - [x] Record the assigned numeric add-on code: `677438639`.
-- [x] Repeat clean install and v1.0.22 → v1.0.23 upgrade tests using that
+- [x] Repeat clean install and v1.0.23 → v1.0.24 upgrade tests using that
       numeric code through Anki's official updater.
 - [x] Verify the listing, images, links, formatting, version range, and support
       contact in AnkiWeb's rendered page.
@@ -178,6 +178,6 @@ release record and are not part of the public beta support claim.
 
 ## 7. Release record
 
-The v1.0.23 artifact, hashes, compatibility evidence, GitHub release, live
+The v1.0.24 artifact, hashes, compatibility evidence, GitHub release, live
 AnkiWeb boundaries, and numeric-code installation evidence are recorded in
-`RELEASE_RECORD_1.0.23.md`. Earlier releases remain in their versioned records.
+`RELEASE_RECORD_1.0.24.md`. Earlier releases remain in their versioned records.

@@ -1,9 +1,9 @@
-# AnkiWeb listing record — v1.0.23
+# AnkiWeb listing record — v1.0.24
 
 ## Live listing
 
-- **Status:** v1.0.23 public beta is live
-- **Published:** 2026-08-03 UTC (2026-08-03 America/Phoenix)
+- **Status:** v1.0.24 public beta is live
+- **Published:** 2026-08-04 UTC (2026-08-03 America/Phoenix)
 - **AnkiWeb code:** `677438639`
 - **Public URL:** https://ankiweb.net/shared/info/677438639
 - **Supported Anki versions:** 24.11 through hard maximum 26.08
@@ -45,21 +45,20 @@ components and terminology covered by `THIRD_PARTY_NOTICES.md` and `licenses/`.
 
 ## Canonical listing description
 
-`release/ANKIWEB_DESCRIPTION_1.0.23.md` is the exact source published to the
+`release/ANKIWEB_DESCRIPTION_1.0.24.md` is the exact source published to the
 listing. It describes Smart, Exact, and Semantic modes; the searchable deck
 picker and native Anki filters; reviewer-style preview controls and bulk
-actions; exact-card deck moves; safe bury/unbury controls; stable in-place card
-actions; isolated Semantic-worker memory lifecycle; Anki 24.11–26.08
-compatibility; macOS-only Semantic support; local privacy; and the MedBrevia
-creator/support links.
+actions; the native Create Copy workflow; exact-card deck moves; safe
+bury/unbury controls; stable in-place card actions; isolated Semantic-worker
+memory lifecycle; Anki 24.11–26.08 compatibility; macOS-only Semantic support;
+local privacy; and the MedBrevia creator/support links.
 
 The live description embeds:
 
 1. `assets/screenshots/01-smart-search.png` — typo recovery and ranked results.
-2. `assets/screenshots/03-bulk-actions.png` — multi-select card operations.
 
-Both are synthetic clean-profile captures and rendered successfully from the
-tagged `v1.0.23` GitHub paths. No real collection data is shown.
+It is a synthetic clean-profile capture and rendered successfully from the
+tagged `v1.0.24` GitHub path. No real collection data is shown.
 
 ## Publication record
 
@@ -80,9 +79,12 @@ tagged `v1.0.23` GitHub paths. No real collection data is shown.
 - v1.0.23 updated the same item and branch on 2026-08-03. Boundary downloads,
   supported/out-of-range routing, numeric-code clean installs, and a live
   v1.0.22-to-v1.0.23 update passed.
-- `release/ANKIWEB_DESCRIPTION_1.0.23.md` is the canonical description source.
+- v1.0.24 updated the same item and branch on 2026-08-04 UTC (2026-08-03
+  America/Phoenix). Boundary downloads, supported/out-of-range routing,
+  numeric-code clean installs, and a live v1.0.23-to-v1.0.24 update passed.
+- `release/ANKIWEB_DESCRIPTION_1.0.24.md` is the canonical description source.
 - The rendered listing, server metadata, served-archive comparison, and
-  numeric-code QA are recorded in `release/RELEASE_RECORD_1.0.23.md`.
+  numeric-code QA are recorded in `release/RELEASE_RECORD_1.0.24.md`.
 
 ## Listing maintenance notes
 
