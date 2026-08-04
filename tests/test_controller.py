@@ -3923,6 +3923,103 @@ class ControllerTests(unittest.TestCase):
             self.assertEqual(move.deck_id, 9)
             self.assertEqual(move.deck_name, "Medicine::Cardiology")
 
+    def test_create_copy_flushes_preview_and_uses_modern_add_cards(self) -> None:
+        mw = _MainWindow()
+        addon = controller.SmartSearchAddonController(
+            mw,
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        note = types.SimpleNamespace(id=11)
+        card = types.SimpleNamespace(
+            nid=11,
+            current_deck_id=lambda: 1_785_791_800_898,
+        )
+        mw.col.notes[11] = note
+        mw.col.cards[101] = card
+        opened = []
+        add_cards = types.SimpleNamespace(
+            set_note=lambda source, deck_id: opened.append((source, deck_id))
+        )
+        mw._open_new_or_legacy_dialog = lambda name: (
+            opened.append(name) or add_cards
+        )
+        pending = []
+
+        class _Preview:
+            def flush(self, callback) -> None:
+                pending.append(callback)
+
+        addon._previewer = _Preview()
+        errors = []
+        addon._show_error = errors.append
+        result = contracts.SearchResult(note_id=11, card_ids=(101,))
+
+        addon._create_result_copy((result,))
+
+        self.assertEqual(opened, [])
+        self.assertEqual(len(pending), 1)
+        pending.pop()()
+        self.assertEqual(
+            opened,
+            ["AddCards", (note, 1_785_791_800_898)],
+        )
+        self.assertEqual(errors, [])
+
+    def test_create_copy_uses_legacy_dialog_and_filtered_home_deck(self) -> None:
+        mw = _MainWindow()
+        addon = controller.SmartSearchAddonController(
+            mw,
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        note = types.SimpleNamespace(
+            id=11,
+            fields=["Question", "linked-note-uuid"],
+            keys=lambda: ["Front", "ankihub_id"],
+        )
+        card = types.SimpleNamespace(nid=11, did=700, odid=42)
+        mw.col.notes[11] = note
+        mw.col.cards[101] = card
+        opened = []
+        add_cards = types.SimpleNamespace(
+            editor=types.SimpleNamespace(note=object()),
+            set_note=lambda source, deck_id: opened.append(
+                (tuple(source.fields), deck_id)
+            ),
+        )
+        fake_aqt = types.SimpleNamespace(
+            dialogs=types.SimpleNamespace(
+                open=lambda name, parent: (
+                    opened.append((name, parent)) or add_cards
+                )
+            )
+        )
+
+        with patch.dict(sys.modules, {"aqt": fake_aqt}):
+            addon._create_result_copy_after_save(11, (404, 101))
+
+        self.assertEqual(opened[0], ("AddCards", mw))
+        self.assertEqual(opened[1], (("Question", ""), 42))
+
+    def test_create_copy_rejects_multiple_or_stale_notes(self) -> None:
+        mw = _MainWindow()
+        addon = controller.SmartSearchAddonController(
+            mw,
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        errors = []
+        addon._show_error = errors.append
+        first = contracts.SearchResult(note_id=11, card_ids=(101,))
+        second = contracts.SearchResult(note_id=22, card_ids=(202,))
+
+        addon._create_result_copy((first, second))
+        addon._create_result_copy_after_save(404, (101,))
+
+        self.assertEqual(errors[0], "Select one note to create a copy.")
+        self.assertIn("source note is no longer available", errors[1].lower())
+
     def test_bury_success_updates_only_changed_cards_in_place(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),

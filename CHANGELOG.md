@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.0.24] — 2026-08-03
+
+### Added
+
+- A single selected note can now be opened as a fresh copy through the result
+  menu's **Create Copy…** action. Smart Search preloads Anki's native Add Cards
+  editor with the source note type, fields, tags, media references, and home
+  deck; nothing is created until the user clicks **Add**.
+- Copies receive Anki's normal new note/card identities and fresh scheduling.
+  Multi-template and cloze notes generate their usual sibling cards, and the
+  copy workflow does not otherwise modify the source after any pending inline
+  edits are saved.
+
+### Safety and compatibility
+
+- Unsaved inline-preview edits are flushed before the copy editor opens.
+- Source note and card IDs are revalidated, filtered-deck cards resolve to
+  their home deck, and the legacy Add Cards path clears the known AnkiHub
+  identity field from its detached in-memory copy without flushing that change
+  back to the source.
+- The action follows Anki's native Add Cards APIs on every supported release
+  from Anki 24.11 through 26.08.
+
 ## [1.0.23] — 2026-08-03
 
 ### Added

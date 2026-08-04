@@ -138,7 +138,7 @@ class BuildAddonTests(unittest.TestCase):
             ui_package = root / "ui" / "__init__.py"
             ui_package.write_text(
                 ui_package.read_text(encoding="utf-8").replace(
-                    '__version__ = "1.0.23"',
+                    '__version__ = "1.0.24"',
                     '__version__ = "9.9.9"',
                 ),
                 encoding="utf-8",
@@ -158,7 +158,7 @@ class BuildAddonTests(unittest.TestCase):
 
             self.assertEqual(
                 build_addon.default_output_path(root),
-                root / "dist" / "Smart_Search_Medical_1.0.23.ankiaddon",
+                root / "dist" / "Smart_Search_Medical_1.0.24.ankiaddon",
             )
 
     def test_manifest_covers_the_reviewed_anki_release_matrix(self) -> None:

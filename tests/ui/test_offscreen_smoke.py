@@ -188,6 +188,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller = SearchController(backend, dialog)
         result = SearchResult(note_id=7, card_ids=(71,))
         burials = []
+        copies = []
         moves = []
         controller.burialRequested.connect(
             lambda target, bury: burials.append((target, bury))
@@ -197,14 +198,17 @@ class OffscreenSmokeTests(unittest.TestCase):
                 (target, deck_id, name)
             )
         )
+        controller.createCopyRequested.connect(copies.append)
 
         # Real Anki deck IDs are timestamp-sized and exceed Qt's signed
         # 32-bit ``int`` range.  Both UI signal hops must preserve every bit.
         deck_id = 1_785_791_800_898
         dialog.burialRequested.emit((result,), True)
+        dialog.createCopyRequested.emit((result,))
         dialog.deckChangeRequested.emit((result,), deck_id, "Cardiology")
 
         self.assertEqual(burials, [((result,), True)])
+        self.assertEqual(copies, [(result,)])
         self.assertEqual(moves, [((result,), deck_id, "Cardiology")])
         controller.deleteLater()
         dialog.deleteLater()
@@ -1439,7 +1443,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.23")
+        self.assertEqual(fallback.version, "1.0.24")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())
@@ -2256,6 +2260,12 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertIn("Bury", mixed_labels)
         self.assertNotIn("Unbury", mixed_labels)
         self.assertIn("Change Deck…", mixed_labels)
+        mixed_copy = next(
+            action
+            for action in mixed_menu.actions()
+            if action.text() == "Create Copy…"
+        )
+        self.assertFalse(mixed_copy.isEnabled())
         self.assertIn("Flag", mixed_labels)
         self.assertIn("Tags", mixed_labels)
 
@@ -2267,10 +2277,17 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertIn("Suspend", active_labels)
         self.assertNotIn("Unsuspend", active_labels)
         self.assertIn("Bury", active_labels)
+        active_copy = next(
+            action
+            for action in active_menu.actions()
+            if action.text() == "Create Copy…"
+        )
+        self.assertTrue(active_copy.isEnabled())
 
         flags: list[tuple[tuple[SearchResult, ...], int]] = []
         tags: list[tuple[tuple[SearchResult, ...], bool]] = []
         opened: list[tuple[SearchResult, ...]] = []
+        copied: list[tuple[SearchResult, ...]] = []
         dialog.flagRequested.connect(
             lambda target, flag: flags.append((target, flag))
         )
@@ -2278,6 +2295,7 @@ class OffscreenSmokeTests(unittest.TestCase):
             lambda target, add: tags.append((target, add))
         )
         dialog.openAllRequested.connect(opened.append)
+        dialog.createCopyRequested.connect(copied.append)
 
         flag_action = next(
             action
@@ -2301,12 +2319,14 @@ class OffscreenSmokeTests(unittest.TestCase):
             action for action in active_menu.actions()
             if action.text() == "Open in Browser"
         ).trigger()
+        active_copy.trigger()
 
         self.assertEqual([result.note_id for result in flags[0][0]], [3])
         self.assertEqual(flags[0][1], 4)
         self.assertEqual([result.note_id for result in tags[0][0]], [3])
         self.assertTrue(tags[0][1])
         self.assertEqual([result.note_id for result in opened[0]], [3])
+        self.assertEqual([result.note_id for result in copied[0]], [3])
 
         mixed_menu.deleteLater()
         active_menu.deleteLater()

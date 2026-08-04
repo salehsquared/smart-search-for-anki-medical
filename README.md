@@ -60,6 +60,10 @@ usable while Semantic prepares.
 - Flag, suspend, unsuspend, add tags, or remove tags from the toolbar or
   right-click menu. The right-click menu can also bury/unbury cards or move the
   exact selection with a searchable hierarchical destination picker.
+- Right-click one note and choose **Create Copy…** to open Anki's native Add
+  Cards editor prefilled with its fields, tags, media references, and home
+  deck. The copy is created only after you click **Add** and starts with fresh
+  scheduling.
 - Review the live selection summary before acting; tags apply to notes, while
   flags, suspension, burial, and deck moves apply to cards.
 

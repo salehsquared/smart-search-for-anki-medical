@@ -109,7 +109,7 @@ Smart and Exact while Semantic is being prepared.</p>
 <li><b>Ctrl+Shift+P</b> — toggle the card preview pane</li>
 <li><b>Shift+Space</b> — check or uncheck the highlighted result for bulk actions</li>
 <li><b>Shift+click</b> — check a range of results</li>
-<li><b>Right-click</b> — move, bury, flag, suspend, or tag clicked/checked results</li>
+<li><b>Right-click</b> — create a copy, move, bury, flag, suspend, or tag results</li>
 <li><b>{_PRIMARY_KEY}+Return</b> — open checked results, or all shown if none are checked</li>
 <li><b>{_PRIMARY_KEY}+1 / 2 / 3</b> — Smart, Exact, Semantic mode</li>
 <li><b>{_PRIMARY_KEY}+L</b> — jump back to the search field</li>
@@ -463,6 +463,7 @@ class SearchDialog(QDialog):
     flagRequested = pyqtSignal(object, int)  # tuple[SearchResult, ...], 0..7
     suspensionRequested = pyqtSignal(object, bool)  # results, suspend?
     burialRequested = pyqtSignal(object, bool)  # results, bury?
+    createCopyRequested = pyqtSignal(object)  # one note/result selection
     # Anki deck IDs are timestamp-sized 64-bit integers.  A Qt ``int`` signal
     # is only 32-bit and silently wraps them, so keep the ID as a Python object
     # until CollectionAction validates it at the collection boundary.
@@ -1344,6 +1345,7 @@ class SearchDialog(QDialog):
             for card_id in result.card_ids
             if int(card_id) > 0
         }
+        frozen_results = tuple(results)
 
         open_action = menu.addAction("Open in Browser")
         open_action.setEnabled(bool(card_ids))
@@ -1352,9 +1354,22 @@ class SearchDialog(QDialog):
         )
         menu.addSeparator()
 
+        copy_action = menu.addAction("Create Copy…")
+        copy_action.setEnabled(len(note_ids) == 1 and bool(card_ids))
+        copy_help = (
+            "Open a fresh note copy in Add Cards; Anki will generate its "
+            "cards with new scheduling."
+        )
+        copy_action.setToolTip(copy_help)
+        copy_action.setStatusTip(copy_help)
+        copy_action.triggered.connect(
+            lambda _checked=False, targets=frozen_results: (
+                self.createCopyRequested.emit(targets)
+            )
+        )
+
         move_action = menu.addAction("Change Deck…")
         move_action.setEnabled(bool(card_ids))
-        frozen_results = tuple(results)
 
         def open_destination(_checked=False) -> None:
             self._open_deck_destination_picker(

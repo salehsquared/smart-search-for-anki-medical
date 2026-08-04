@@ -892,8 +892,8 @@ class ResultsView(QListView):
             "Right Arrow to show the answer and Left Arrow to show the front. "
             "Click a checkbox or press Shift+Space to include a result in a "
             "bulk action; Shift-click a row to include a range. "
-            "Right-click a row to open, move, bury, flag, suspend, or tag the "
-            "target selection. "
+            "Right-click a row to open, create a copy, move, bury, flag, "
+            "suspend, or tag the target selection. "
             "Press Return to open the highlighted note, or Up on the first row "
             "to return to the search field."
         )
