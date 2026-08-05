@@ -1,11 +1,11 @@
 """Result list: model, custom delegate, and view.
 
 Each note renders as a separated rounded card on the window background:
-a bold elided title with a quiet sibling-card count at the right, a
-two-line span-highlighted snippet, a muted deck/note-type/tags line, and
-a row of compact colored match-reason chips. The current row is marked
-with a violet outline and subtle tint — never a solid bright fill — so
-text contrast survives selection. Raw card HTML is never rendered —
+a bold elided primary line with a quiet sibling-card count at the right, a
+single-line span-highlighted supporting excerpt, a muted deck/note-type
+line, and a row of compact colored match-reason chips. The current row is
+marked with a violet outline and subtle tint — never a solid bright fill —
+so text contrast survives selection. Raw card HTML is never rendered —
 snippets are plain text and every span is clamped and merged before
 painting.
 """
@@ -132,6 +132,17 @@ def card_state_summary(result: SearchResult) -> str:
             flagged.append(f"unflagged {unflagged}")
         parts.append("Flags: " + ", ".join(flagged))
     return ". ".join(parts) + ("." if parts else "")
+
+
+def tag_summary(tags: Sequence[str], *, limit: int = 6) -> str:
+    """Return a bounded metadata summary without changing stored tags."""
+
+    visible = tuple(str(tag) for tag in tags[:limit] if str(tag))
+    if not visible:
+        return ""
+    hidden = max(0, len(tags) - len(visible))
+    suffix = f" (+{hidden} more)" if hidden else ""
+    return "Tags: " + ", ".join(visible) + suffix
 
 
 class ResultsModel(QAbstractListModel):
@@ -432,16 +443,14 @@ class ResultsModel(QAbstractListModel):
                     else "Exact related tags"
                 )
                 details.append(label + ": " + ", ".join(result.related_by_tags))
+            tags = tag_summary(result.tags)
+            if tags:
+                details.append(tags)
             return "\n".join(details) or None
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole):
-            parts = [result.title, result.deck, result.note_type]
+            parts = [result.title, result.snippet, result.deck, result.note_type]
             if result.match_reasons:
                 parts.append("matched by " + ", ".join(result.match_reasons))
-            if result.related_by_tags:
-                parts.append(
-                    "related through exact tag "
-                    + ", ".join(result.related_by_tags)
-                )
             if result.sibling_count > 1:
                 parts.append(f"{result.sibling_count} cards")
             if role == Qt.ItemDataRole.AccessibleTextRole:
@@ -454,6 +463,14 @@ class ResultsModel(QAbstractListModel):
                 state_summary = card_state_summary(result)
                 if state_summary:
                     parts.append(state_summary)
+                tags = tag_summary(result.tags)
+                if tags:
+                    parts.append(tags)
+                if result.related_by_tags:
+                    parts.append(
+                        "related through exact tag "
+                        + ", ".join(result.related_by_tags)
+                    )
             return ", ".join(p for p in parts if p)
         return None
 
@@ -795,6 +812,16 @@ class ResultDelegate(QStyledItemDelegate):
             Qt.TextElideMode.ElideRight,
             title_width,
         )
+        for span in merge_spans(clamp_spans(result.title_spans, len(title))):
+            span_x = title_fm.horizontalAdvance(title[: span.start])
+            span_width = title_fm.horizontalAdvance(
+                title[span.start : span.end]
+            )
+            if span_width:
+                painter.fillRect(
+                    QRect(left + span_x, y, span_width, title_fm.height()),
+                    QColor(colors["accent_soft"]),
+                )
         painter.setPen(QColor(colors["text"]))
         painter.drawText(
             left,
@@ -830,9 +857,10 @@ class ResultDelegate(QStyledItemDelegate):
         painter.restore()
 
         meta_y = snippet_y + line_h + 6
+        # Visible metadata stays quiet: deck and note type only. Raw
+        # hierarchical tags remain on the result object for tooltips,
+        # accessibility, actions, filtering, and Related matching.
         meta_parts = [part for part in (result.deck, result.note_type) if part]
-        if result.tags:
-            meta_parts.append(" ".join("#" + tag for tag in result.tags[:4]))
         meta_font = QFont(option.font)
         meta_font.setPointSizeF(max(meta_font.pointSizeF() - 0.8, 8.0))
         meta_font.setBold(True)
@@ -860,7 +888,9 @@ class ResultDelegate(QStyledItemDelegate):
         painter.setFont(chip_font)
         chip_fm = painter.fontMetrics()
         chip_x = left
-        named_reasons = list(result.match_reasons[:3])
+        # One explanation is enough at a glance. Additional reasons remain
+        # represented by a compact +N chip and in the accessible row text.
+        named_reasons = list(result.match_reasons[:1])
         hidden_reasons = max(0, len(result.match_reasons) - len(named_reasons))
 
         def chip_width(label: str) -> int:

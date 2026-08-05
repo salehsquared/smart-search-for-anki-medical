@@ -421,6 +421,96 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertFalse(dialog.grab().isNull())
         dialog.deleteLater()
 
+    def test_row_metadata_hides_raw_tags_but_accessibility_stays_complete(
+        self,
+    ) -> None:
+        source_tag = "#AK_Step2_v12::#UWorld::Step::19231"
+        result = SearchResult(
+            note_id=43,
+            card_ids=(201, 202),
+            card_states=(
+                CardState(201, flag=1, suspended=True),
+                CardState(202),
+            ),
+            title="Hypertension screening and confirmation",
+            snippet="Confirm an elevated office blood pressure.",
+            deck="Synthetic FM Shelf",
+            note_type="Preventive Care",
+            tags=(source_tag,),
+            match_reasons=("Related · UWorld · 19231",),
+            related_by_tags=(source_tag,),
+            sibling_count=2,
+        )
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_response(
+            SearchResponse(
+                request_id=3,
+                query="hypertension",
+                results=(
+                    result,
+                    SearchResult(
+                        note_id=44,
+                        card_ids=(203,),
+                        title="Adult immunization intervals",
+                        snippet="Review age, pregnancy, and risk conditions.",
+                        deck="Synthetic FM Shelf",
+                        note_type="Immunization",
+                        tags=("Synthetic::#UWorld::Step::77777",),
+                        match_reasons=("exact filter",),
+                        sibling_count=1,
+                    ),
+                ),
+                total_results=2,
+            ),
+            (),
+        )
+        self.app.processEvents()
+        index = dialog.results.results_model().index(0, 0)
+
+        display = index.data(Qt.ItemDataRole.DisplayRole)
+        accessible = index.data(Qt.ItemDataRole.AccessibleTextRole)
+        tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
+        # The displayed lines carry the compact primary/support contract.
+        self.assertIn(result.title, display)
+        self.assertIn(result.snippet, display)
+        self.assertIn("Synthetic FM Shelf", display)
+        self.assertIn("Preventive Care", display)
+        # A plain tagged row never exposes raw hierarchical tags in the text
+        # Qt displays, while the tags stay on the result object itself.
+        plain_index = dialog.results.results_model().index(1, 0)
+        plain_display = plain_index.data(Qt.ItemDataRole.DisplayRole)
+        self.assertNotIn("Synthetic::#UWorld::Step::77777", plain_display)
+        self.assertNotIn("#UWorld", plain_display)
+        self.assertIn("Adult immunization intervals", plain_display)
+        self.assertIn("Review age, pregnancy, and risk conditions.", plain_display)
+        # Accessible text keeps the full row summary.
+        self.assertIn(result.title, accessible)
+        self.assertIn(result.snippet, accessible)
+        self.assertTrue(accessible.startswith("not checked"))
+        self.assertIn("2 cards", accessible)
+        self.assertIn("Related · UWorld · 19231", accessible)
+        self.assertIn("1 of 2 cards suspended", accessible)
+        self.assertIn("Tags:", accessible)
+        self.assertIn(source_tag, accessible)
+        # The tooltip retains the precise live-state and exact related tags.
+        self.assertIn("Flags: red 1, unflagged 1", tooltip)
+        self.assertIn(source_tag, tooltip)
+        plain_tooltip = plain_index.data(Qt.ItemDataRole.ToolTipRole)
+        plain_accessible = plain_index.data(Qt.ItemDataRole.AccessibleTextRole)
+        self.assertIn("Synthetic::#UWorld::Step::77777", plain_tooltip)
+        self.assertIn("Synthetic::#UWorld::Step::77777", plain_accessible)
+        # Tags remain intact on the result object for actions and Related.
+        self.assertEqual(dialog.results.results_model().result_at(0).tags, (source_tag,))
+
+        dialog.results.results_model().set_checked(0, True)
+        self.assertTrue(
+            index.data(Qt.ItemDataRole.AccessibleTextRole).startswith("checked,")
+        )
+        # Paint the compact card, tags present, in the actual Qt runtime.
+        self.assertFalse(dialog.grab().isNull())
+        dialog.deleteLater()
+
     def test_live_state_refresh_rejects_stale_sibling_scope(self) -> None:
         dialog = SearchDialog()
         model = dialog.results.results_model()

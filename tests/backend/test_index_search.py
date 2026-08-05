@@ -576,6 +576,92 @@ class IndexSearchTests(unittest.TestCase):
         self.assertEqual(response.total_candidates, 1)
         self.assertEqual(response.results[0].note_id, 1002)
 
+    def test_result_rows_show_primary_line_and_single_support_excerpt(self) -> None:
+        response = self.engine.search("bupropion")
+        result = response.results[0]
+        self.assertEqual(
+            result.title,
+            "Bupropion is used for depression and smoking cessation.",
+        )
+        self.assertEqual(
+            result.snippet,
+            "Wellbutrin inhibits norepinephrine and dopamine reuptake.",
+        )
+
+    def test_filter_only_rows_follow_the_same_display_contract(self) -> None:
+        response = self.engine.search("tag:Cardiology", allowed_note_ids={1002})
+        result = response.results[0]
+        self.assertEqual(
+            result.title,
+            "ACE inhibitors improve mortality in chronic heart failure.",
+        )
+        self.assertEqual(result.snippet, "Monitor potassium and creatinine.")
+
+    def test_non_displayed_field_term_stays_searchable_and_becomes_support(self) -> None:
+        self.index.rebuild(
+            [
+                IndexedNote(
+                    2001,
+                    {
+                        "Text": "Beta blockers reduce mortality after infarction.",
+                        "Extra": "Avoid in acute decompensated heart failure.",
+                        "Lecture Notes": "Carvedilol also blocks alpha-1 receptors.",
+                    },
+                    card_ids=(3001,),
+                    guid="needle-in-later-field",
+                ),
+            ]
+        )
+        response = self.engine.search("carvedilol")
+        self.assertEqual([result.note_id for result in response.results], [2001])
+        result = response.results[0]
+        self.assertEqual(
+            result.title,
+            "Beta blockers reduce mortality after infarction.",
+        )
+        self.assertIn("Carvedilol", result.snippet)
+        self.assertNotIn("acute decompensated", result.snippet)
+
+    def test_internal_identity_field_stays_searchable_but_is_never_displayed(self) -> None:
+        self.index.rebuild(
+            [
+                IndexedNote(
+                    2002,
+                    {
+                        "AnkiHub ID": "e3f9a2c1",
+                        "Text": "Peyronie disease involves penile fibrosis.",
+                    },
+                    card_ids=(3002,),
+                    guid="internal-identity",
+                ),
+            ]
+        )
+        response = self.engine.search("e3f9a2c1")
+        self.assertEqual([result.note_id for result in response.results], [2002])
+        result = response.results[0]
+        self.assertEqual(result.title, "Peyronie disease involves penile fibrosis.")
+        self.assertNotIn("e3f9a2c1", f"{result.title}\n{result.snippet}")
+
+    def test_media_only_note_rows_fall_back_to_the_note_id(self) -> None:
+        self.index.rebuild(
+            [
+                IndexedNote(
+                    2003,
+                    {
+                        "Image": "<img src='mri.png'>",
+                        "Audio": "[sound:clip.mp3]",
+                    },
+                    tags=("Radiology",),
+                    card_ids=(3003,),
+                    guid="media-only",
+                ),
+            ]
+        )
+        response = self.engine.search("tag:Radiology", allowed_note_ids={2003})
+        result = response.results[0]
+        self.assertEqual(result.title, "Note 2003")
+        self.assertEqual(result.snippet, "")
+
     def test_filter_with_only_negative_free_term_applies_exclusion(self) -> None:
         response = self.engine.search(
             "deck:AnKing -bupropion",
@@ -665,7 +751,8 @@ class IndexSearchTests(unittest.TestCase):
         self.assertEqual(plan.unchanged, 2)
         self.assertEqual([note.note_id for note, _hash in plan.changed], [1001])
         self.assertEqual(self.index.apply_upsert(plan), 1)
-        self.assertIn("updated", self.engine.search("updated").results[0].snippet)
+        result = self.engine.search("updated").results[0]
+        self.assertIn("updated", f"{result.title}\n{result.snippet}")
 
     def test_card_scope_and_timestamps_do_not_rebuild_lexical_content(self) -> None:
         original_generation = self.index.generation

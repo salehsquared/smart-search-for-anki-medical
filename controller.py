@@ -80,7 +80,12 @@ from .backend.query import (
 )
 from .backend.related import related_reason
 from .backend.search import SearchEngine
-from .backend.text import normalize_text, strip_html_and_cloze, tokenize
+from .backend.text import (
+    display_lines,
+    normalized_spans,
+    strip_html_and_cloze,
+    tokenize,
+)
 from .semantic.service import SemanticDocument, SemanticService
 from .ui.contracts import (
     AboutInfo,
@@ -6765,9 +6770,9 @@ def _related_ui_result(hit: Any) -> SearchResult:
     """Convert one deterministic external-index relation into a UI row."""
 
     document = hit.document
-    snippet = str(document.plain_text or document.title or "").strip()
-    if len(snippet) > 360:
-        snippet = snippet[:359].rstrip() + "…"
+    title, snippet = display_lines(
+        document.fields, (), note_id=int(document.note_id)
+    )
     shared = tuple(hit.shared_tags)
     frequencies = tuple(max(1, int(value)) for value in hit.tag_frequencies)
     specificity = sum(1.0 / value for value in frequencies)
@@ -6781,7 +6786,7 @@ def _related_ui_result(hit: Any) -> SearchResult:
     return SearchResult(
         note_id=int(document.note_id),
         card_ids=card_ids,
-        title=str(document.title or "").strip() or f"Note {document.note_id}",
+        title=title or str(document.title or "").strip() or f"Note {document.note_id}",
         snippet=snippet,
         deck=document.decks[0] if document.decks else "",
         note_type=document.note_type,
@@ -6867,6 +6872,12 @@ def _to_ui_response(
                 note_id=item.note_id,
                 card_ids=card_ids,
                 title=item.title,
+                title_spans=_highlight_spans(
+                    item.title,
+                    literal_terms=literal_terms,
+                    correction_terms=correction_terms,
+                    alias_terms=alias_terms,
+                ),
                 snippet=item.snippet,
                 spans=_highlight_spans(
                     item.snippet,
@@ -6919,7 +6930,16 @@ def _native_ui_response(
     parsed: Any | None = None,
     total_results: int | None = None,
 ) -> SearchResponse:
-    query_terms = set(tokenize(normalize_text(request.query)))
+    positive_terms = tuple(getattr(parsed, "positive_terms", ()))
+    query_terms = (
+        {
+            str(getattr(term, "normalized", "")).strip()
+            for term in positive_terms
+            if str(getattr(term, "normalized", "")).strip()
+        }
+        if parsed is not None
+        else set()
+    )
     results_list: list[SearchResult] = []
     for note in notes:
         card_ids = (
@@ -6929,14 +6949,23 @@ def _native_ui_response(
         )
         if card_ids_by_note is not None and not card_ids:
             continue
+        title, snippet = display_lines(
+            note.fields, query_terms, note_id=note.note_id
+        )
         results_list.append(
             SearchResult(
                 note_id=note.note_id,
                 card_ids=card_ids,
-                title=strip_html_and_cloze(note.title) or f"Note {note.note_id}",
-                snippet=_fallback_snippet(note),
+                title=title or f"Note {note.note_id}",
+                title_spans=_highlight_spans(
+                    title,
+                    literal_terms=query_terms,
+                    correction_terms=set(),
+                    alias_terms=set(),
+                ),
+                snippet=snippet,
                 spans=_highlight_spans(
-                    _fallback_snippet(note),
+                    snippet,
                     literal_terms=query_terms,
                     correction_terms=set(),
                     alias_terms=set(),
@@ -7076,8 +7105,7 @@ def _highlight_spans(
         for term in sorted(terms, key=lambda value: (-len(value), value)):
             if not term:
                 continue
-            for match in re.finditer(re.escape(term), text, flags=re.IGNORECASE):
-                start, end = match.span()
+            for start, end in normalized_spans(text, term):
                 if any(start < old_end and end > old_start for old_start, old_end in occupied):
                     continue
                 occupied.append((start, end))
@@ -7175,17 +7203,6 @@ def _semantic_documents_from_lexical_index(
     if cancel_check is not None:
         cancel_check()
     return output
-
-
-def _fallback_snippet(note: IndexedNote, limit: int = 360) -> str:
-    text = " ".join(
-        value
-        for value in (
-            strip_html_and_cloze(field) for field in note.fields.values()
-        )
-        if value
-    )
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def _canonical_query(query: str) -> str:

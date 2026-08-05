@@ -20,6 +20,11 @@
 
 ### Changed
 
+- Result rows are now compact and field-aware: one bold primary line from the
+  note's `Text`/`Front`/`Question` field, one short supporting excerpt from a
+  remaining field, and a quiet `Deck › Note Type` line. Raw hierarchical tags
+  no longer appear inline; they remain searchable and stay available in
+  tooltips, accessibility text, actions, and Related matching.
 - Related-card lookup uses a compact map derived from the existing local text
   index. It runs outside Anki's interface thread, never loads Semantic Search,
   and upgrades an existing index without changing its Semantic generation.

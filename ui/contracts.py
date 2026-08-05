@@ -280,6 +280,7 @@ class SearchResult:
     sibling_count: int = 0
     browser_query: Optional[str] = None
     score: Optional[float] = None
+    title_spans: tuple[HighlightSpan, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
