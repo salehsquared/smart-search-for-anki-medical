@@ -511,6 +511,46 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertFalse(dialog.grab().isNull())
         dialog.deleteLater()
 
+    def test_result_metadata_compacts_hierarchy_without_losing_full_values(self) -> None:
+        from ui.results import compact_deck_label, compact_note_type_label
+
+        self.assertEqual(
+            compact_deck_label("Medical School::AnKing Original::Pharmacology"),
+            "Pharmacology",
+        )
+        self.assertEqual(
+            compact_note_type_label("AnKingOverhaul (AnKing Step Deck / AnKingMed)"),
+            "AnKingOverhaul",
+        )
+        result = SearchResult(
+            note_id=45,
+            title="Bupropion inhibits norepinephrine reuptake",
+            deck="Medical School::AnKing Original::Pharmacology",
+            note_type="AnKingOverhaul (AnKing Step Deck / AnKingMed)",
+        )
+        dialog = SearchDialog()
+        dialog.show_response(
+            SearchResponse(
+                request_id=4,
+                query="bupropion",
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        index = dialog.results.results_model().index(0, 0)
+        tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
+        accessible = index.data(Qt.ItemDataRole.AccessibleTextRole)
+        self.assertIn("Deck: Medical School::AnKing Original::Pharmacology", tooltip)
+        self.assertIn(
+            "Note type: AnKingOverhaul (AnKing Step Deck / AnKingMed)",
+            tooltip,
+        )
+        self.assertIn(result.deck, accessible)
+        self.assertIn(result.note_type, accessible)
+        self.assertFalse(dialog.grab().isNull())
+        dialog.deleteLater()
+
     def test_live_state_refresh_rejects_stale_sibling_scope(self) -> None:
         dialog = SearchDialog()
         model = dialog.results.results_model()

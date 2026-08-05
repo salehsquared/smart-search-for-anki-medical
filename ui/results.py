@@ -145,6 +145,21 @@ def tag_summary(tags: Sequence[str], *, limit: int = 6) -> str:
     return "Tags: " + ", ".join(visible) + suffix
 
 
+def compact_deck_label(deck: str) -> str:
+    """Show the leaf of a hierarchical Anki deck in the result row."""
+
+    parts = tuple(part.strip() for part in str(deck).split("::") if part.strip())
+    return parts[-1] if parts else str(deck).strip()
+
+
+def compact_note_type_label(note_type: str) -> str:
+    """Drop a parenthetical qualifier from the visible note-type label."""
+
+    clean = str(note_type).strip()
+    concise, separator, _qualifier = clean.partition(" (")
+    return concise if separator and concise else clean
+
+
 class ResultsModel(QAbstractListModel):
     """List model over ``SearchResult`` dataclasses."""
 
@@ -446,6 +461,12 @@ class ResultsModel(QAbstractListModel):
             tags = tag_summary(result.tags)
             if tags:
                 details.append(tags)
+            compact_deck = compact_deck_label(result.deck)
+            if result.deck and compact_deck != result.deck:
+                details.append("Deck: " + result.deck)
+            compact_note_type = compact_note_type_label(result.note_type)
+            if result.note_type and compact_note_type != result.note_type:
+                details.append("Note type: " + result.note_type)
             return "\n".join(details) or None
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole):
             parts = [result.title, result.snippet, result.deck, result.note_type]
@@ -860,7 +881,14 @@ class ResultDelegate(QStyledItemDelegate):
         # Visible metadata stays quiet: deck and note type only. Raw
         # hierarchical tags remain on the result object for tooltips,
         # accessibility, actions, filtering, and Related matching.
-        meta_parts = [part for part in (result.deck, result.note_type) if part]
+        meta_parts = [
+            part
+            for part in (
+                compact_deck_label(result.deck),
+                compact_note_type_label(result.note_type),
+            )
+            if part
+        ]
         meta_font = QFont(option.font)
         meta_font.setPointSizeF(max(meta_font.pointSizeF() - 0.8, 8.0))
         meta_font.setBold(True)
