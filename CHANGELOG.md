@@ -4,6 +4,13 @@
 
 ### Added
 
+- **Find Related Cards** now finds notes that share the same complete UWorld or
+  AMBOSS source tag. It works from the highlighted result, checked results, or
+  the right-click menu; unions multi-note matches, excludes the source notes,
+  and explains the exact source tag behind every match.
+- Related results are a temporary, filter-independent view across all decks.
+  **Back to search** restores the original results, corrections, checks,
+  highlighted row, and scroll position locally without rerunning the query.
 - Successful card and note actions now expose a one-click **Undo** button in
   the result toolbar. The button is tied to the exact native Anki undo step and
   safely retires if another collection change happens first.
@@ -13,6 +20,9 @@
 
 ### Changed
 
+- Related-card lookup uses a compact map derived from the existing local text
+  index. It runs outside Anki's interface thread, never loads Semantic Search,
+  and upgrades an existing index without changing its Semantic generation.
 - Simple native filters now act only as final card-eligibility constraints in
   Smart and Semantic modes. Adding `deck:`, `tag:`, `is:`, or another simple
   filter no longer changes free-text scores, ordering, aliases, corrections,

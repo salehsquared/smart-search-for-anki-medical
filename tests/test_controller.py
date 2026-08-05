@@ -1047,6 +1047,305 @@ class ControllerTests(unittest.TestCase):
             [(2001, 4, True), (2002, 0, False)],
         )
 
+    def test_related_cards_use_external_lookup_then_live_state_hydration(
+        self,
+    ) -> None:
+        context = self.backend._context
+        assert context
+        source_tag = "#AK_Step2_v12::#UWorld::Step::19231"
+        context.index.rebuild(
+            (
+                models.IndexedNote(
+                    note_id=1001,
+                    fields={"Text": "Source question."},
+                    tags=(source_tag,),
+                    card_ids=(1101,),
+                    guid="related-source",
+                ),
+                models.IndexedNote(
+                    note_id=2001,
+                    fields={"Text": "Related explanation card."},
+                    tags=(source_tag.swapcase(),),
+                    # The live collection has gained another sibling since
+                    # this disposable text snapshot was written.
+                    card_ids=(2101,),
+                    guid="related-candidate",
+                ),
+                models.IndexedNote(
+                    note_id=3001,
+                    fields={"Text": "Different question."},
+                    tags=("#AK_Step2_v12::#UWorld::Step::99999",),
+                    card_ids=(3101,),
+                    guid="related-unrelated",
+                ),
+            )
+        )
+        context.note_count = 3
+        context.lexical_generation = context.index.generation
+        context.engine = controller.SearchEngine(context.index)
+        self.backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="3 notes indexed.",
+        )
+        self.backend.mw.col.cards_by_note[2001] = (2101, 2102)
+        self.backend.mw.col.cards[2101] = types.SimpleNamespace(
+            queue=-1,
+            user_flag=lambda: 3,
+        )
+        self.backend.mw.col.cards[2102] = types.SimpleNamespace(
+            queue=-2,
+            user_flag=lambda: 0,
+        )
+
+        operation_lanes = []
+        original_run_query_op = self.backend._run_query_op
+
+        def tracked_run_query_op(*, uses_collection, **kwargs):
+            operation_lanes.append(bool(uses_collection))
+            return original_run_query_op(
+                uses_collection=uses_collection,
+                **kwargs,
+            )
+
+        received = []
+        errors = []
+        with patch.object(
+            self.backend,
+            "_run_query_op",
+            side_effect=tracked_run_query_op,
+        ):
+            self.backend.submit_related_cards(
+                contracts.RelatedCardsRequest(
+                    request_id=81,
+                    note_ids=(1001,),
+                    tags=(source_tag,),
+                    limit=50,
+                ),
+                received.append,
+                errors.append,
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(operation_lanes, [False, True])
+        self.assertEqual(len(received), 1)
+        response = received[0]
+        self.assertEqual(response.request_id, 81)
+        self.assertEqual(response.source_note_ids, (1001,))
+        self.assertEqual(response.source_tags, (source_tag,))
+        self.assertEqual(response.total_results, 1)
+        self.assertFalse(response.truncated)
+        self.assertEqual([result.note_id for result in response.results], [2001])
+        result = response.results[0]
+        self.assertEqual(result.card_ids, (2101, 2102))
+        self.assertEqual(result.sibling_count, 2)
+        self.assertEqual(result.browser_query, "cid:2101,2102")
+        self.assertEqual(
+            result.match_reasons,
+            ("Related · UWorld · 19231",),
+        )
+        self.assertEqual(result.related_by_tags, (source_tag,))
+        self.assertEqual(
+            [
+                (state.card_id, state.flag, state.suspended, state.buried)
+                for state in result.card_states
+            ],
+            [(2101, 3, True, False), (2102, 0, False, True)],
+        )
+
+    def test_related_cards_without_specific_source_tags_skip_collection(
+        self,
+    ) -> None:
+        context = self.backend._context
+        assert context
+        context.index.rebuild(
+            (
+                models.IndexedNote(
+                    note_id=1001,
+                    fields={"Text": "Broad source tag only."},
+                    tags=("#AK_Step2_v12::#UWorld",),
+                    card_ids=(1101,),
+                    guid="related-broad-source",
+                ),
+            )
+        )
+        context.note_count = 1
+        context.lexical_generation = context.index.generation
+        context.engine = controller.SearchEngine(context.index)
+        self.backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="1 note indexed.",
+        )
+
+        operation_lanes = []
+        original_run_query_op = self.backend._run_query_op
+
+        def tracked_run_query_op(*, uses_collection, **kwargs):
+            operation_lanes.append(bool(uses_collection))
+            return original_run_query_op(
+                uses_collection=uses_collection,
+                **kwargs,
+            )
+
+        received = []
+        with patch.object(
+            self.backend,
+            "_run_query_op",
+            side_effect=tracked_run_query_op,
+        ):
+            self.backend.submit_related_cards(
+                contracts.RelatedCardsRequest(
+                    request_id=82,
+                    note_ids=(1001,),
+                    tags=("#AK_Step2_v12::#UWorld",),
+                    limit=50,
+                ),
+                received.append,
+                self.fail,
+            )
+
+        self.assertEqual(operation_lanes, [False])
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0].source_tags, ())
+        self.assertEqual(received[0].results, ())
+        self.assertEqual(received[0].total_results, 0)
+
+    def test_related_hydration_scheduling_failure_delivers_text_results(
+        self,
+    ) -> None:
+        context = self.backend._context
+        assert context
+        source_tag = "#AK_Step2_v12::#AMBOSS::AbCdEf"
+        context.index.rebuild(
+            (
+                models.IndexedNote(
+                    note_id=1001,
+                    fields={"Text": "Source."},
+                    tags=(source_tag,),
+                    card_ids=(1101,),
+                    guid="related-hydration-source",
+                ),
+                models.IndexedNote(
+                    note_id=2001,
+                    fields={"Text": "Candidate."},
+                    tags=(source_tag,),
+                    card_ids=(2101,),
+                    guid="related-hydration-candidate",
+                ),
+            )
+        )
+        context.note_count = 2
+        context.lexical_generation = context.index.generation
+        context.engine = controller.SearchEngine(context.index)
+        self.backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="2 notes indexed.",
+        )
+        original_run_query_op = self.backend._run_query_op
+
+        def reject_collection_lane(*, uses_collection, **kwargs):
+            if uses_collection:
+                raise RuntimeError("profile teardown rejected QueryOp")
+            return original_run_query_op(
+                uses_collection=uses_collection,
+                **kwargs,
+            )
+
+        received = []
+        errors = []
+        with patch.object(
+            self.backend,
+            "_run_query_op",
+            side_effect=reject_collection_lane,
+        ):
+            self.backend.submit_related_cards(
+                contracts.RelatedCardsRequest(
+                    request_id=83,
+                    note_ids=(1001,),
+                    tags=(source_tag,),
+                ),
+                received.append,
+                errors.append,
+            )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(received), 1)
+        self.assertEqual(
+            [result.note_id for result in received[0].results],
+            [2001],
+        )
+        self.assertEqual(received[0].results[0].card_states, ())
+        self.assertEqual(self.backend._active_cancellations, set())
+
+    def test_related_lookup_waits_for_the_rebuild_engine_lane(self) -> None:
+        self.backend.deactivate_profile()
+        backend = _ConcurrentExternalBackend(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        self.backend = backend
+        backend.activate_profile(auto_rebuild=False)
+        context = backend._context
+        assert context
+        source_tag = "#AK_Step2_v12::#UWorld::18462"
+        context.index.rebuild(
+            (
+                models.IndexedNote(
+                    note_id=1001,
+                    fields={"Text": "Source."},
+                    tags=(source_tag,),
+                    card_ids=(1101,),
+                    guid="related-lock-source",
+                ),
+                models.IndexedNote(
+                    note_id=2001,
+                    fields={"Text": "Candidate."},
+                    tags=(source_tag,),
+                    card_ids=(2101,),
+                    guid="related-lock-candidate",
+                ),
+            )
+        )
+        context.note_count = 2
+        context.lexical_generation = context.index.generation
+        context.engine = controller.SearchEngine(context.index)
+        backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="2 notes indexed.",
+        )
+        backend.mw.col.cards_by_note[2001] = (2101,)
+        backend.mw.col.cards[2101] = types.SimpleNamespace(
+            queue=2,
+            user_flag=lambda: 0,
+        )
+        received = []
+        errors = []
+
+        backend._engine_lock.acquire()
+        try:
+            backend.submit_related_cards(
+                contracts.RelatedCardsRequest(
+                    request_id=84,
+                    note_ids=(1001,),
+                    tags=(source_tag,),
+                ),
+                received.append,
+                errors.append,
+            )
+            self.assertTrue(backend.threads)
+            self.assertTrue(backend.threads[-1].is_alive())
+            self.assertEqual(received, [])
+        finally:
+            backend._engine_lock.release()
+
+        backend.threads[-1].join(timeout=2)
+        self.assertFalse(backend.threads[-1].is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            [result.note_id for result in received[0].results],
+            [2001],
+        )
+
     def test_combined_smart_filters_keep_only_matching_sibling(self) -> None:
         context = self.backend._context
         assert context

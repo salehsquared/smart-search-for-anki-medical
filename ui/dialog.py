@@ -6,6 +6,7 @@ signals. All backend communication lives in :mod:`ui.controller`.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from html import escape
 import json
 from pathlib import Path
@@ -21,6 +22,8 @@ from .contracts import (
     IndexState,
     IndexStatus,
     PreviewDefault,
+    RelatedCardsResponse,
+    ResultViewState,
     SearchMode,
     SearchResponse,
     SemanticRecovery,
@@ -110,7 +113,7 @@ Smart and Exact while Semantic is being prepared.</p>
 <li><b>Ctrl+Shift+P</b> — toggle the card preview pane</li>
 <li><b>Shift+Space</b> — check or uncheck the highlighted result for bulk actions</li>
 <li><b>Shift+click</b> — check a range of results</li>
-<li><b>Right-click</b> — create a copy, move, bury, flag, suspend, or tag results</li>
+<li><b>Right-click</b> — find related cards, create a copy, move, bury, flag, suspend, or tag results</li>
 <li><b>{_PRIMARY_KEY}+Return</b> — open checked results, or all shown if none are checked</li>
 <li><b>{_PRIMARY_KEY}+1 / 2 / 3</b> — Smart, Exact, Semantic mode</li>
 <li><b>{_PRIMARY_KEY}+L</b> — jump back to the search field</li>
@@ -479,6 +482,8 @@ class SearchDialog(QDialog):
     modeSelected = pyqtSignal(object)          # SearchMode
     openRequested = pyqtSignal(object)         # SearchResult
     openAllRequested = pyqtSignal(object)      # tuple[SearchResult, ...]
+    relatedRequested = pyqtSignal(object)      # tuple[SearchResult, ...]
+    relatedBackRequested = pyqtSignal()
     previewToggleRequested = pyqtSignal(object)  # SearchResult | None
     previewResultChanged = pyqtSignal(object)  # SearchResult | None
     previewSideRequested = pyqtSignal(object, str)  # result, "question" | "answer"
@@ -525,6 +530,8 @@ class SearchDialog(QDialog):
         self._debounce_ms = DEBOUNCE_MS
 
         self._last_response: Optional[SearchResponse] = None
+        self._last_corrections: tuple[Correction, ...] = ()
+        self._related_active = False
         self._last_status: Optional[IndexStatus] = None
         self._message_kind = ""
         self._result_limit = 50
@@ -598,6 +605,44 @@ class SearchDialog(QDialog):
         self.chip_bar.correctionDismissRequested.connect(self.correctionDismissRequested)
         self.chip_bar.correctionLiteralRequested.connect(self.correctionLiteralRequested)
         root.addWidget(self.chip_bar)
+
+        self.related_context_bar = QFrame(self)
+        self.related_context_bar.setObjectName("relatedContextBar")
+        related_layout = QHBoxLayout(self.related_context_bar)
+        related_layout.setContentsMargins(10, 6, 12, 6)
+        related_layout.setSpacing(10)
+
+        self.related_back_button = QToolButton(self.related_context_bar)
+        self.related_back_button.setObjectName("relatedBack")
+        self.related_back_button.setText("‹ Back to search")
+        self.related_back_button.setAccessibleName(
+            "Return to the original search results"
+        )
+        self.related_back_button.clicked.connect(
+            self.relatedBackRequested
+        )
+        related_layout.addWidget(self.related_back_button)
+
+        self.related_context_label = QLabel(
+            "Related cards",
+            self.related_context_bar,
+        )
+        self.related_context_label.setObjectName("relatedContextLabel")
+        self.related_context_label.setAccessibleName("Related-card context")
+        related_layout.addWidget(self.related_context_label)
+        related_layout.addStretch(1)
+
+        self.related_scope_label = QLabel(
+            "Across all decks",
+            self.related_context_bar,
+        )
+        self.related_scope_label.setObjectName("relatedScopeLabel")
+        self.related_scope_label.setToolTip(
+            "The original search filters do not restrict related cards."
+        )
+        related_layout.addWidget(self.related_scope_label)
+        self.related_context_bar.setVisible(False)
+        root.addWidget(self.related_context_bar)
 
         self.index_notice = QLabel(self)
         self.index_notice.setObjectName("indexNotice")
@@ -783,6 +828,19 @@ class SearchDialog(QDialog):
         self.preview_button.clicked.connect(self._toggle_preview)
         batch.addWidget(self.preview_button)
 
+        self.related_button = QToolButton(self.batch_bar)
+        self.related_button.setObjectName("batchRelated")
+        self.related_button.setText("Related")
+        related_help = (
+            "Find notes sharing an exact UWorld or AMBOSS source tag. "
+            "Uses checked notes, or the highlighted note when none are checked."
+        )
+        self.related_button.setToolTip(related_help)
+        self.related_button.setAccessibleName("Find related cards")
+        self.related_button.setAccessibleDescription(related_help)
+        self.related_button.clicked.connect(self._emit_related)
+        batch.addWidget(self.related_button)
+
         self.open_selected_button = QToolButton(self.batch_bar)
         self.open_selected_button.setObjectName("batchBrowser")
         self.open_selected_button.setText("Browser")
@@ -950,6 +1008,25 @@ class SearchDialog(QDialog):
             f" background: {c['accent_soft']}; color: {c['text']};"
             f" border: 1px solid {c['accent_mid']}; border-radius: 12px;"
             " padding: 12px 16px;"
+            "}"
+            "QFrame#relatedContextBar {"
+            f" background: {c['accent_soft']}; border: 1px solid {c['accent_mid']};"
+            " border-radius: 10px;"
+            "}"
+            "QFrame#relatedContextBar QLabel {"
+            " background: transparent; border: none;"
+            "}"
+            "QLabel#relatedContextLabel { font-weight: 700; }"
+            "QLabel#relatedScopeLabel {"
+            f" color: {c['muted']};"
+            "}"
+            "QToolButton#relatedBack {"
+            f" background: {c['surface_high']}; color: {c['text']};"
+            f" border: 1px solid {c['border']}; border-radius: 7px;"
+            " min-height: 30px; padding: 0 10px; font-weight: 700;"
+            "}"
+            "QToolButton#relatedBack:hover {"
+            f" border-color: {c['accent_mid']};"
             "}"
             "QFrame#messageCard {"
             f" background: {c['surface']}; border: 1px solid {c['border']};"
@@ -1251,6 +1328,10 @@ class SearchDialog(QDialog):
             and current_result is not None
             and bool(current_result.card_ids)
         )
+        self.related_button.setEnabled(
+            available
+            and bool(selected_results or current_result is not None)
+        )
         self.open_selected_button.setEnabled(has_selection and card_count > 0)
         self.flag_button.setEnabled(has_selection and card_count > 0)
         self.suspend_button.setEnabled(has_selection and card_count > 0)
@@ -1289,6 +1370,7 @@ class SearchDialog(QDialog):
             and bool(result.card_ids)
             and not self._batch_busy
         )
+        self._update_batch_bar()
         self.previewResultChanged.emit(result)
 
     def _on_result_browsed(self, result) -> None:
@@ -1310,6 +1392,18 @@ class SearchDialog(QDialog):
     def _toggle_preview_shortcut(self) -> None:
         if self.preview_button.isEnabled():
             self.preview_button.click()
+
+    def _related_targets(self):
+        checked = self._selected_results()
+        if checked:
+            return checked
+        current = self.results.current_result()
+        return (current,) if current is not None else ()
+
+    def _emit_related(self, _checked: bool = False, results=None) -> None:
+        targets = tuple(results) if results is not None else self._related_targets()
+        if targets and not self._batch_busy:
+            self.relatedRequested.emit(targets)
 
     def _prepare_result_context_selection(self, row: int):
         """Resolve the stable bulk-action target for a right-clicked row.
@@ -1410,6 +1504,17 @@ class SearchDialog(QDialog):
         open_action.setEnabled(bool(card_ids))
         open_action.triggered.connect(
             lambda _checked=False: self._open_selected_results()
+        )
+
+        related_action = menu.addAction("Find Related Cards")
+        related_action.setEnabled(bool(note_ids))
+        related_action.setToolTip(
+            "Find notes sharing an exact UWorld or AMBOSS source tag"
+        )
+        related_action.triggered.connect(
+            lambda _checked=False, targets=frozen_results: (
+                self._emit_related(results=targets)
+            )
         )
         menu.addSeparator()
 
@@ -1567,6 +1672,7 @@ class SearchDialog(QDialog):
                 self.deck_scope,
                 self.segmented,
                 self.results,
+                self.related_back_button,
                 self.settings_button,
                 self.rebuild_button,
                 self.semantic_action,
@@ -1586,6 +1692,9 @@ class SearchDialog(QDialog):
         if message:
             self.set_summary(message)
         self._update_batch_bar()
+
+    def batch_action_busy(self) -> bool:
+        return self._batch_busy
 
     def set_undo_available(self, available: bool, label: str = "") -> None:
         self._undo_available = bool(available)
@@ -1617,7 +1726,27 @@ class SearchDialog(QDialog):
     def refresh_card_states(self, results: Sequence) -> bool:
         """Apply a live metadata refresh while preserving checked rows."""
 
-        return self.results.results_model().refresh_results(results)
+        model = self.results.results_model()
+        refreshed = model.refresh_results(results)
+        if (
+            refreshed
+            and not self._related_active
+            and self._last_response is not None
+        ):
+            current = model.results()
+            current_identity = tuple(
+                (result.note_id, tuple(result.card_ids)) for result in current
+            )
+            response_identity = tuple(
+                (result.note_id, tuple(result.card_ids))
+                for result in self._last_response.results
+            )
+            if current_identity == response_identity:
+                self._last_response = replace(
+                    self._last_response,
+                    results=current,
+                )
+        return refreshed
 
     def finish_batch_action(self, success: bool, message: str) -> None:
         self.set_batch_action_busy(False)
@@ -1712,6 +1841,7 @@ class SearchDialog(QDialog):
         corrections: Sequence[Correction],
     ) -> None:
         self._last_response = response
+        self._last_corrections = tuple(corrections)
         self._message_kind = ""
         self._hide_stale_semantic_notice()
         self._set_message_presentation(semantic=False)
@@ -1756,6 +1886,167 @@ class SearchDialog(QDialog):
             self.summary.setToolTip("")
         self.summary.setText(text)
         self.summary.setAccessibleDescription(text)
+        self._update_batch_bar()
+
+    def capture_result_view_state(self) -> ResultViewState:
+        current = self.results.current_result()
+        return ResultViewState(
+            current_note_id=(current.note_id if current is not None else None),
+            checked_note_ids=(
+                self.results.results_model().checked_note_ids()
+            ),
+            vertical_scroll=int(self.results.verticalScrollBar().value()),
+        )
+
+    def last_corrections(self) -> tuple[Correction, ...]:
+        return self._last_corrections
+
+    def related_active(self) -> bool:
+        return self._related_active
+
+    def show_related_searching(self, source_count: int) -> None:
+        """Keep the original rows visible but inert while lookup runs."""
+
+        count = max(1, int(source_count))
+        self._related_active = True
+        self.chip_bar.setVisible(False)
+        self.related_context_bar.setVisible(True)
+        self.related_context_label.setText(
+            f"Finding related cards from {count} selected "
+            f"note{'s' if count != 1 else ''}…"
+        )
+        self.related_back_button.setEnabled(True)
+        self.results.setEnabled(False)
+        self._batch_results_available = False
+        self.summary.setText("Finding related cards…")
+        self.summary.setAccessibleDescription("Related-card lookup in progress")
+        self._update_batch_bar()
+
+    def show_related_response(self, response: RelatedCardsResponse) -> None:
+        """Display a temporary related-card result set without changing query."""
+
+        self._related_active = True
+        self._message_kind = ""
+        self._hide_stale_semantic_notice()
+        self._set_message_presentation(semantic=False)
+        self.chip_bar.setVisible(False)
+        self.related_context_bar.setVisible(True)
+        source_count = len(response.source_note_ids)
+        provider_labels = tuple(
+            "UWorld" if provider.casefold() == "uworld" else "AMBOSS"
+            for provider in response.providers
+        )
+        provider_text = " / ".join(dict.fromkeys(provider_labels))
+        context = (
+            f"Related cards from {source_count} selected "
+            f"note{'s' if source_count != 1 else ''}"
+        )
+        if provider_text:
+            context += f" · {provider_text}"
+        self.related_context_label.setText(context)
+        self.related_context_label.setAccessibleDescription(context)
+        self.related_back_button.setEnabled(True)
+        self.results.setEnabled(True)
+        self.message_action.setVisible(False)
+        self.retry_button.setVisible(False)
+
+        model = self.results.results_model()
+        model.set_results(response.results)
+        self._batch_results_available = bool(response.results)
+        if response.results:
+            self.stack.setCurrentIndex(_PAGE_RESULTS)
+            self.results.select_row(0)
+        else:
+            self._message_kind = "no_related_results"
+            self.message_label.setTextFormat(Qt.TextFormat.PlainText)
+            self.message_label.setText(
+                "No other cards share the selected UWorld or AMBOSS "
+                "source tag."
+            )
+            self.stack.setCurrentIndex(_PAGE_MESSAGE)
+
+        if response.truncated:
+            shown = len(response.results)
+            text = f"Showing {shown} of {response.total_results} related results"
+        else:
+            text = (
+                f"{response.total_results} related "
+                f"result{'s' if response.total_results != 1 else ''}"
+            )
+        if response.elapsed_ms > 0:
+            text += f" · {response.elapsed_ms:.0f} ms"
+        self.summary.setToolTip("\n".join(response.warnings))
+        self.summary.setText(text)
+        self.summary.setAccessibleDescription(text)
+        self._update_batch_bar()
+
+    def leave_related_view(self) -> None:
+        self._related_active = False
+        self.related_context_bar.setVisible(False)
+        self.chip_bar.setVisible(True)
+
+    def restore_search_view(
+        self,
+        response: SearchResponse,
+        corrections: Sequence[Correction],
+        state: ResultViewState,
+    ) -> None:
+        """Restore the frozen root search locally, without another query."""
+
+        self.leave_related_view()
+        self.show_response(response, corrections)
+        model = self.results.results_model()
+        model.set_checked_note_ids(state.checked_note_ids)
+        if state.current_note_id is not None:
+            row = self.results.row_for_note(state.current_note_id)
+            if row >= 0:
+                self.results.select_row(row)
+        expected_note_ids = tuple(
+            result.note_id for result in response.results
+        )
+        QTimer.singleShot(
+            0,
+            lambda: self._restore_scroll_after_layout(
+                response.request_id,
+                expected_note_ids,
+                state.vertical_scroll,
+            ),
+        )
+        self._update_batch_bar()
+
+    def _restore_scroll_after_layout(
+        self,
+        request_id: int,
+        expected_note_ids: Sequence[int],
+        value: int,
+    ) -> None:
+        """Restore scroll after QListView has recalculated its new range."""
+
+        try:
+            response = self._last_response
+            if (
+                self._related_active
+                or response is None
+                or int(response.request_id) != int(request_id)
+                or tuple(result.note_id for result in response.results)
+                != tuple(int(note_id) for note_id in expected_note_ids)
+            ):
+                return
+            self.results.verticalScrollBar().setValue(max(0, int(value)))
+        except RuntimeError:
+            # The single-shot can outlive a window closed in the same event
+            # turn; a deleted native view needs no restoration.
+            return
+
+    def show_related_unavailable(self, message: str) -> None:
+        """Leave the current search intact when its notes lack source tags."""
+
+        self.leave_related_view()
+        self.results.setEnabled(True)
+        self._batch_results_available = bool(
+            self.results.results_model().count()
+        )
+        self.set_summary(str(message))
         self._update_batch_bar()
 
     def show_error(self, message: str) -> None:
@@ -2368,6 +2659,11 @@ class SearchDialog(QDialog):
     def keyPressEvent(self, event) -> None:
         """Keep the two-step Escape behavior without hijacking window close."""
 
+        if event.key() == Qt.Key.Key_Escape and self._related_active:
+            if not self._batch_busy:
+                self.relatedBackRequested.emit()
+            event.accept()
+            return
         if event.key() == Qt.Key.Key_Escape and self.query():
             self.search.clear()
             self._emit_search()

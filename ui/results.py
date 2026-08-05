@@ -226,6 +226,36 @@ class ResultsModel(QAbstractListModel):
             if result.note_id in self._checked_note_ids
         )
 
+    def checked_note_ids(self) -> tuple[int, ...]:
+        return tuple(
+            result.note_id
+            for result in self._results
+            if result.note_id in self._checked_note_ids
+        )
+
+    def set_checked_note_ids(self, note_ids: Sequence[int]) -> None:
+        """Atomically restore checks that still exist in this result set."""
+
+        available = {result.note_id for result in self._results}
+        desired = {
+            int(note_id)
+            for note_id in note_ids
+            if int(note_id) in available
+        }
+        if desired == self._checked_note_ids:
+            return
+        self._checked_note_ids = desired
+        if self._results:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._results) - 1, 0),
+                [
+                    Qt.ItemDataRole.CheckStateRole,
+                    Qt.ItemDataRole.AccessibleTextRole,
+                ],
+            )
+        self.checkedChanged.emit()
+
     def checked_counts(self) -> tuple[int, int]:
         """Return unique selected note/card counts in display order."""
 
@@ -391,11 +421,27 @@ class ResultsModel(QAbstractListModel):
                 else Qt.CheckState.Unchecked
             )
         if role == Qt.ItemDataRole.ToolTipRole:
-            return card_state_summary(result) or None
+            details: list[str] = []
+            state_summary = card_state_summary(result)
+            if state_summary:
+                details.append(state_summary)
+            if result.related_by_tags:
+                label = (
+                    "Exact related tag"
+                    if len(result.related_by_tags) == 1
+                    else "Exact related tags"
+                )
+                details.append(label + ": " + ", ".join(result.related_by_tags))
+            return "\n".join(details) or None
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole):
             parts = [result.title, result.deck, result.note_type]
             if result.match_reasons:
                 parts.append("matched by " + ", ".join(result.match_reasons))
+            if result.related_by_tags:
+                parts.append(
+                    "related through exact tag "
+                    + ", ".join(result.related_by_tags)
+                )
             if result.sibling_count > 1:
                 parts.append(f"{result.sibling_count} cards")
             if role == Qt.ItemDataRole.AccessibleTextRole:
@@ -913,6 +959,13 @@ class ResultsView(QListView):
                 self.currentIndex(),
                 QListView.ScrollHint.EnsureVisible,
             )
+
+    def row_for_note(self, note_id: int) -> int:
+        target = int(note_id)
+        for row, result in enumerate(self._model.results()):
+            if result.note_id == target:
+                return row
+        return -1
 
     def move_current_row(self, offset: int) -> bool:
         """Move the highlight without changing independent bulk checkboxes."""

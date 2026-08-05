@@ -20,6 +20,9 @@ from .contracts import (
     Correction,
     IndexState,
     PreviewDefault,
+    RelatedCardsRequest,
+    RelatedCardsResponse,
+    ResultViewState,
     SearchBackend,
     SearchRequest,
     SearchResponse,
@@ -58,6 +61,9 @@ class SearchController(QObject):
     # Internal marshalling signals (emitted from arbitrary threads).
     _sig_search_success = pyqtSignal(int, object)
     _sig_search_error = pyqtSignal(int, str)
+    _sig_related_success = pyqtSignal(int, object)
+    _sig_related_error = pyqtSignal(int, str)
+    _sig_restored_states = pyqtSignal(int, object)
     _sig_rebuild_progress = pyqtSignal(float, str)
     _sig_rebuild_success = pyqtSignal(object)
     _sig_rebuild_error = pyqtSignal(str)
@@ -86,6 +92,10 @@ class SearchController(QObject):
         self._dismissed: set[Correction] = set()
         self._force_literal = False
         self._last_query = ""
+        self._related_origin: (
+            tuple[SearchResponse, tuple[Correction, ...], ResultViewState]
+            | None
+        ) = None
         self._active = False
         self._disposed = False
 
@@ -94,6 +104,9 @@ class SearchController(QObject):
         # Marshalled backend callbacks.
         self._sig_search_success.connect(self._on_search_success)
         self._sig_search_error.connect(self._on_search_error)
+        self._sig_related_success.connect(self._on_related_success)
+        self._sig_related_error.connect(self._on_related_error)
+        self._sig_restored_states.connect(self._on_restored_states)
         self._sig_rebuild_progress.connect(self._on_rebuild_progress)
         self._sig_rebuild_success.connect(self._on_rebuild_success)
         self._sig_rebuild_error.connect(self._on_rebuild_error)
@@ -106,6 +119,8 @@ class SearchController(QObject):
         dialog.modeSelected.connect(self._on_mode_selected)
         dialog.openRequested.connect(self.open_result)
         dialog.openAllRequested.connect(self.open_all_results)
+        dialog.relatedRequested.connect(self.find_related_cards)
+        dialog.relatedBackRequested.connect(self.restore_original_search)
         dialog.filterRemoveRequested.connect(self._on_filter_removed)
         dialog.correctionDismissRequested.connect(self._on_correction_dismissed)
         dialog.correctionLiteralRequested.connect(self._on_correction_literal)
@@ -166,6 +181,10 @@ class SearchController(QObject):
 
         if self._disposed:
             return
+        if self._related_origin is not None:
+            self._restore_related_origin()
+        else:
+            self._dialog.leave_related_view()
         self._active = False
         self._status_timer.stop()
         self._invalidate_pending_search()
@@ -184,6 +203,11 @@ class SearchController(QObject):
             return
         self._active = False
         self._disposed = True
+        self._related_origin = None
+        try:
+            self._dialog.leave_related_view()
+        except RuntimeError:
+            pass
         self._status_timer.stop()
         self._invalidate_pending_search()
         if self._cancel_rebuild is not None:
@@ -286,6 +310,7 @@ class SearchController(QObject):
     def submit_search(self, query: str) -> None:
         if self._disposed or not self._active:
             return
+        self._abandon_related_view()
         query = query.strip()
         if query != self._last_query:
             self._dismissed.clear()
@@ -350,6 +375,7 @@ class SearchController(QObject):
     def _on_query_edited(self, _query: str) -> None:
         """Cancel old work immediately; the debounce may dispatch later."""
 
+        self._abandon_related_view()
         self._invalidate_pending_search()
 
     def _invalidate_pending_search(self) -> None:
@@ -389,6 +415,173 @@ class SearchController(QObject):
         self._active_request_id = None
         self._cancel_search = None
         self._dialog.show_error(message)
+
+    # ---------------------------------------------------------- related cards
+
+    def find_related_cards(self, results) -> None:
+        if self._disposed or not self._active:
+            return
+        targets = tuple(results or ())
+        note_ids = tuple(
+            dict.fromkeys(
+                int(result.note_id)
+                for result in targets
+                if int(result.note_id) > 0
+            )
+        )
+        if not note_ids:
+            return
+        tags = tuple(
+            dict.fromkeys(
+                str(tag)
+                for result in targets
+                for tag in result.tags
+                if str(tag).strip()
+            )
+        )
+        if self._related_origin is None:
+            response = self._dialog.last_response()
+            if response is None:
+                return
+            self._related_origin = (
+                response,
+                self._dialog.last_corrections(),
+                self._dialog.capture_result_view_state(),
+            )
+
+        self._invalidate_pending_search()
+        request_id = self._request_counter
+        request = RelatedCardsRequest(
+            request_id=request_id,
+            note_ids=note_ids,
+            tags=tags,
+            limit=self._settings.result_limit,
+        )
+        self._active_request_id = request_id
+        submit = getattr(self._backend, "submit_related_cards", None)
+        if not callable(submit):
+            self._active_request_id = None
+            self._restore_related_origin(
+                "Related-card search is unavailable in this Anki version."
+            )
+            return
+        try:
+            cancel = submit(
+                request,
+                on_success=lambda response: self._sig_related_success.emit(
+                    request_id, response
+                ),
+                on_error=lambda message: self._sig_related_error.emit(
+                    request_id, str(message)
+                ),
+            )
+        except Exception as error:  # noqa: BLE001
+            if self._active_request_id == request_id:
+                self._active_request_id = None
+                self._cancel_search = None
+                self._restore_related_origin(
+                    f"Could not find related cards: {error}"
+                )
+            return
+        if self._active_request_id == request_id:
+            self._cancel_search = cancel
+            self._dialog.show_related_searching(len(note_ids))
+
+    def _on_related_success(
+        self,
+        request_id: int,
+        response: RelatedCardsResponse,
+    ) -> None:
+        if self._disposed or not self._active:
+            return
+        if (
+            request_id != self._request_counter
+            or request_id != self._active_request_id
+        ):
+            return
+        self._active_request_id = None
+        self._cancel_search = None
+        if not response.source_tags:
+            self._restore_related_origin(
+                "No specific UWorld or AMBOSS source tags were found on the "
+                "selected notes."
+            )
+            return
+        self._dialog.show_related_response(response)
+
+    def _on_related_error(self, request_id: int, message: str) -> None:
+        if self._disposed or not self._active:
+            return
+        if (
+            request_id != self._request_counter
+            or request_id != self._active_request_id
+        ):
+            return
+        self._active_request_id = None
+        self._cancel_search = None
+        self._restore_related_origin(
+            f"Could not find related cards: {message}"
+        )
+
+    def restore_original_search(self) -> None:
+        if self._disposed or not self._active:
+            return
+        if self._dialog.batch_action_busy():
+            return
+        self._invalidate_pending_search()
+        self._restore_related_origin()
+
+    def _restore_related_origin(self, notice: str = "") -> None:
+        origin = self._related_origin
+        self._related_origin = None
+        if origin is None:
+            self._dialog.leave_related_view()
+            if notice:
+                self._dialog.set_summary(notice)
+            return
+        response, corrections, state = origin
+        self._dialog.restore_search_view(response, corrections, state)
+        self._refresh_restored_card_states(response)
+        if notice:
+            self._dialog.set_summary(notice)
+
+    def _refresh_restored_card_states(self, response: SearchResponse) -> None:
+        """Refresh mutable indicators after Back without rerunning search."""
+
+        refresher = getattr(self._backend, "refresh_card_states", None)
+        if not callable(refresher) or not response.results:
+            return
+        generation = self._request_counter
+        try:
+            refresher(
+                response.results,
+                on_success=lambda results: self._sig_restored_states.emit(
+                    generation,
+                    tuple(results),
+                ),
+                on_error=lambda _message: None,
+            )
+        except Exception:
+            # Search restoration itself is already complete; live indicator
+            # decoration is best-effort during profile teardown.
+            return
+
+    def _on_restored_states(self, generation: int, results) -> None:
+        if (
+            self._disposed
+            or not self._active
+            or int(generation) != self._request_counter
+            or self._dialog.related_active()
+            or self._dialog.batch_action_busy()
+        ):
+            return
+        self._dialog.refresh_card_states(tuple(results))
+
+    def _abandon_related_view(self) -> None:
+        if self._related_origin is None and not self._dialog.related_active():
+            return
+        self._related_origin = None
+        self._dialog.leave_related_view()
 
     # ------------------------------------------------------------- opening
 
@@ -473,6 +666,7 @@ class SearchController(QObject):
 
     def _on_mode_selected(self, mode) -> None:
         self._settings.mode = mode
+        self._abandon_related_view()
         if self._dialog.query().strip():
             self.submit_search(self._dialog.query())
 

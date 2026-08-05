@@ -78,6 +78,7 @@ from .backend.query import (
     QueryParser,
     strip_incomplete_filter_tokens,
 )
+from .backend.related import related_reason
 from .backend.search import SearchEngine
 from .backend.text import normalize_text, strip_html_and_cloze, tokenize
 from .semantic.service import SemanticDocument, SemanticService
@@ -93,6 +94,8 @@ from .ui.contracts import (
     IndexStatus,
     MatchKind,
     PreviewDefault,
+    RelatedCardsRequest,
+    RelatedCardsResponse,
     SearchMode,
     SearchRequest,
     SearchResponse,
@@ -1343,6 +1346,151 @@ class AnkiSearchBackend:
             success=success,
             failure=lambda error: on_error(str(error)),
         )
+
+    def submit_related_cards(
+        self,
+        request: RelatedCardsRequest,
+        on_success: Callable[[RelatedCardsResponse], None],
+        on_error: ErrorCallback,
+    ) -> Callable[[], None]:
+        """Find exact source-tag relations without touching Semantic or Anki.
+
+        Only the final live card-state decoration uses Anki's serialized
+        collection worker. The relationship lookup itself runs against the
+        add-on-local reverse tag map on the ordinary external worker lane.
+        """
+
+        event = self._new_cancellation(kind="interactive")
+        context = self._context
+        if context is None or self.get_status().state is not IndexState.READY:
+            self._forget_cancellation(event)
+            on_error("Smart Search data is not ready yet.")
+            return event.set
+        token = context.token
+
+        def lookup(_collection: Any) -> RelatedCardsResponse:
+            started = time.perf_counter()
+            # A full rebuild atomically closes, replaces, and reconnects this
+            # derived database under the engine lock.  Join that lane so a
+            # queued Related request cannot observe the brief closed handle.
+            with self._engine_lock:
+                _raise_if_cancelled(event)
+                related = context.index.related_documents(
+                    request.tags,
+                    exclude_note_ids=request.note_ids,
+                    limit=request.limit,
+                    cancel_check=lambda: _raise_if_cancelled(event),
+                )
+            _raise_if_cancelled(event)
+            results = tuple(
+                _related_ui_result(hit)
+                for hit in related.hits
+            )
+            providers = tuple(
+                dict.fromkeys(source.provider for source in related.source_tags)
+            )
+            return RelatedCardsResponse(
+                request_id=request.request_id,
+                source_note_ids=request.note_ids,
+                source_tags=tuple(
+                    source.display for source in related.source_tags
+                ),
+                providers=providers,
+                results=results,
+                elapsed_ms=(time.perf_counter() - started) * 1000.0,
+                total_results=related.total_candidates,
+                truncated=related.total_candidates > len(results),
+            )
+
+        def success(response: RelatedCardsResponse) -> None:
+            if self._cancelled(event, token):
+                self._forget_cancellation(event)
+                return
+            self._hydrate_related_response(
+                response,
+                event=event,
+                token=token,
+                on_success=on_success,
+            )
+
+        def failure(error: Exception) -> None:
+            if isinstance(error, _CancelledOperation) or self._cancelled(
+                event, token
+            ):
+                self._forget_cancellation(event)
+                return
+            self._forget_cancellation(event)
+            on_error(str(error))
+
+        try:
+            self._run_query_op(
+                uses_collection=False,
+                op=lookup,
+                success=success,
+                failure=failure,
+            )
+        except Exception:
+            self._forget_cancellation(event)
+            raise
+        return event.set
+
+    def _hydrate_related_response(
+        self,
+        response: RelatedCardsResponse,
+        *,
+        event: threading.Event,
+        token: int,
+        on_success: Callable[[RelatedCardsResponse], None],
+    ) -> None:
+        note_ids = tuple(result.note_id for result in response.results)
+        if not note_ids:
+            self._forget_cancellation(event)
+            on_success(response)
+            return
+
+        def deliver(
+            states_by_note: dict[int, tuple[tuple[int, int, bool, bool], ...]],
+        ) -> None:
+            if self._cancelled(event, token):
+                self._forget_cancellation(event)
+                return
+            self._forget_cancellation(event)
+            on_success(
+                replace(
+                    response,
+                    results=_results_with_live_card_states(
+                        response.results,
+                        states_by_note,
+                    ),
+                )
+            )
+
+        def unavailable(_error: Exception) -> None:
+            if self._cancelled(event, token):
+                self._forget_cancellation(event)
+                return
+            self._forget_cancellation(event)
+            on_success(response)
+
+        try:
+            self._run_query_op(
+                uses_collection=True,
+                # Related has no card-level filter. Ask Anki for every live
+                # sibling instead of restricting hydration to potentially
+                # stale IDs from the disposable text index.
+                op=lambda collection: self.reader.card_states_for_notes(
+                    collection,
+                    note_ids,
+                ),
+                success=deliver,
+                failure=unavailable,
+            )
+        except Exception as error:
+            # Teardown can reject a second QueryOp after the external lookup
+            # already completed. Deliver the useful text results without live
+            # decorations rather than leaking the cancellation or stranding
+            # the UI in its running state.
+            unavailable(error)
 
     def _start_external_search(
         self,
@@ -6613,6 +6761,39 @@ def _open_results_in_browser(results: Sequence[object]) -> None:
 # Pure conversion helpers
 
 
+def _related_ui_result(hit: Any) -> SearchResult:
+    """Convert one deterministic external-index relation into a UI row."""
+
+    document = hit.document
+    snippet = str(document.plain_text or document.title or "").strip()
+    if len(snippet) > 360:
+        snippet = snippet[:359].rstrip() + "…"
+    shared = tuple(hit.shared_tags)
+    frequencies = tuple(max(1, int(value)) for value in hit.tag_frequencies)
+    specificity = sum(1.0 / value for value in frequencies)
+    card_ids = tuple(
+        dict.fromkeys(
+            int(card_id)
+            for card_id in document.card_ids
+            if int(card_id) > 0
+        )
+    )
+    return SearchResult(
+        note_id=int(document.note_id),
+        card_ids=card_ids,
+        title=str(document.title or "").strip() or f"Note {document.note_id}",
+        snippet=snippet,
+        deck=document.decks[0] if document.decks else "",
+        note_type=document.note_type,
+        tags=document.tags,
+        match_reasons=tuple(related_reason(source) for source in shared),
+        related_by_tags=tuple(source.display for source in shared),
+        sibling_count=len(card_ids),
+        browser_query=_browser_query(document.note_id, card_ids),
+        score=float(len(shared)) + specificity,
+    )
+
+
 def _with_live_card_states(
     response: SearchResponse,
     states_by_note: dict[int, tuple[tuple[int, int, bool, bool], ...]],
@@ -6651,6 +6832,7 @@ def _results_with_live_card_states(
                 card_ids=card_ids,
                 card_states=card_states,
                 sibling_count=len(card_ids),
+                browser_query=_browser_query(result.note_id, card_ids),
             )
         )
     return tuple(results)

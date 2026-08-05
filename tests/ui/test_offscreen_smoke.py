@@ -16,11 +16,13 @@ try:
         Correction,
         DeckCatalog,
         DeckEntry,
+        FilterChip,
         HighlightSpan,
         IndexState,
         IndexStatus,
         MatchKind,
         PreviewDefault,
+        RelatedCardsResponse,
         SearchMode,
         SearchResponse,
         SearchResult,
@@ -62,8 +64,13 @@ class _HeldSearchBackend:
         self.submit_error = submit_error
         self.requests = []
         self.callbacks = []
+        self.related_requests = []
+        self.related_callbacks = []
+        self.state_refresh_requests = []
+        self.state_refresh_callbacks = []
         self.deck_callbacks = []
         self.cancel_count = 0
+        self.related_cancel_count = 0
         self.deck_cancel_count = 0
         self.status_reads = 0
         self.saved_settings = []
@@ -88,6 +95,19 @@ class _HeldSearchBackend:
             self.cancel_count += 1
 
         return cancel
+
+    def submit_related_cards(self, request, on_success, on_error):
+        self.related_requests.append(request)
+        self.related_callbacks.append((on_success, on_error))
+
+        def cancel() -> None:
+            self.related_cancel_count += 1
+
+        return cancel
+
+    def refresh_card_states(self, results, on_success, on_error) -> None:
+        self.state_refresh_requests.append(tuple(results))
+        self.state_refresh_callbacks.append((on_success, on_error))
 
     def rebuild_index(self, on_progress, on_success, on_error):
         del on_progress, on_success, on_error
@@ -2267,6 +2287,450 @@ class OffscreenSmokeTests(unittest.TestCase):
             dialog.summary.text(),
             "Suspended 3 cards from 2 notes — Undo available",
         )
+        dialog.deleteLater()
+
+    def test_related_button_uses_checked_results_or_current_result(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        results = (
+            SearchResult(
+                note_id=1,
+                card_ids=(11,),
+                tags=("#AK_Step2::#UWorld::medicine::18462",),
+                title="One",
+            ),
+            SearchResult(
+                note_id=2,
+                card_ids=(21,),
+                tags=("#AK_Step2::#AMBOSS::AbCdEf",),
+                title="Two",
+            ),
+            SearchResult(note_id=3, card_ids=(31,), title="Three"),
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=30,
+                query="sources",
+                results=results,
+                total_results=3,
+            ),
+            (),
+        )
+        requested: list[tuple[SearchResult, ...]] = []
+        dialog.relatedRequested.connect(requested.append)
+
+        # With no bulk checks, the highlighted result is the source.
+        dialog.results.select_row(1)
+        dialog.related_button.click()
+        self.assertEqual(
+            [[result.note_id for result in group] for group in requested],
+            [[2]],
+        )
+
+        # Checked rows take precedence over an unrelated highlighted row and
+        # the read-only Related action does not mutate those checks.
+        model = dialog.results.results_model()
+        model.set_checked(0, True)
+        model.set_checked(1, True)
+        dialog.results.select_row(2)
+        dialog.related_button.click()
+        self.assertEqual(
+            [[result.note_id for result in group] for group in requested],
+            [[2], [1, 2]],
+        )
+        self.assertEqual(model.checked_note_ids(), (1, 2))
+        dialog.deleteLater()
+
+    def test_related_context_menu_keeps_frozen_multi_selection(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_status(IndexStatus(IndexState.READY))
+        results = tuple(
+            SearchResult(
+                note_id=note_id,
+                card_ids=(note_id * 10 + 1,),
+                tags=(f"#UWorld::Step2::{18000 + note_id}",),
+                title=f"Note {note_id}",
+            )
+            for note_id in (1, 2, 3)
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=31,
+                query="context related",
+                results=results,
+                total_results=3,
+            ),
+            (),
+        )
+        model = dialog.results.results_model()
+        model.set_checked(0, True)
+        model.set_checked(1, True)
+        frozen = model.checked_results()
+        menu = dialog._build_result_context_menu(frozen)
+        related_action = next(
+            action
+            for action in menu.actions()
+            if action.text() == "Find Related Cards"
+        )
+        self.assertTrue(related_action.isEnabled())
+
+        requested: list[tuple[SearchResult, ...]] = []
+        dialog.relatedRequested.connect(requested.append)
+        model.set_all_checked(False)
+        model.set_checked(2, True)
+        related_action.trigger()
+
+        self.assertEqual(
+            [[result.note_id for result in group] for group in requested],
+            [[1, 2]],
+        )
+        self.assertEqual(model.checked_note_ids(), (3,))
+        menu.deleteLater()
+        dialog.deleteLater()
+
+    def test_related_success_and_back_restore_search_without_resubmitting(
+        self,
+    ) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        dialog.show()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("heart failure tag:cardio")
+        roots = (
+            SearchResult(
+                note_id=1,
+                card_ids=(11,),
+                tags=("#AK_Step2::#UWorld::medicine::18462",),
+                title="Original one",
+            ),
+            SearchResult(
+                note_id=2,
+                card_ids=(21,),
+                tags=("cardio",),
+                title="Original two",
+            ),
+        )
+        correction = Correction("haert", "heart")
+        response = SearchResponse(
+            request_id=32,
+            query=dialog.query(),
+            results=roots,
+            corrections=(correction,),
+            active_filters=(FilterChip("tag", "cardio"),),
+            total_results=2,
+        )
+        dialog.show_response(response, (correction,))
+        model = dialog.results.results_model()
+        model.set_all_checked(True)
+        dialog.results.select_row(1)
+
+        controller.find_related_cards((roots[0],))
+        self.assertEqual(len(backend.related_requests), 1)
+        self.assertEqual(backend.requests, [])
+        request = backend.related_requests[-1]
+        related = SearchResult(
+            note_id=9,
+            card_ids=(91,),
+            tags=("#AK_Step2::#UWorld::medicine::18462",),
+            match_reasons=("Related · UWorld · 18462",),
+            related_by_tags=("#AK_Step2::#UWorld::medicine::18462",),
+            title="Related result",
+        )
+        backend.related_callbacks[-1][0](
+            RelatedCardsResponse(
+                request_id=request.request_id,
+                source_note_ids=(1,),
+                source_tags=("UWorld · 18462",),
+                providers=("uworld",),
+                results=(related,),
+                total_results=1,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertTrue(dialog.related_active())
+        self.assertEqual(dialog.query(), "heart failure tag:cardio")
+        self.assertEqual(model.results(), (related,))
+        self.assertFalse(dialog.chip_bar.isVisibleTo(dialog))
+        self.assertTrue(dialog.related_context_bar.isVisibleTo(dialog))
+
+        dialog.relatedBackRequested.emit()
+        self.app.processEvents()
+
+        self.assertFalse(dialog.related_active())
+        self.assertEqual(model.results(), roots)
+        self.assertEqual(model.checked_note_ids(), (1, 2))
+        self.assertEqual(dialog.results.current_result().note_id, 2)
+        self.assertEqual(dialog.last_response(), response)
+        self.assertEqual(dialog.last_corrections(), (correction,))
+        self.assertTrue(dialog.chip_bar.isVisibleTo(dialog))
+        self.assertEqual(backend.requests, [])
+        self.assertEqual(backend.state_refresh_requests, [roots])
+
+        refreshed_roots = (
+            SearchResult(
+                note_id=1,
+                card_ids=(11,),
+                card_states=(CardState(11, flag=4, suspended=True),),
+                title="Ignored refresh metadata",
+            ),
+            SearchResult(
+                note_id=2,
+                card_ids=(21,),
+                card_states=(CardState(21, buried=True),),
+                title="Also ignored",
+            ),
+        )
+        backend.state_refresh_callbacks[-1][0](refreshed_roots)
+        self.app.processEvents()
+        restored = model.results()
+        self.assertEqual(tuple(result.title for result in restored), (
+            "Original one",
+            "Original two",
+        ))
+        self.assertTrue(restored[0].card_states[0].suspended)
+        self.assertEqual(restored[0].card_states[0].flag, 4)
+        self.assertTrue(restored[1].card_states[0].buried)
+        self.assertEqual(
+            dialog.last_response().results,
+            restored,
+        )
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_related_back_waits_for_an_in_flight_collection_action(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        dialog.show()
+        controller = SearchController(backend, dialog)
+        root = SearchResult(
+            note_id=1,
+            card_ids=(11,),
+            tags=("#AK_Step2::#UWorld::18462",),
+            title="Original",
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=35,
+                query="original",
+                results=(root,),
+                total_results=1,
+            ),
+            (),
+        )
+        controller.find_related_cards((root,))
+        request = backend.related_requests[-1]
+        backend.related_callbacks[-1][0](
+            RelatedCardsResponse(
+                request_id=request.request_id,
+                source_note_ids=(1,),
+                source_tags=("#AK_Step2::#UWorld::18462",),
+                providers=("uworld",),
+                results=(SearchResult(note_id=2, card_ids=(21,)),),
+                total_results=1,
+            )
+        )
+        self.app.processEvents()
+        self.assertTrue(dialog.related_active())
+
+        dialog.set_batch_action_busy(True, "Applying change…")
+        self.assertFalse(dialog.related_back_button.isEnabled())
+        dialog.relatedBackRequested.emit()
+        QTest.keyClick(dialog, Qt.Key.Key_Escape)
+        self.app.processEvents()
+        self.assertTrue(dialog.related_active())
+
+        dialog.set_batch_action_busy(False)
+        dialog.related_back_button.click()
+        self.app.processEvents()
+        self.assertFalse(dialog.related_active())
+        self.assertEqual(dialog.results.results_model().results(), (root,))
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_related_back_restores_scroll_after_result_layout(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        dialog.resize(760, 520)
+        dialog.show()
+        controller = SearchController(backend, dialog)
+        roots = tuple(
+            SearchResult(
+                note_id=note_id,
+                card_ids=(note_id * 10 + 1,),
+                tags=("#AK_Step2::#UWorld::18462",),
+                title=f"Original {note_id}",
+                snippet="A deliberately visible result row.",
+            )
+            for note_id in range(1, 81)
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=36,
+                query="many results",
+                results=roots,
+                total_results=len(roots),
+            ),
+            (),
+        )
+        self.app.processEvents()
+        target_row = 55
+        dialog.results.select_row(target_row)
+        dialog.results.scrollTo(
+            dialog.results.results_model().index(target_row, 0)
+        )
+        self.app.processEvents()
+        expected_scroll = dialog.results.verticalScrollBar().value()
+        self.assertGreater(expected_scroll, 0)
+
+        controller.find_related_cards((roots[target_row],))
+        request = backend.related_requests[-1]
+        backend.related_callbacks[-1][0](
+            RelatedCardsResponse(
+                request_id=request.request_id,
+                source_note_ids=(roots[target_row].note_id,),
+                source_tags=("#AK_Step2::#UWorld::18462",),
+                providers=("uworld",),
+                results=(SearchResult(note_id=900, card_ids=(9001,)),),
+                total_results=1,
+            )
+        )
+        self.app.processEvents()
+        dialog.related_back_button.click()
+        self.app.processEvents()
+        self.app.processEvents()
+
+        self.assertEqual(
+            dialog.results.verticalScrollBar().value(),
+            expected_scroll,
+        )
+        self.assertEqual(
+            dialog.results.current_result().note_id,
+            roots[target_row].note_id,
+        )
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_related_no_source_tags_restores_original_results(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        dialog.show()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("hypertension")
+        root = SearchResult(
+            note_id=7,
+            card_ids=(71,),
+            tags=("cardiology",),
+            title="Original",
+        )
+        response = SearchResponse(
+            request_id=33,
+            query=dialog.query(),
+            results=(root,),
+            total_results=1,
+        )
+        dialog.show_response(response, ())
+
+        controller.find_related_cards((root,))
+        request = backend.related_requests[-1]
+        backend.related_callbacks[-1][0](
+            RelatedCardsResponse(
+                request_id=request.request_id,
+                source_note_ids=(7,),
+            )
+        )
+        self.app.processEvents()
+
+        self.assertFalse(dialog.related_active())
+        self.assertEqual(dialog.results.results_model().results(), (root,))
+        self.assertIn("No specific UWorld or AMBOSS", dialog.summary.text())
+        self.assertEqual(backend.requests, [])
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_related_request_is_cancelled_and_stale_response_is_ignored(
+        self,
+    ) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        dialog.show()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("renal")
+        root = SearchResult(
+            note_id=4,
+            card_ids=(41,),
+            tags=("#UWorld::Step2::18462",),
+            title="Original",
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=34,
+                query=dialog.query(),
+                results=(root,),
+                total_results=1,
+            ),
+            (),
+        )
+
+        controller.find_related_cards((root,))
+        request = backend.related_requests[-1]
+        stale_success = backend.related_callbacks[-1][0]
+        controller._on_query_edited("renal failure")
+        self.assertEqual(backend.related_cancel_count, 1)
+        self.assertFalse(dialog.related_active())
+
+        stale_success(
+            RelatedCardsResponse(
+                request_id=request.request_id,
+                source_note_ids=(4,),
+                source_tags=("UWorld · 18462",),
+                providers=("uworld",),
+                results=(SearchResult(note_id=99, title="Stale"),),
+                total_results=1,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(
+            dialog.results.results_model().results(),
+            (root,),
+        )
+        self.assertEqual(backend.requests, [])
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_related_exact_tags_are_exposed_in_tooltip_and_accessibility(
+        self,
+    ) -> None:
+        full_tags = (
+            "#AK_Step2_v13::#UWorld::medicine::18462",
+            "#AK_Step2_v13::#AMBOSS::AbCdEfGhIj",
+        )
+        result = SearchResult(
+            note_id=42,
+            card_ids=(421,),
+            card_states=(CardState(421, suspended=True),),
+            title="Related source",
+            match_reasons=(
+                "Related · UWorld · 18462",
+                "Related · AMBOSS · AbCdEfGhIj",
+            ),
+            related_by_tags=full_tags,
+        )
+        dialog = SearchDialog()
+        model = dialog.results.results_model()
+        model.set_results((result,))
+        index = model.index(0, 0)
+
+        tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
+        accessible = index.data(Qt.ItemDataRole.AccessibleTextRole)
+        self.assertIn("Exact related tags", tooltip)
+        for tag in full_tags:
+            self.assertIn(tag, tooltip)
+            self.assertIn(tag, accessible)
+        self.assertIn("1 of 1 card suspended", tooltip)
         dialog.deleteLater()
 
     def test_result_context_menu_targets_clicked_or_checked_results(self) -> None:

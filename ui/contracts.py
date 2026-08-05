@@ -35,6 +35,9 @@ __all__ = [
     "SearchResult",
     "SearchRequest",
     "SearchResponse",
+    "RelatedCardsRequest",
+    "RelatedCardsResponse",
+    "ResultViewState",
     "IndexStatus",
     "SemanticStatus",
     "UISettings",
@@ -44,6 +47,7 @@ __all__ = [
     "ErrorCallback",
     "ProgressCallback",
     "SearchSuccessCallback",
+    "RelatedCardsSuccessCallback",
     "StatusCallback",
     "DeckCatalogCallback",
     "clamp_spans",
@@ -272,6 +276,7 @@ class SearchResult:
     note_type: str = ""
     tags: tuple[str, ...] = ()
     match_reasons: tuple[str, ...] = ()
+    related_by_tags: tuple[str, ...] = ()
     sibling_count: int = 0
     browser_query: Optional[str] = None
     score: Optional[float] = None
@@ -302,6 +307,40 @@ class SearchResponse:
     total_results: int = 0
     warnings: tuple[str, ...] = ()
     truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class RelatedCardsRequest:
+    """Find deterministic source-tag relations for selected result notes."""
+
+    request_id: int
+    note_ids: tuple[int, ...]
+    tags: tuple[str, ...]
+    limit: int = 50
+
+
+@dataclass(frozen=True, slots=True)
+class RelatedCardsResponse:
+    """One temporary related-card view; the original query stays untouched."""
+
+    request_id: int
+    source_note_ids: tuple[int, ...]
+    source_tags: tuple[str, ...] = ()
+    providers: tuple[str, ...] = ()
+    results: tuple[SearchResult, ...] = ()
+    elapsed_ms: float = 0.0
+    total_results: int = 0
+    warnings: tuple[str, ...] = ()
+    truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ResultViewState:
+    """Small UI-only snapshot used to restore a search after Related view."""
+
+    current_note_id: Optional[int] = None
+    checked_note_ids: tuple[int, ...] = ()
+    vertical_scroll: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,6 +450,7 @@ CancelCallback = Callable[[], None]
 ErrorCallback = Callable[[str], None]
 ProgressCallback = Callable[[float, str], None]  # progress 0.0–1.0, detail text
 SearchSuccessCallback = Callable[[SearchResponse], None]
+RelatedCardsSuccessCallback = Callable[[RelatedCardsResponse], None]
 StatusCallback = Callable[[IndexStatus], None]
 DeckCatalogCallback = Callable[[DeckCatalog], None]
 
@@ -429,6 +469,13 @@ class SearchBackend(Protocol):
         self,
         request: SearchRequest,
         on_success: SearchSuccessCallback,
+        on_error: ErrorCallback,
+    ) -> Optional[CancelCallback]: ...
+
+    def submit_related_cards(
+        self,
+        request: RelatedCardsRequest,
+        on_success: RelatedCardsSuccessCallback,
         on_error: ErrorCallback,
     ) -> Optional[CancelCallback]: ...
 

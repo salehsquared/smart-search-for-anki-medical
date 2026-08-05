@@ -23,6 +23,7 @@ from typing import Any
 from .compat import dataclass
 from .medical_vocab import load_alias_resource
 from .models import IndexStats, IndexedNote
+from .related import RelatedSourceTag, related_source_tags
 from .text import (
     join_searchable_text,
     normalize_text,
@@ -35,6 +36,8 @@ from .text import (
 SCHEMA_VERSION = 2
 _PAYLOAD_VERSION = 1
 _CONTENT_HASH_REVISION = "2"
+_RELATED_SOURCE_TAG_INDEX_REVISION = "1"
+_RELATED_SOURCE_TAG_GENERATION_KEY = "related_source_tag_index_generation"
 _UNSAFE_COLLECTION_NAMES = frozenset(
     {"collection.anki2", "collection.anki21", "collection.media"}
 )
@@ -70,6 +73,24 @@ class FTSDocumentHit:
     document: IndexedDocument
     rank: int
     bm25: float
+
+
+@dataclass(frozen=True, slots=True)
+class RelatedDocumentHit:
+    """One indexed note related through complete source tags."""
+
+    document: IndexedDocument
+    shared_tags: tuple[RelatedSourceTag, ...]
+    tag_frequencies: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RelatedDocumentResults:
+    """Deterministic result set for one related-card navigation request."""
+
+    hits: tuple[RelatedDocumentHit, ...]
+    source_tags: tuple[RelatedSourceTag, ...]
+    total_candidates: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +212,17 @@ class SmartSearchIndex:
                     source TEXT NOT NULL DEFAULT 'user',
                     PRIMARY KEY (alias, canonical, source)
                 );
+                CREATE TABLE IF NOT EXISTS related_source_tags (
+                    tag_key TEXT NOT NULL,
+                    note_id INTEGER NOT NULL,
+                    provider TEXT NOT NULL,
+                    display_tag TEXT NOT NULL,
+                    PRIMARY KEY (tag_key, note_id),
+                    FOREIGN KEY (note_id) REFERENCES notes(note_id)
+                        ON DELETE CASCADE
+                ) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS related_source_tags_note_idx
+                    ON related_source_tags(note_id);
                 CREATE VIRTUAL TABLE IF NOT EXISTS notes_fts USING fts5(
                     title,
                     body,
@@ -209,10 +241,79 @@ class SmartSearchIndex:
                 ) from error
             raise
         self._ensure_card_scope_hashes()
+        self._ensure_related_source_tag_index()
         with self.transaction():
             self._set_metadata("schema_version", str(SCHEMA_VERSION))
             if self._metadata("generation") is None:
                 self._set_metadata("generation", "0")
+
+    def _ensure_related_source_tag_index(self) -> None:
+        """Backfill the compact reverse tag map without changing generation.
+
+        The lexical generation is also the Semantic source generation.  This
+        auxiliary lookup can be derived entirely from existing note payloads,
+        so creating it during an upgrade must not force Semantic preparation.
+        A transaction plus a revision marker makes cancellation/crash recovery
+        all-or-nothing.
+        """
+
+        current_generation = int(self._metadata("generation") or 0)
+        if (
+            self._metadata("related_source_tag_index_revision")
+            == _RELATED_SOURCE_TAG_INDEX_REVISION
+            and self._metadata(_RELATED_SOURCE_TAG_GENERATION_KEY)
+            == str(current_generation)
+        ):
+            return
+        rows: list[tuple[str, int, str, str]] = []
+        with self.transaction():
+            self.connection.execute("DELETE FROM related_source_tags")
+            cursor = self.connection.execute(
+                "SELECT note_id, payload FROM notes ORDER BY note_id"
+            )
+            processed = 0
+            while True:
+                if self._open_cancel_check is not None:
+                    self._open_cancel_check()
+                batch = cursor.fetchmany(250)
+                if not batch:
+                    break
+                for row in batch:
+                    payload = _unpack_payload(row["payload"])
+                    note_id = int(row["note_id"])
+                    rows.extend(
+                        (
+                            source.key,
+                            note_id,
+                            source.provider,
+                            source.display,
+                        )
+                        for source in related_source_tags(payload.get("t", ()))
+                    )
+                    processed += 1
+                    if (
+                        self._open_cancel_check is not None
+                        and processed % 64 == 0
+                    ):
+                        self._open_cancel_check()
+                if rows:
+                    self.connection.executemany(
+                        """
+                        INSERT OR REPLACE INTO related_source_tags(
+                            tag_key, note_id, provider, display_tag
+                        ) VALUES(?, ?, ?, ?)
+                        """,
+                        rows,
+                    )
+                    rows.clear()
+            self._set_metadata(
+                "related_source_tag_index_revision",
+                _RELATED_SOURCE_TAG_INDEX_REVISION,
+            )
+            self._set_metadata(
+                _RELATED_SOURCE_TAG_GENERATION_KEY,
+                str(current_generation),
+            )
 
     def _ensure_card_scope_hashes(self) -> None:
         """Backfill stable content/card hashes without rebuilding FTS.
@@ -377,7 +478,16 @@ class SmartSearchIndex:
             return int(self._metadata("generation") or 0)
 
     def _increment_generation(self) -> None:
-        self._set_metadata("generation", str(int(self._metadata("generation") or 0) + 1))
+        generation = int(self._metadata("generation") or 0) + 1
+        self._set_metadata("generation", str(generation))
+        # Current writers maintain the reverse source-tag map in the same
+        # transaction as note changes.  Tying that map to the lexical
+        # generation lets a later upgrade detect an intervening rollback to
+        # an older add-on that knew how to change notes but not this table.
+        self._set_metadata(
+            _RELATED_SOURCE_TAG_GENERATION_KEY,
+            str(generation),
+        )
 
     def rebuild(
         self,
@@ -431,6 +541,10 @@ class SmartSearchIndex:
                     cancel_check=cancel_check,
                 )
                 temporary._set_metadata("generation", str(next_generation))
+                temporary._set_metadata(
+                    _RELATED_SOURCE_TAG_GENERATION_KEY,
+                    str(next_generation),
+                )
                 if cancel_check is not None:
                     cancel_check()
             temporary.close()
@@ -780,6 +894,7 @@ class SmartSearchIndex:
                 *fts_values,
             ),
         )
+        self._replace_related_source_tags(note.note_id, note.tags)
         if update_field_names:
             self._increase_field_names(data["field_names"])
         term_counts = Counter(tokenize(data["vocabulary_text"]))
@@ -803,7 +918,39 @@ class SmartSearchIndex:
             """,
             (note_id, *_fts_values(str(row["title"]), payload_data)),
         )
+        self.connection.execute(
+            "DELETE FROM related_source_tags WHERE note_id=?",
+            (note_id,),
+        )
         self.connection.execute("DELETE FROM notes WHERE note_id=?", (note_id,))
+
+    def _replace_related_source_tags(
+        self,
+        note_id: int,
+        tags: Iterable[str],
+    ) -> None:
+        self.connection.execute(
+            "DELETE FROM related_source_tags WHERE note_id=?",
+            (int(note_id),),
+        )
+        rows = tuple(
+            (
+                source.key,
+                int(note_id),
+                source.provider,
+                source.display,
+            )
+            for source in related_source_tags(tags)
+        )
+        if rows:
+            self.connection.executemany(
+                """
+                INSERT INTO related_source_tags(
+                    tag_key, note_id, provider, display_tag
+                ) VALUES(?, ?, ?, ?)
+                """,
+                rows,
+            )
 
     def _increase_vocabulary(self, counts: Mapping[str, int]) -> None:
         self.connection.executemany(
@@ -1067,6 +1214,121 @@ class SmartSearchIndex:
                 params,
             ).fetchall()
             return tuple(_row_to_document(row) for row in rows)
+
+    def related_documents(
+        self,
+        seed_tags: Iterable[str],
+        *,
+        exclude_note_ids: Iterable[int] = (),
+        limit: int = 50,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> RelatedDocumentResults:
+        """Find notes sharing complete, specific UWorld/AMBOSS tags.
+
+        This path is wholly external to Anki's collection and never touches
+        Semantic.  The compact reverse map is maintained transactionally with
+        note payloads. Results with more independently shared source tags rank
+        first; ties prefer the rarer exact tag and then stable note ID.
+        """
+
+        sources = related_source_tags(seed_tags)
+        bounded_limit = max(0, int(limit))
+        if not sources or bounded_limit <= 0:
+            return RelatedDocumentResults((), sources, 0)
+        source_by_key = {source.key: source for source in sources}
+        excluded = {
+            int(note_id)
+            for note_id in exclude_note_ids
+            if int(note_id) > 0
+        }
+
+        with self._lock:
+            if cancel_check is not None:
+                cancel_check()
+            self.connection.execute(
+                """
+                CREATE TEMP TABLE IF NOT EXISTS smart_search_related_keys(
+                    tag_key TEXT PRIMARY KEY
+                )
+                """
+            )
+            self.connection.execute(
+                "DELETE FROM temp.smart_search_related_keys"
+            )
+            self.connection.executemany(
+                """
+                INSERT INTO temp.smart_search_related_keys(tag_key) VALUES(?)
+                """,
+                ((source.key,) for source in sources),
+            )
+            cursor = self.connection.execute(
+                """
+                SELECT source.tag_key, source.note_id
+                FROM related_source_tags source
+                JOIN temp.smart_search_related_keys requested
+                    ON requested.tag_key=source.tag_key
+                ORDER BY source.tag_key, source.note_id
+                """
+            )
+
+            frequencies: Counter[str] = Counter()
+            keys_by_note: dict[int, set[str]] = {}
+            processed = 0
+            while True:
+                if cancel_check is not None:
+                    cancel_check()
+                rows = cursor.fetchmany(500)
+                if not rows:
+                    break
+                for row in rows:
+                    processed += 1
+                    if cancel_check is not None and processed % 256 == 0:
+                        cancel_check()
+                    key = str(row["tag_key"])
+                    note_id = int(row["note_id"])
+                    frequencies[key] += 1
+                    if note_id in excluded:
+                        continue
+                    keys_by_note.setdefault(note_id, set()).add(key)
+
+            ranked_note_ids = sorted(
+                keys_by_note,
+                key=lambda note_id: (
+                    -len(keys_by_note[note_id]),
+                    min(frequencies[key] for key in keys_by_note[note_id]),
+                    sum(frequencies[key] for key in keys_by_note[note_id]),
+                    note_id,
+                ),
+            )
+            selected_note_ids = ranked_note_ids[:bounded_limit]
+            documents = self.get_documents(selected_note_ids)
+
+        if cancel_check is not None:
+            cancel_check()
+        hits: list[RelatedDocumentHit] = []
+        for note_id in selected_note_ids:
+            document = documents.get(note_id)
+            if document is None:
+                continue
+            shared = tuple(
+                source_by_key[source.key]
+                for source in sources
+                if source.key in keys_by_note[note_id]
+            )
+            hits.append(
+                RelatedDocumentHit(
+                    document=document,
+                    shared_tags=shared,
+                    tag_frequencies=tuple(
+                        frequencies[source.key] for source in shared
+                    ),
+                )
+            )
+        return RelatedDocumentResults(
+            hits=tuple(hits),
+            source_tags=sources,
+            total_candidates=len(keys_by_note),
+        )
 
     def note_ids(self) -> tuple[int, ...]:
         """Return indexed IDs cheaply so callers can process bounded batches."""

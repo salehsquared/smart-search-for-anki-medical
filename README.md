@@ -61,6 +61,11 @@ usable while Semantic prepares.
   toolbar; the button disables itself if another Anki change happens first.
 - Check one result, Shift-click a range, or choose **All shown**, **None**, or
   **Invert**.
+- Choose **Related** for the highlighted or checked results to find notes that
+  share the same complete UWorld or AMBOSS source tag. Related matches can
+  come from any deck, show why they matched, and open as a temporary view;
+  **Back to search** restores the prior results and selection without rerunning
+  the query.
 - Open exactly the checked cards in Anki's Browser.
 - Flag, suspend, unsuspend, add tags, or remove tags from the toolbar or
   right-click menu. The right-click menu can also bury/unbury cards or move the
@@ -193,6 +198,7 @@ The builder:
 - **Shift-click:** select a continuous range
 - **Command/Ctrl-1, 2, or 3:** switch Smart, Exact, or Semantic
 - **Escape:** clear the query or close the palette
+- **Escape in Related view:** return to the original search results
 
 ## Architecture and safety
 
