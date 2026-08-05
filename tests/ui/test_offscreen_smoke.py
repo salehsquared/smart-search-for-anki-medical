@@ -897,6 +897,8 @@ class OffscreenSmokeTests(unittest.TestCase):
         backend = _HeldSearchBackend()
         dialog = SearchDialog()
         controller = SearchController(backend, dialog)
+        initial_previews: list[SearchResult | None] = []
+        controller.initialPreviewRequested.connect(initial_previews.append)
         dialog.search.setText("first")
         controller.submit_search("first")
         self.assertEqual(dialog.summary.text(), "Searching…")
@@ -918,6 +920,53 @@ class OffscreenSmokeTests(unittest.TestCase):
 
         self.assertEqual(dialog.results.results_model().count(), 0)
         self.assertEqual(dialog.summary.text(), "")
+        self.assertEqual(initial_previews, [])
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_accepted_search_requests_first_result_preview_without_focus(
+        self,
+    ) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        first = SearchResult(note_id=1, card_ids=(11,), title="First")
+        second = SearchResult(note_id=2, card_ids=(21,), title="Second")
+        initial_previews: list[SearchResult | None] = []
+        controller.initialPreviewRequested.connect(initial_previews.append)
+        dialog.show()
+        dialog.search.setText("accepted")
+        dialog.search.setFocus()
+        self.app.processEvents()
+
+        controller.submit_search("accepted")
+        backend.callbacks[-1][0](
+            SearchResponse(
+                request_id=backend.requests[-1].request_id,
+                query="accepted",
+                results=(first, second),
+                total_results=2,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(initial_previews, [first])
+        self.assertEqual(dialog.results.current_result(), first)
+        self.assertTrue(dialog.search.hasFocus())
+
+        controller.submit_search("empty")
+        backend.callbacks[-1][0](
+            SearchResponse(
+                request_id=backend.requests[-1].request_id,
+                query="empty",
+                results=(),
+                total_results=0,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(initial_previews, [first, None])
+        self.assertIsNone(dialog.results.current_result())
         controller.deleteLater()
         dialog.deleteLater()
 
@@ -2617,6 +2666,8 @@ class OffscreenSmokeTests(unittest.TestCase):
         dialog = SearchDialog()
         dialog.show()
         controller = SearchController(backend, dialog)
+        initial_previews: list[SearchResult | None] = []
+        controller.initialPreviewRequested.connect(initial_previews.append)
         dialog.search.setText("heart failure tag:cardio")
         roots = (
             SearchResult(
@@ -2675,6 +2726,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(model.results(), (related,))
         self.assertFalse(dialog.chip_bar.isVisibleTo(dialog))
         self.assertTrue(dialog.related_context_bar.isVisibleTo(dialog))
+        self.assertEqual(initial_previews, [related])
 
         dialog.relatedBackRequested.emit()
         self.app.processEvents()
@@ -2688,6 +2740,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertTrue(dialog.chip_bar.isVisibleTo(dialog))
         self.assertEqual(backend.requests, [])
         self.assertEqual(backend.state_refresh_requests, [roots])
+        self.assertEqual(initial_previews, [related])
 
         refreshed_roots = (
             SearchResult(

@@ -3827,6 +3827,122 @@ class ControllerTests(unittest.TestCase):
         self.assertGreaterEqual(timer.stop_count, 1)
         self.assertIsNone(addon._pending_preview_result)
 
+    def test_initial_preview_restores_results_when_launched_from_control(
+        self,
+    ) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        result = contracts.SearchResult(
+            note_id=7,
+            card_ids=(71,),
+            title="First related result",
+        )
+        focused: list[str] = []
+        query = types.SimpleNamespace(hasFocus=lambda: False)
+        results = types.SimpleNamespace(
+            hasFocus=lambda: False,
+            setFocus=lambda: focused.append("results"),
+        )
+        addon._dialog = types.SimpleNamespace(
+            search=query,
+            results=results,
+            preview_pane=object(),
+            set_preview_active=lambda _active: None,
+        )
+        addon._ui_controller = types.SimpleNamespace(
+            settings=types.SimpleNamespace(
+                preview_enabled=True,
+                preview_default=contracts.PreviewDefault.QUESTION,
+            )
+        )
+        preview = types.SimpleNamespace(show=lambda: None)
+        fake_qt = types.ModuleType("aqt.qt")
+        fake_qt.QTimer = types.SimpleNamespace(
+            singleShot=lambda _delay, callback: callback()
+        )
+        fake_aqt = types.ModuleType("aqt")
+        fake_aqt.qt = fake_qt
+
+        with (
+            patch.dict(
+                sys.modules,
+                {"aqt": fake_aqt, "aqt.qt": fake_qt},
+            ),
+            patch.object(
+                controller,
+                "create_inline_result_inspector",
+                return_value=preview,
+            ),
+        ):
+            addon._toggle_previewer(
+                result,
+                restore_results_if_unfocused=True,
+            )
+
+        self.assertEqual(focused, ["results"])
+
+    def test_initial_preview_bypasses_focus_but_stays_current(
+        self,
+    ) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        first = contracts.SearchResult(
+            note_id=7,
+            card_ids=(71,),
+            title="First",
+        )
+        replacement = contracts.SearchResult(
+            note_id=8,
+            card_ids=(81,),
+            title="Replacement",
+        )
+        current = [first]
+        addon._dialog = types.SimpleNamespace(
+            results=types.SimpleNamespace(
+                hasFocus=lambda: False,
+                current_result=lambda: current[0],
+            ),
+            set_preview_active=lambda _active: None,
+        )
+        addon._ui_controller = types.SimpleNamespace(
+            settings=types.SimpleNamespace(preview_enabled=True)
+        )
+        timer = _FakeTimer()
+        addon._preview_open_timer = timer
+
+        addon._initial_preview_requested(first)
+        self.assertEqual(timer.starts, [25])
+        self.assertEqual(addon._pending_preview_result, first)
+        self.assertFalse(addon._pending_preview_requires_focus)
+        addon._cancel_pending_previewer()
+        self.assertIsNone(addon._pending_preview_result)
+        self.assertTrue(addon._pending_preview_requires_focus)
+        with patch.object(addon, "_toggle_previewer") as toggle:
+            addon._open_pending_previewer()
+        toggle.assert_not_called()
+
+        addon._initial_preview_requested(first)
+        with patch.object(addon, "_toggle_previewer") as toggle:
+            addon._open_pending_previewer()
+        toggle.assert_called_once_with(
+            first,
+            restore_results_if_unfocused=True,
+        )
+
+        addon._initial_preview_requested(first)
+        current[0] = replacement
+        with patch.object(addon, "_toggle_previewer") as toggle:
+            addon._open_pending_previewer()
+        toggle.assert_not_called()
+        self.assertIsNone(addon._pending_preview_result)
+        self.assertTrue(addon._pending_preview_requires_focus)
+
     def test_close_dialog_disposes_controller_before_deferred_deletion(
         self,
     ) -> None:

@@ -4103,6 +4103,7 @@ class SmartSearchAddonController:
         self._previewer: Any | None = None
         self._preview_open_timer: Any | None = None
         self._pending_preview_result: object | None = None
+        self._pending_preview_requires_focus = True
         self._preview_auto_suppressed = False
         self._pending_undo: _PendingUndo | None = None
         self._undo_in_flight = False
@@ -4278,6 +4279,7 @@ class SmartSearchAddonController:
         with self._dialog_refresh_lock:
             self._dialog_refresh_queued = False
         self._pending_preview_result = None
+        self._pending_preview_requires_focus = True
         self._clear_pending_reconciles()
         self._clear_captured_notes()
         self._semantic_autostart_token = None
@@ -4341,6 +4343,7 @@ class SmartSearchAddonController:
         with self._dialog_refresh_lock:
             self._dialog_refresh_queued = False
         self._pending_preview_result = None
+        self._pending_preview_requires_focus = True
         if not self._dialog_is_visible():
             self._close_previewer(save=False)
         abort = getattr(self.backend, "abort_semantic_runtime_now", None)
@@ -4546,6 +4549,12 @@ class SmartSearchAddonController:
             ui_controller.previewDefaultChanged.connect(
                 self._preview_default_changed
             )
+            ui_controller.initialPreviewRequested.connect(
+                self._initial_preview_requested
+            )
+            ui_controller.previewAutoOpenCancelled.connect(
+                self._cancel_pending_previewer
+            )
             dialog.previewToggleRequested.connect(self._toggle_previewer)
             dialog.previewResultChanged.connect(
                 self._preview_selection_changed
@@ -4656,6 +4665,7 @@ class SmartSearchAddonController:
         with self._dialog_refresh_lock:
             self._dialog_refresh_queued = False
         self._pending_preview_result = None
+        self._pending_preview_requires_focus = True
 
     def _quiesce_and_start_native_update(self) -> None:
         self.backend.quiesce_for_bundle_update(
@@ -4770,7 +4780,12 @@ class SmartSearchAddonController:
 
     # ---------------------------------------------------------- card preview
 
-    def _toggle_previewer(self, result: object | None) -> None:
+    def _toggle_previewer(
+        self,
+        result: object | None,
+        *,
+        restore_results_if_unfocused: bool = False,
+    ) -> None:
         if result is None:
             # X is a temporary dismissal. Selecting another result (or
             # clicking the current one again) reopens the pane; Settings is
@@ -4788,6 +4803,10 @@ class SmartSearchAddonController:
             restore_result_focus = bool(dialog.results.hasFocus())
         except (AttributeError, RuntimeError):
             restore_result_focus = False
+        try:
+            restore_query_focus = bool(dialog.search.hasFocus())
+        except (AttributeError, RuntimeError):
+            restore_query_focus = False
         self._preview_auto_suppressed = False
         try:
             if self._previewer is None:
@@ -4803,13 +4822,23 @@ class SmartSearchAddonController:
                 self._previewer.set_result(result, apply_default=True)
             dialog.set_preview_active(True)
             self._previewer.show()
-            if restore_result_focus:
+            if (
+                restore_query_focus
+                or restore_result_focus
+                or restore_results_if_unfocused
+            ):
                 try:
                     from aqt.qt import QTimer
 
+                    def restore_focus(
+                        d=dialog,
+                        query=restore_query_focus,
+                    ) -> None:
+                        self._restore_dialog_preview_focus(d, query=query)
+
                     QTimer.singleShot(
                         0,
-                        lambda d=dialog: self._restore_dialog_result_focus(d),
+                        restore_focus,
                     )
                 except (ImportError, RuntimeError):
                     pass
@@ -4821,11 +4850,17 @@ class SmartSearchAddonController:
                 pass
             self._show_error(f"Could not open the inline card preview: {error}")
 
-    def _restore_dialog_result_focus(self, dialog: object) -> None:
+    def _restore_dialog_preview_focus(
+        self,
+        dialog: object,
+        *,
+        query: bool,
+    ) -> None:
         if self._dialog is not dialog:
             return
         try:
-            dialog.results.setFocus()
+            target = dialog.search if query else dialog.results
+            target.setFocus()
         except (AttributeError, RuntimeError):
             pass
 
@@ -4917,8 +4952,29 @@ class SmartSearchAddonController:
         except (TypeError, ValueError):
             return PreviewDefault.QUESTION
 
-    def _schedule_auto_previewer(self, result: object) -> None:
+    def _initial_preview_requested(self, result: object | None) -> None:
+        """Open an accepted result set's first card without stealing focus."""
+
+        if not self._preview_feature_enabled() or not preview_card_ids(result):
+            self._hide_previewer()
+            return
+        self._schedule_auto_previewer(result, require_focus=False)
+
+    def _cancel_pending_previewer(self) -> None:
+        timer = self._preview_open_timer
+        if timer is not None:
+            timer.stop()
+        self._pending_preview_result = None
+        self._pending_preview_requires_focus = True
+
+    def _schedule_auto_previewer(
+        self,
+        result: object,
+        *,
+        require_focus: bool = True,
+    ) -> None:
         self._pending_preview_result = result
+        self._pending_preview_requires_focus = bool(require_focus)
         timer = self._preview_open_timer
         if timer is not None:
             timer.start(25)
@@ -4927,7 +4983,9 @@ class SmartSearchAddonController:
 
     def _open_pending_previewer(self) -> None:
         result = self._pending_preview_result
+        require_focus = self._pending_preview_requires_focus
         self._pending_preview_result = None
+        self._pending_preview_requires_focus = True
         if result is None or not self._preview_feature_enabled():
             return
         dialog = self._dialog
@@ -4935,13 +4993,19 @@ class SmartSearchAddonController:
             return
         try:
             if (
-                not dialog.results.hasFocus()
+                (require_focus and not dialog.results.hasFocus())
                 or dialog.results.current_result() != result
             ):
                 return
         except RuntimeError:
             return
-        self._toggle_previewer(result)
+        if require_focus:
+            self._toggle_previewer(result)
+        else:
+            self._toggle_previewer(
+                result,
+                restore_results_if_unfocused=True,
+            )
 
     def _preview_preference_changed(self, enabled: bool) -> None:
         if not enabled:
@@ -5013,10 +5077,7 @@ class SmartSearchAddonController:
             self._show_error(f"Could not refresh the inline preview: {error}")
 
     def _hide_previewer(self, *, suppress: bool = False) -> None:
-        timer = self._preview_open_timer
-        if timer is not None:
-            timer.stop()
-        self._pending_preview_result = None
+        self._cancel_pending_previewer()
         if suppress:
             self._preview_auto_suppressed = True
         previewer = self._previewer
@@ -5033,10 +5094,7 @@ class SmartSearchAddonController:
                 pass
 
     def _close_previewer(self, *, save: bool = True) -> None:
-        timer = self._preview_open_timer
-        if timer is not None:
-            timer.stop()
-        self._pending_preview_result = None
+        self._cancel_pending_previewer()
         previewer = self._previewer
         self._previewer = None
         self._preview_auto_suppressed = bool(previewer is not None and save)
@@ -6642,6 +6700,7 @@ class SmartSearchAddonController:
         if self._preview_open_timer is not None:
             self._preview_open_timer.stop()
         self._pending_preview_result = None
+        self._pending_preview_requires_focus = True
         previewer = self._previewer
 
         def finish() -> None:
