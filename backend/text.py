@@ -289,19 +289,15 @@ def make_snippet(
 # ---------------------------------------------------------------------------
 
 # Field names (compared case-insensitively after normalization) that hold the
-# card's primary prompt and its single best supporting explanation. These
-# match the conventions used by the common medical note types (AnKing,
-# Basic, and Cloze variants) without depending on any one template.
+# card's primary prompt. These match the conventions used by the common
+# medical note types (AnKing, Basic, and Cloze variants) without depending
+# on any one template.
 _PRIMARY_FIELD_NAMES = ("text", "front", "question", "prompt", "header")
-_SUPPORT_FIELD_NAMES = (
-    "extra",
-    "back extra",
-    "back",
-    "answer",
-    "explanation",
-    "remarks",
-    "extra 1",
-)
+# Only a field whose normalized name is exactly ``extra`` may become the
+# supporting line. ``Back``, ``Answer``, ``Explanation``, ``Back Extra``,
+# ``Extra 1``, lecture/resource fields, and every other field stay searchable
+# but are never substituted for the supporting line.
+_SUPPORT_FIELD_NAME = "extra"
 
 # Internal/admin/identity and image-mask fields never make useful result-row
 # text: they hold sync identities, display-mode toggles, or encoded mask data
@@ -357,11 +353,14 @@ def display_lines(
     for a returned note; the complete field corpus stays indexed and
     searchable. The primary line prefers ``Text``/``Front``/``Question``
     (case-insensitively), then the first nonempty non-internal textual field.
-    The supporting line is exactly one bounded excerpt from the remaining
-    fields. It prefers the conventional explanation fields, but surfaces a
-    different field when that is the only place the query matched. It never
-    repeats the primary text. A note with no displayable text falls back to
-    ``Note <id>`` and no supporting line.
+    The supporting line is exactly one bounded excerpt from the note's real
+    ``Extra`` field (normalized name match only). It never repeats the primary
+    text, and it is never substituted with ``Back``, ``Answer``,
+    ``Explanation``, ``Back Extra``, ``Extra 1``, lecture/resource fields, or
+    any other field — those stay searchable without being displayed. When the
+    query matches later inside ``Extra``, the excerpt is centered on that
+    match; no other field may be surfaced to explain a match. A note with no
+    displayable text falls back to ``Note <id>`` and no supporting line.
     """
 
     # Reject known administrative/media fields before cleaning their values.
@@ -404,14 +403,13 @@ def display_lines(
             if needle
         )
     )
-    preferred_support = ""
-    for preferred in _SUPPORT_FIELD_NAMES:
-        for name, text in remaining:
-            if normalize_text(name) == preferred:
-                preferred_support = text
-                break
-        if preferred_support:
+    extra_text = ""
+    for name, text in remaining:
+        if normalize_text(name) == _SUPPORT_FIELD_NAME:
+            extra_text = text
             break
+    if not extra_text:
+        return primary, ""
 
     def matching_needles(value: str) -> set[str]:
         normalized_value = normalize_text(value)
@@ -419,48 +417,22 @@ def display_lines(
             needle for needle in normalized_needles if needle in normalized_value
         }
 
-    support = ""
-    preferred_visible = (
-        truncate_text(preferred_support, support_limit)
-        if preferred_support
-        else ""
-    )
-    visible_needles = matching_needles(primary) | matching_needles(
-        preferred_visible
-    )
+    # A query term matched only later inside Extra earns a match-centered
+    # excerpt from Extra itself; otherwise the excerpt starts at the cleaned
+    # beginning of the field. No other field is ever surfaced.
     uncovered_needles = tuple(
-        needle for needle in normalized_needles if needle not in visible_needles
+        needle
+        for needle in normalized_needles
+        if needle not in matching_needles(primary)
     )
-    # If a term matched only beyond the primary/support cutoff or in another
-    # field, show a match-centered support excerpt so every result remains
-    # understandable. Prefer the primary tail, then conventional support,
-    # then the remaining fields in note order.
-    if uncovered_needles:
-        uncovered = set(uncovered_needles)
-        candidates = [primary_full]
-        if preferred_support:
-            candidates.append(preferred_support)
-        candidates.extend(
-            text for _name, text in remaining if text != preferred_support
-        )
-        best = max(
-            candidates,
-            key=lambda value: len(matching_needles(value) & uncovered),
-        )
-        if matching_needles(best) & uncovered:
-            support = make_snippet(
-                best,
-                uncovered_needles,
-                maximum=support_limit,
-            )
-    if not support and preferred_support:
-        support = preferred_visible
-    if not support:
+    if uncovered_needles and matching_needles(extra_text) & set(uncovered_needles):
         support = make_snippet(
-            " ".join(text for _name, text in remaining),
-            normalized_needles,
+            extra_text,
+            uncovered_needles,
             maximum=support_limit,
         )
+    else:
+        support = truncate_text(extra_text, support_limit)
     if normalize_text(support) == normalize_text(primary):
         support = ""
     return primary, support

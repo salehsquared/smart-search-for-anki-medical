@@ -511,6 +511,96 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertFalse(dialog.grab().isNull())
         dialog.deleteLater()
 
+    def test_rows_without_extra_wrap_primary_without_exposing_other_fields(
+        self,
+    ) -> None:
+        long_title = (
+            "Hypertension screening and confirmation requires ambulatory "
+            "blood pressure monitoring to confirm an elevated office reading "
+            "outside the clinical setting before treatment decisions begin."
+        )
+        with_extra = SearchResult(
+            note_id=51,
+            card_ids=(301, 302),
+            title="Adult immunization intervals",
+            snippet="Review age, pregnancy, and risk conditions.",
+            deck="Synthetic FM Shelf",
+            note_type="Immunization",
+            match_reasons=("exact filter",),
+            sibling_count=2,
+        )
+        without_extra = SearchResult(
+            note_id=52,
+            card_ids=(303,),
+            title=long_title,
+            snippet="",
+            deck="Synthetic FM Shelf",
+            note_type="Screening",
+            match_reasons=("same deck",),
+            sibling_count=1,
+        )
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_response(
+            SearchResponse(
+                request_id=5,
+                query="hypertension",
+                results=(with_extra, without_extra),
+                total_results=2,
+            ),
+            (),
+        )
+        self.app.processEvents()
+        model = dialog.results.results_model()
+
+        # The Extra row keeps the two-level primary/support hierarchy.
+        extra_index = model.index(0, 0)
+        extra_display = extra_index.data(Qt.ItemDataRole.DisplayRole)
+        self.assertIn("Adult immunization intervals", extra_display)
+        self.assertIn("Review age, pregnancy, and risk conditions.", extra_display)
+
+        # The no-Extra row exposes exactly the primary text plus the existing
+        # metadata — no other field content is invented for the second line.
+        plain_index = model.index(1, 0)
+        self.assertEqual(
+            plain_index.data(Qt.ItemDataRole.DisplayRole),
+            f"{long_title}, Synthetic FM Shelf, Screening, matched by same deck",
+        )
+        self.assertEqual(
+            plain_index.data(Qt.ItemDataRole.AccessibleTextRole),
+            "not checked, "
+            f"{long_title}, Synthetic FM Shelf, Screening, matched by same deck",
+        )
+
+        # Row height stays uniform whether or not a supporting excerpt exists.
+        self.assertEqual(
+            dialog.results.sizeHintForRow(0),
+            dialog.results.sizeHintForRow(1),
+        )
+
+        # Paint both layouts in the dialog.
+        self.assertFalse(dialog.grab().isNull())
+        self.assertEqual(
+            dialog.results.sizeHintForRow(0),
+            dialog.results.sizeHintForRow(1),
+        )
+        dialog.deleteLater()
+
+        # Exercise the delegate at a genuinely narrow width without the
+        # dialog controls imposing their own minimum layout width.
+        narrow_results = ResultsView()
+        narrow_results.resize(420, 300)
+        narrow_results.results_model().set_results((with_extra, without_extra))
+        narrow_results.show()
+        self.app.processEvents()
+        self.assertEqual(narrow_results.width(), 420)
+        self.assertFalse(narrow_results.grab().isNull())
+        self.assertEqual(
+            narrow_results.sizeHintForRow(0),
+            narrow_results.sizeHintForRow(1),
+        )
+        narrow_results.deleteLater()
+
     def test_result_metadata_compacts_hierarchy_without_losing_full_values(self) -> None:
         from ui.results import compact_deck_label, compact_note_type_label
 

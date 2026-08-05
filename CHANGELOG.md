@@ -21,8 +21,12 @@
 ### Changed
 
 - Result rows are now compact and field-aware: one bold primary line from the
-  note's `Text`/`Front`/`Question` field, one short supporting excerpt from a
-  remaining field, and a quiet `Deck › Note Type` line. Raw hierarchical tags
+  note's `Text`/`Front`/`Question` field, one short supporting excerpt shown
+  only when the note has a real `Extra` field, and a quiet `Deck › Note Type`
+  line. Rows never substitute `Back`, `Answer`, `Explanation`, or any other
+  field for the supporting line; when `Extra` is absent or empty, the second
+  line instead continues the primary text, and terms matched in hidden fields
+  remain searchable without being displayed. Raw hierarchical tags
   no longer appear inline; they remain searchable and stay available in
   tooltips, accessibility text, actions, and Related matching.
 - Related-card lookup uses a compact map derived from the existing local text

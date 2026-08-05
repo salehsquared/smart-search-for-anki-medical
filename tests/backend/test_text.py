@@ -63,7 +63,8 @@ class DisplayLinesTests(unittest.TestCase):
             }
         )
         self.assertEqual(primary, "First-line therapy for hypertension?")
-        self.assertEqual(support, "ACE inhibitors in chronic kidney disease.")
+        # ``Back`` is not ``Extra``: it stays searchable but never displays.
+        self.assertEqual(support, "")
 
     def test_field_name_preferences_are_case_insensitive(self) -> None:
         primary, support = display_lines(
@@ -100,9 +101,52 @@ class DisplayLinesTests(unittest.TestCase):
             }
         )
         self.assertEqual(primary, "Mitral valve prolapse murmur.")
-        self.assertEqual(support, "Mid-systolic click.")
+        self.assertEqual(support, "")
 
-    def test_needle_in_a_later_field_becomes_the_support_excerpt(self) -> None:
+    def test_empty_extra_yields_no_support_line(self) -> None:
+        primary, support = display_lines(
+            {
+                "Text": "Bupropion is used for depression.",
+                "Extra": "  \n ",
+            }
+        )
+        self.assertEqual(primary, "Bupropion is used for depression.")
+        self.assertEqual(support, "")
+
+    def test_non_extra_fields_never_become_the_support_line(self) -> None:
+        primary, support = display_lines(
+            {
+                "Text": "Beta blockers reduce mortality after infarction.",
+                "Back": "Back wording.",
+                "Answer": "Answer wording.",
+                "Explanation": "Explanation wording.",
+                "Remarks": "Remarks wording.",
+                "Back Extra": "Back-extra wording.",
+                "Extra 1": "Extra-one wording.",
+                "Lecture Notes": "Carvedilol also blocks alpha-1 receptors.",
+            },
+            ("carvedilol",),
+        )
+        self.assertEqual(
+            primary, "Beta blockers reduce mortality after infarction."
+        )
+        self.assertEqual(support, "")
+
+    def test_match_later_in_extra_becomes_match_centered_excerpt(self) -> None:
+        fields = {
+            "Text": "Beta blockers reduce mortality after myocardial infarction.",
+            "Extra": ("General context. " * 20) + "Carvedilol also blocks alpha-1.",
+            "Lecture Notes": "Unrelated lecture wording about carvedilol.",
+        }
+        primary, support = display_lines(fields, ("carvedilol",))
+        self.assertEqual(
+            primary,
+            "Beta blockers reduce mortality after myocardial infarction.",
+        )
+        self.assertIn("Carvedilol", support)
+        self.assertNotIn("Unrelated lecture", support)
+
+    def test_extra_support_shows_its_start_without_a_late_match(self) -> None:
         fields = {
             "Text": "Beta blockers reduce mortality after myocardial infarction.",
             "Extra": "Avoid in acute decompensated heart failure.",
@@ -113,8 +157,9 @@ class DisplayLinesTests(unittest.TestCase):
             primary,
             "Beta blockers reduce mortality after myocardial infarction.",
         )
-        self.assertIn("Carvedilol", support)
-        self.assertNotIn("acute decompensated", support)
+        # The Lecture Notes match stays searchable but is never displayed;
+        # the supporting line remains the bounded Extra excerpt.
+        self.assertEqual(support, "Avoid in acute decompensated heart failure.")
 
     def test_visible_primary_match_keeps_preferred_support(self) -> None:
         primary, support = display_lines(
@@ -132,7 +177,7 @@ class DisplayLinesTests(unittest.TestCase):
         _primary, support = display_lines(
             {
                 "Text": "Hemolytic uremic syndrome triad.",
-                "Explanation": "Behçet disease features oral ulcers.",
+                "Extra": "Behçet disease features oral ulcers.",
             },
             ("BEHCET",),
         )
@@ -158,7 +203,7 @@ class DisplayLinesTests(unittest.TestCase):
         self.assertEqual(primary, "Behçet disease")
         self.assertEqual(support, "")
 
-    def test_support_skips_duplicate_and_uses_next_distinct_field(self) -> None:
+    def test_duplicate_extra_is_never_replaced_by_another_field(self) -> None:
         primary, support = display_lines(
             {
                 "Text": "Primary wording.",
@@ -166,7 +211,10 @@ class DisplayLinesTests(unittest.TestCase):
                 "Back Extra": "Distinct supporting wording.",
             }
         )
-        self.assertEqual(support, "Distinct supporting wording.")
+        # The duplicate Extra is suppressed and ``Back Extra`` is not a real
+        # ``Extra`` field, so no supporting line is invented.
+        self.assertEqual(primary, "Primary wording.")
+        self.assertEqual(support, "")
 
     def test_html_cloze_media_and_multiline_markup_are_cleaned(self) -> None:
         primary, support = display_lines(
@@ -203,7 +251,7 @@ class DisplayLinesTests(unittest.TestCase):
         self.assertEqual(primary, "Human-readable card content.")
         self.assertEqual(support, "")
 
-    def test_late_primary_match_becomes_support_excerpt(self) -> None:
+    def test_late_primary_match_never_invents_a_support_line(self) -> None:
         primary, support = display_lines(
             {
                 "Text": ("Earlier content. " * 30) + "Warfarin target.",
@@ -211,9 +259,11 @@ class DisplayLinesTests(unittest.TestCase):
             ("warfarin",),
         )
         self.assertNotIn("Warfarin", primary)
-        self.assertIn("Warfarin", support)
+        # The match stays searchable on the full field, but without a real
+        # Extra field no other content is surfaced to explain it.
+        self.assertEqual(support, "")
 
-    def test_uncovered_second_term_is_surfaced_from_later_field(self) -> None:
+    def test_uncovered_second_term_in_a_later_field_is_not_surfaced(self) -> None:
         primary, support = display_lines(
             {
                 "Text": "Warfarin is an anticoagulant.",
@@ -223,7 +273,9 @@ class DisplayLinesTests(unittest.TestCase):
             ("warfarin", "inr"),
         )
         self.assertIn("Warfarin", primary)
-        self.assertIn("INR", support)
+        # ``INR`` matched only in Lecture Notes; the support line stays the
+        # real Extra excerpt instead of exposing that field.
+        self.assertEqual(support, "Monitor for bleeding.")
 
     def test_media_only_note_falls_back_to_note_id(self) -> None:
         primary, support = display_lines(

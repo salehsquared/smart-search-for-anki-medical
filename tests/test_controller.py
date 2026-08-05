@@ -1296,7 +1296,7 @@ class ControllerTests(unittest.TestCase):
         related_module = sys.modules[f"{PACKAGE}.backend.related"]
         fields = {
             "Front": "Which anticoagulant requires INR monitoring?",
-            "Back": "Warfarin inhibits VKORC1.",
+            "Extra": "Warfarin inhibits VKORC1.",
             "AnkiHub ID": "e3f9a2c1",
         }
         expected_title, expected_snippet = text.display_lines(

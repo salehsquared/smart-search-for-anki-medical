@@ -597,7 +597,7 @@ class IndexSearchTests(unittest.TestCase):
         )
         self.assertEqual(result.snippet, "Monitor potassium and creatinine.")
 
-    def test_non_displayed_field_term_stays_searchable_and_becomes_support(self) -> None:
+    def test_non_displayed_field_term_stays_searchable_but_is_never_shown(self) -> None:
         self.index.rebuild(
             [
                 IndexedNote(
@@ -619,8 +619,36 @@ class IndexSearchTests(unittest.TestCase):
             result.title,
             "Beta blockers reduce mortality after infarction.",
         )
-        self.assertIn("Carvedilol", result.snippet)
-        self.assertNotIn("acute decompensated", result.snippet)
+        # The Lecture Notes term keeps matching, but only the real Extra
+        # field may appear on the supporting line.
+        self.assertEqual(result.snippet, "Avoid in acute decompensated heart failure.")
+        self.assertNotIn("Carvedilol", result.snippet)
+        # The full field corpus stays on the result object.
+        self.assertIn("Carvedilol", result.fields["Lecture Notes"])
+
+    def test_hidden_field_term_stays_searchable_without_any_extra(self) -> None:
+        self.index.rebuild(
+            [
+                IndexedNote(
+                    2004,
+                    {
+                        "Text": "Beta blockers reduce mortality after infarction.",
+                        "Lecture Notes": "Carvedilol also blocks alpha-1 receptors.",
+                    },
+                    card_ids=(3004,),
+                    guid="needle-without-extra",
+                ),
+            ]
+        )
+        response = self.engine.search("carvedilol")
+        self.assertEqual([result.note_id for result in response.results], [2004])
+        result = response.results[0]
+        self.assertEqual(
+            result.title,
+            "Beta blockers reduce mortality after infarction.",
+        )
+        self.assertEqual(result.snippet, "")
+        self.assertNotIn("Carvedilol", f"{result.title}\n{result.snippet}")
 
     def test_internal_identity_field_stays_searchable_but_is_never_displayed(self) -> None:
         self.index.rebuild(
