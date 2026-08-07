@@ -23,7 +23,7 @@ from .models import (
     SearchResult,
 )
 from .query import QueryParser
-from .text import make_snippet, normalize_text, tokenize
+from .text import display_lines, normalize_text, tokenize
 
 
 @dataclass(frozen=True, slots=True)
@@ -796,11 +796,14 @@ def _to_search_result(
     reasons = tuple(
         sorted(candidate.reasons, key=lambda reason: (-reason.weight, reason.kind.value))
     )
+    title, snippet = display_lines(
+        document.fields, needles, note_id=document.note_id
+    )
     return SearchResult(
         note_id=document.note_id,
         card_ids=document.card_ids,
-        title=document.title,
-        snippet=make_snippet(document.plain_text, needles),
+        title=title or document.title,
+        snippet=snippet,
         decks=document.decks,
         note_type=document.note_type,
         tags=document.tags,
@@ -817,11 +820,12 @@ def _result_for_filter(document: IndexedDocument) -> SearchResult:
         "Matched the structured Anki filters.",
         1.0,
     )
+    title, snippet = display_lines(document.fields, (), note_id=document.note_id)
     return SearchResult(
         note_id=document.note_id,
         card_ids=document.card_ids,
-        title=document.title,
-        snippet=make_snippet(document.plain_text, ()),
+        title=title or document.title,
+        snippet=snippet,
         decks=document.decks,
         note_type=document.note_type,
         tags=document.tags,

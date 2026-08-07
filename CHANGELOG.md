@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [1.0.25] — 2026-08-07
 
 ### Added
 
@@ -17,9 +17,21 @@
 - Search Settings can now open each newly selected preview as its **Question**,
   **Answer**, or editable fields. Accepted changes apply immediately to an
   already-visible preview and are remembered per installation.
+- The first result's rendered card now opens automatically after each accepted
+  normal or Related search while the query field keeps focus. Empty and stale
+  responses cannot leave or reopen an outdated preview.
 
 ### Changed
 
+- Result rows are now compact and field-aware: one bold primary line from the
+  note's `Text`/`Front`/`Question` field, one short supporting excerpt shown
+  only when the note has a real `Extra` field, and a quiet `Deck › Note Type`
+  line. Rows never substitute `Back`, `Answer`, `Explanation`, or any other
+  field for the supporting line; when `Extra` is absent or empty, the second
+  line instead continues the primary text, and terms matched in hidden fields
+  remain searchable without being displayed. Raw hierarchical tags
+  no longer appear inline; they remain searchable and stay available in
+  tooltips, accessibility text, actions, and Related matching.
 - Related-card lookup uses a compact map derived from the existing local text
   index. It runs outside Anki's interface thread, never loads Semantic Search,
   and upgrades an existing index without changing its Semantic generation.
@@ -27,6 +39,9 @@
   Smart and Semantic modes. Adding `deck:`, `tag:`, `is:`, or another simple
   filter no longer changes free-text scores, ordering, aliases, corrections,
   or adaptive relevance cutoffs for cards that remain eligible.
+- Exact mode now explains its native Anki Browser semantics directly in the
+  search window: separate terms are ANDed, quoted words stay together, `OR`
+  matches either side, and `w:` requests a whole-word match.
 
 ## [1.0.24] — 2026-08-03
 

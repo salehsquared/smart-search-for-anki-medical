@@ -929,10 +929,22 @@ class ControllerTests(unittest.TestCase):
 
         self.assertFalse(errors)
         self.assertEqual(received[0].request_id, 7)
-        self.assertEqual(received[0].results[0].note_id, 1001)
+        result = received[0].results[0]
+        self.assertEqual(result.note_id, 1001)
         self.assertEqual(received[0].corrections[0].replacement, "bupropion")
-        self.assertIn("Spelling correction", received[0].results[0].match_reasons)
-        self.assertTrue(received[0].results[0].spans)
+        self.assertIn("Spelling correction", result.match_reasons)
+        # The corrected term surfaces and highlights on the primary line;
+        # the supporting line remains the bounded Extra excerpt.
+        self.assertEqual(result.title, "Bupropion treats depression.")
+        self.assertEqual(result.snippet, "Brand name Wellbutrin.")
+        self.assertEqual(len(result.title_spans), 1)
+        title_span = result.title_spans[0]
+        self.assertEqual(
+            result.title[title_span.start : title_span.end],
+            "Bupropion",
+        )
+        self.assertEqual(title_span.kind, contracts.MatchKind.CORRECTION)
+        self.assertEqual(result.spans, ())
 
     def test_unfinished_filter_searches_completed_terms_without_error(self) -> None:
         context = self.backend._context
@@ -1276,6 +1288,159 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(received[0].results[0].card_states, ())
         self.assertEqual(self.backend._active_cancellations, set())
 
+    def test_smart_native_and_related_rows_share_compact_display_contract(
+        self,
+    ) -> None:
+        text = sys.modules[f"{PACKAGE}.backend.text"]
+        index_module = sys.modules[f"{PACKAGE}.backend.index"]
+        related_module = sys.modules[f"{PACKAGE}.backend.related"]
+        fields = {
+            "Front": "Which anticoagulant requires INR monitoring?",
+            "Extra": "Warfarin inhibits VKORC1.",
+            "AnkiHub ID": "e3f9a2c1",
+        }
+        expected_title, expected_snippet = text.display_lines(
+            fields, ("warfarin",), note_id=5001
+        )
+        self.assertEqual(expected_title, "Which anticoagulant requires INR monitoring?")
+        self.assertEqual(expected_snippet, "Warfarin inhibits VKORC1.")
+
+        request = contracts.SearchRequest(
+            request_id=90,
+            query="warfarin",
+            mode=contracts.SearchMode.SMART,
+        )
+        term = models.QueryTerm(text="warfarin", normalized="warfarin")
+        parsed = models.ParsedQuery(
+            raw="warfarin",
+            free_terms=(term,),
+            anki_filters=(),
+            anki_filter_query="",
+        )
+        backend_result = models.SearchResult(
+            note_id=5001,
+            card_ids=(6001,),
+            title=expected_title,
+            snippet=expected_snippet,
+            decks=("AnKing",),
+            note_type="Basic",
+            tags=("#AK_Step1_v12::#UWorld::Step::19231",),
+            fields=fields,
+            score=1.0,
+            reasons=(
+                models.MatchReason(
+                    models.MatchKind.EXACT_TERM, "All terms present", "", 0.035
+                ),
+            ),
+        )
+        smart = controller._to_ui_response(
+            request,
+            models.SearchResponse(results=(backend_result,), parsed_query=parsed),
+        )
+        smart_result = smart.results[0]
+        self.assertEqual(smart_result.title, expected_title)
+        self.assertEqual(smart_result.snippet, expected_snippet)
+        # Highlight spans index the final supporting excerpt, not the corpus.
+        self.assertEqual(len(smart_result.spans), 1)
+        span = smart_result.spans[0]
+        self.assertEqual(expected_snippet[span.start : span.end], "Warfarin")
+        self.assertEqual(span.kind, contracts.MatchKind.EXACT)
+        # Tags stay intact on the result object even though rows hide them.
+        self.assertEqual(
+            smart_result.tags, ("#AK_Step1_v12::#UWorld::Step::19231",)
+        )
+
+        native = controller._native_ui_response(
+            request,
+            (
+                models.IndexedNote(
+                    note_id=5002,
+                    fields=fields,
+                    tags=("Cardiology",),
+                    decks=("AnKing",),
+                    note_type="Basic",
+                    card_ids=(6002,),
+                    guid="native-contract",
+                ),
+            ),
+            "Smart Search was unavailable; Exact search was used.",
+            parsed=parsed,
+        )
+        native_result = native.results[0]
+        self.assertEqual(native_result.title, expected_title)
+        self.assertEqual(native_result.snippet, expected_snippet)
+        self.assertEqual(native_result.match_reasons, ("Native Anki search",))
+        self.assertEqual(len(native_result.spans), 1)
+        span = native_result.spans[0]
+        self.assertEqual(expected_snippet[span.start : span.end], "Warfarin")
+
+        filter_only = controller._native_ui_response(
+            contracts.SearchRequest(
+                request_id=91,
+                query='deck:"AnKing"',
+                mode=contracts.SearchMode.EXACT,
+            ),
+            (
+                models.IndexedNote(
+                    note_id=5004,
+                    fields={
+                        "Text": "Primary study content.",
+                        "Extra": "Preferred explanation.",
+                        "Lecture Notes": "AnKing import notes.",
+                    },
+                    decks=("AnKing",),
+                    card_ids=(6004,),
+                    guid="filter-only-contract",
+                ),
+            ),
+            "",
+            parsed=models.ParsedQuery(
+                raw='deck:"AnKing"',
+                free_terms=(),
+                anki_filters=('deck:"AnKing"',),
+                anki_filter_query='deck:"AnKing"',
+            ),
+        )
+        self.assertEqual(filter_only.results[0].snippet, "Preferred explanation.")
+
+        normalized = controller._highlight_spans(
+            "Behçet disease and β-blockers",
+            literal_terms={"behcet", "beta"},
+            correction_terms=set(),
+            alias_terms=set(),
+        )
+        self.assertEqual(
+            tuple("Behçet disease and β-blockers"[span.start : span.end] for span in normalized),
+            ("Behçet", "β"),
+        )
+
+        source_tag = related_module.related_source_tags(
+            ("#AK_Step2_v12::#UWorld::Step::19231",)
+        )[0]
+        hit = types.SimpleNamespace(
+            document=index_module.IndexedDocument(
+                note_id=5003,
+                card_ids=(6003,),
+                title=expected_title,
+                plain_text="\n".join(fields.values()),
+                normalized_text="",
+                fields=fields,
+                tags=(source_tag.display,),
+                decks=("AnKing",),
+                note_type="Basic",
+            ),
+            shared_tags=(source_tag,),
+            tag_frequencies=(4,),
+        )
+        related_result = controller._related_ui_result(hit)
+        self.assertEqual(related_result.title, expected_title)
+        self.assertEqual(related_result.snippet, expected_snippet)
+        self.assertEqual(
+            related_result.match_reasons, ("Related · UWorld · 19231",)
+        )
+        self.assertEqual(related_result.related_by_tags, (source_tag.display,))
+        self.assertEqual(related_result.tags, (source_tag.display,))
+
     def test_related_lookup_waits_for_the_rebuild_engine_lane(self) -> None:
         self.backend.deactivate_profile()
         backend = _ConcurrentExternalBackend(
@@ -1491,6 +1656,27 @@ class ControllerTests(unittest.TestCase):
             ['note:"AnKing Cloze" BUPROPION'],
         )
         self.assertEqual(received[0].warnings, ())
+
+    def test_exact_mode_preserves_separate_terms_and_quoted_phrases(self) -> None:
+        for request_id, query in enumerate(
+            (
+                "heart failure",
+                '"heart failure"',
+                'heart "reduced ejection fraction"',
+                "heart OR failure",
+                "w:heart -failure",
+            ),
+            start=81,
+        ):
+            received = []
+            request = contracts.SearchRequest(
+                request_id=request_id,
+                query=query,
+                mode=contracts.SearchMode.EXACT,
+            )
+            self.backend.submit_search(request, received.append, self.fail)
+            self.assertEqual(self.backend.mw.col.queries[-1], query)
+            self.assertEqual(received[0].warnings, ())
 
     def test_mixed_boolean_smart_query_preserves_native_semantics(self) -> None:
         self.backend._set_index_state(
@@ -3661,6 +3847,122 @@ class ControllerTests(unittest.TestCase):
         addon._preview_preference_changed(False)
         self.assertGreaterEqual(timer.stop_count, 1)
         self.assertIsNone(addon._pending_preview_result)
+
+    def test_initial_preview_restores_results_when_launched_from_control(
+        self,
+    ) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        result = contracts.SearchResult(
+            note_id=7,
+            card_ids=(71,),
+            title="First related result",
+        )
+        focused: list[str] = []
+        query = types.SimpleNamespace(hasFocus=lambda: False)
+        results = types.SimpleNamespace(
+            hasFocus=lambda: False,
+            setFocus=lambda: focused.append("results"),
+        )
+        addon._dialog = types.SimpleNamespace(
+            search=query,
+            results=results,
+            preview_pane=object(),
+            set_preview_active=lambda _active: None,
+        )
+        addon._ui_controller = types.SimpleNamespace(
+            settings=types.SimpleNamespace(
+                preview_enabled=True,
+                preview_default=contracts.PreviewDefault.QUESTION,
+            )
+        )
+        preview = types.SimpleNamespace(show=lambda: None)
+        fake_qt = types.ModuleType("aqt.qt")
+        fake_qt.QTimer = types.SimpleNamespace(
+            singleShot=lambda _delay, callback: callback()
+        )
+        fake_aqt = types.ModuleType("aqt")
+        fake_aqt.qt = fake_qt
+
+        with (
+            patch.dict(
+                sys.modules,
+                {"aqt": fake_aqt, "aqt.qt": fake_qt},
+            ),
+            patch.object(
+                controller,
+                "create_inline_result_inspector",
+                return_value=preview,
+            ),
+        ):
+            addon._toggle_previewer(
+                result,
+                restore_results_if_unfocused=True,
+            )
+
+        self.assertEqual(focused, ["results"])
+
+    def test_initial_preview_bypasses_focus_but_stays_current(
+        self,
+    ) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        first = contracts.SearchResult(
+            note_id=7,
+            card_ids=(71,),
+            title="First",
+        )
+        replacement = contracts.SearchResult(
+            note_id=8,
+            card_ids=(81,),
+            title="Replacement",
+        )
+        current = [first]
+        addon._dialog = types.SimpleNamespace(
+            results=types.SimpleNamespace(
+                hasFocus=lambda: False,
+                current_result=lambda: current[0],
+            ),
+            set_preview_active=lambda _active: None,
+        )
+        addon._ui_controller = types.SimpleNamespace(
+            settings=types.SimpleNamespace(preview_enabled=True)
+        )
+        timer = _FakeTimer()
+        addon._preview_open_timer = timer
+
+        addon._initial_preview_requested(first)
+        self.assertEqual(timer.starts, [25])
+        self.assertEqual(addon._pending_preview_result, first)
+        self.assertFalse(addon._pending_preview_requires_focus)
+        addon._cancel_pending_previewer()
+        self.assertIsNone(addon._pending_preview_result)
+        self.assertTrue(addon._pending_preview_requires_focus)
+        with patch.object(addon, "_toggle_previewer") as toggle:
+            addon._open_pending_previewer()
+        toggle.assert_not_called()
+
+        addon._initial_preview_requested(first)
+        with patch.object(addon, "_toggle_previewer") as toggle:
+            addon._open_pending_previewer()
+        toggle.assert_called_once_with(
+            first,
+            restore_results_if_unfocused=True,
+        )
+
+        addon._initial_preview_requested(first)
+        current[0] = replacement
+        with patch.object(addon, "_toggle_previewer") as toggle:
+            addon._open_pending_previewer()
+        toggle.assert_not_called()
+        self.assertIsNone(addon._pending_preview_result)
+        self.assertTrue(addon._pending_preview_requires_focus)
 
     def test_close_dialog_disposes_controller_before_deferred_deletion(
         self,

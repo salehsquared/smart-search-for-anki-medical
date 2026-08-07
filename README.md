@@ -36,7 +36,7 @@ type naturally, and press **Return** to open the result in Anki's Browser.
 | Mode | Best for | Network/model required |
 | --- | --- | --- |
 | **Smart** | Typos, medical aliases, phrases, and everyday retrieval | No |
-| **Exact** | Literal text and full native Anki search syntax | No |
+| **Exact** | Standard Anki Browser syntax: separate terms are ANDed; quotes preserve a phrase | No |
 | **Semantic** | Finding cards by clinical meaning | One explicit local setup |
 
 Smart/Exact and Semantic use separate local indexes. Smart and Exact remain

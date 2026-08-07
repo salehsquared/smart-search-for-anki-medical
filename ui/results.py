@@ -1,11 +1,14 @@
 """Result list: model, custom delegate, and view.
 
 Each note renders as a separated rounded card on the window background:
-a bold elided title with a quiet sibling-card count at the right, a
-two-line span-highlighted snippet, a muted deck/note-type/tags line, and
-a row of compact colored match-reason chips. The current row is marked
-with a violet outline and subtle tint — never a solid bright fill — so
-text contrast survives selection. Raw card HTML is never rendered —
+a bold elided primary line with a quiet sibling-card count at the right, an
+optional single-line span-highlighted Extra excerpt, a muted deck/note-type
+line, and a row of compact colored match-reason chips. Notes without a real
+`Extra` field render no supporting excerpt; the same vertical area instead
+shows up to two wrapped lines of the primary text so no unrelated field is
+ever substituted. The current row is
+marked with a violet outline and subtle tint — never a solid bright fill —
+so text contrast survives selection. Raw card HTML is never rendered —
 snippets are plain text and every span is clamped and merged before
 painting.
 """
@@ -17,7 +20,7 @@ from dataclasses import replace
 from html import escape
 from typing import Optional, Sequence
 
-from .contracts import SearchResult, clamp_spans, merge_spans
+from .contracts import HighlightSpan, SearchResult, clamp_spans, merge_spans
 from .widgets import (  # the Qt shim lives here
     QAbstractListModel,
     QApplication,
@@ -80,6 +83,27 @@ _DARK_FLAG_COLORS = {
 _MOUSE_WHEEL_SINGLE_STEP_PX = 40
 
 
+def _wrap_primary(text: str, fm, width: int) -> tuple[str, str]:
+    """Split plain ``text`` into a first line fitting ``width`` and the rest.
+
+    Word boundaries are preferred; the remainder is returned unelided so the
+    caller can clip it to the second-line area. Display text reaching this
+    helper is already whitespace-collapsed, so rejoining on single spaces
+    preserves the string exactly.
+    """
+
+    if fm.horizontalAdvance(text) <= width:
+        return text, ""
+    words = text.split(" ")
+    line = ""
+    for index, word in enumerate(words):
+        candidate = word if not line else f"{line} {word}"
+        if line and fm.horizontalAdvance(candidate) > width:
+            return line, " ".join(words[index:])
+        line = candidate
+    return line, ""
+
+
 def snippet_html(snippet: str, spans, fg_hex: str, hl_hex: str, *, bold_only: bool = False) -> str:
     """Build escaped, span-highlighted HTML for a plain-text snippet."""
     safe_spans = merge_spans(clamp_spans(spans, len(snippet)))
@@ -132,6 +156,32 @@ def card_state_summary(result: SearchResult) -> str:
             flagged.append(f"unflagged {unflagged}")
         parts.append("Flags: " + ", ".join(flagged))
     return ". ".join(parts) + ("." if parts else "")
+
+
+def tag_summary(tags: Sequence[str], *, limit: int = 6) -> str:
+    """Return a bounded metadata summary without changing stored tags."""
+
+    visible = tuple(str(tag) for tag in tags[:limit] if str(tag))
+    if not visible:
+        return ""
+    hidden = max(0, len(tags) - len(visible))
+    suffix = f" (+{hidden} more)" if hidden else ""
+    return "Tags: " + ", ".join(visible) + suffix
+
+
+def compact_deck_label(deck: str) -> str:
+    """Show the leaf of a hierarchical Anki deck in the result row."""
+
+    parts = tuple(part.strip() for part in str(deck).split("::") if part.strip())
+    return parts[-1] if parts else str(deck).strip()
+
+
+def compact_note_type_label(note_type: str) -> str:
+    """Drop a parenthetical qualifier from the visible note-type label."""
+
+    clean = str(note_type).strip()
+    concise, separator, _qualifier = clean.partition(" (")
+    return concise if separator and concise else clean
 
 
 class ResultsModel(QAbstractListModel):
@@ -432,16 +482,20 @@ class ResultsModel(QAbstractListModel):
                     else "Exact related tags"
                 )
                 details.append(label + ": " + ", ".join(result.related_by_tags))
+            tags = tag_summary(result.tags)
+            if tags:
+                details.append(tags)
+            compact_deck = compact_deck_label(result.deck)
+            if result.deck and compact_deck != result.deck:
+                details.append("Deck: " + result.deck)
+            compact_note_type = compact_note_type_label(result.note_type)
+            if result.note_type and compact_note_type != result.note_type:
+                details.append("Note type: " + result.note_type)
             return "\n".join(details) or None
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.AccessibleTextRole):
-            parts = [result.title, result.deck, result.note_type]
+            parts = [result.title, result.snippet, result.deck, result.note_type]
             if result.match_reasons:
                 parts.append("matched by " + ", ".join(result.match_reasons))
-            if result.related_by_tags:
-                parts.append(
-                    "related through exact tag "
-                    + ", ".join(result.related_by_tags)
-                )
             if result.sibling_count > 1:
                 parts.append(f"{result.sibling_count} cards")
             if role == Qt.ItemDataRole.AccessibleTextRole:
@@ -454,6 +508,14 @@ class ResultsModel(QAbstractListModel):
                 state_summary = card_state_summary(result)
                 if state_summary:
                     parts.append(state_summary)
+                tags = tag_summary(result.tags)
+                if tags:
+                    parts.append(tags)
+                if result.related_by_tags:
+                    parts.append(
+                        "related through exact tag "
+                        + ", ".join(result.related_by_tags)
+                    )
             return ", ".join(p for p in parts if p)
         return None
 
@@ -790,49 +852,133 @@ class ResultDelegate(QStyledItemDelegate):
         painter.setFont(title_font)
         title_fm = painter.fontMetrics()
         title_width = width - (count_width + 18 if count_width else 0)
-        title = title_fm.elidedText(
-            result.title or "(untitled note)",
-            Qt.TextElideMode.ElideRight,
-            title_width,
-        )
-        painter.setPen(QColor(colors["text"]))
-        painter.drawText(
-            left,
-            y,
-            title_width,
-            title_fm.height(),
-            int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-            title,
-        )
-
+        title_text = result.title or "(untitled note)"
         line_h = option.fontMetrics.height()
         snippet_y = y + title_fm.height() + 5
-        doc = QTextDocument()
-        doc.setDocumentMargin(0)
-        doc.setDefaultFont(option.font)
-        doc.setHtml(
-            '<div style="color:'
-            + _hex(QColor(colors["text"]))
-            + ';">'
-            + snippet_html(
-                result.snippet,
-                result.spans,
-                fg_hex=_hex(QColor(colors["text"])),
-                hl_hex=_hex(QColor(colors["accent_soft"])),
+
+        if not result.snippet:
+            # No real Extra excerpt exists for this note. Rather than
+            # substituting another field, reuse the second-line area for up
+            # to two clean wrapped lines of the primary text: the bold first
+            # line keeps the usual title metrics and the continuation takes
+            # the exact geometry and font of the former supporting line.
+            first, rest = _wrap_primary(title_text, title_fm, title_width)
+            offset = len(first) + 1  # the collapsed space between lines
+            first = title_fm.elidedText(
+                first,
+                Qt.TextElideMode.ElideRight,
+                title_width,
             )
-            + "</div>"
-        )
-        doc.setTextWidth(width)
-        painter.save()
-        painter.translate(left, snippet_y)
-        painter.setClipRect(0, 0, width, line_h + 3)
-        doc.drawContents(painter)
-        painter.restore()
+            for span in merge_spans(clamp_spans(result.title_spans, len(first))):
+                span_x = title_fm.horizontalAdvance(first[: span.start])
+                span_width = title_fm.horizontalAdvance(
+                    first[span.start : span.end]
+                )
+                if span_width:
+                    painter.fillRect(
+                        QRect(left + span_x, y, span_width, title_fm.height()),
+                        QColor(colors["accent_soft"]),
+                    )
+            painter.setPen(QColor(colors["text"]))
+            painter.drawText(
+                left,
+                y,
+                title_width,
+                title_fm.height(),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                first,
+            )
+            if rest:
+                rest_spans = tuple(
+                    HighlightSpan(
+                        max(0, span.start - offset),
+                        span.end - offset,
+                        span.kind,
+                    )
+                    for span in result.title_spans
+                    if span.end > offset
+                )
+                doc = QTextDocument()
+                doc.setDocumentMargin(0)
+                doc.setDefaultFont(option.font)
+                doc.setHtml(
+                    '<div style="color:'
+                    + _hex(QColor(colors["text"]))
+                    + ';">'
+                    + snippet_html(
+                        rest,
+                        rest_spans,
+                        fg_hex=_hex(QColor(colors["text"])),
+                        hl_hex=_hex(QColor(colors["accent_soft"])),
+                    )
+                    + "</div>"
+                )
+                doc.setTextWidth(width)
+                painter.save()
+                painter.translate(left, snippet_y)
+                painter.setClipRect(0, 0, width, line_h + 3)
+                doc.drawContents(painter)
+                painter.restore()
+        else:
+            title = title_fm.elidedText(
+                title_text,
+                Qt.TextElideMode.ElideRight,
+                title_width,
+            )
+            for span in merge_spans(clamp_spans(result.title_spans, len(title))):
+                span_x = title_fm.horizontalAdvance(title[: span.start])
+                span_width = title_fm.horizontalAdvance(
+                    title[span.start : span.end]
+                )
+                if span_width:
+                    painter.fillRect(
+                        QRect(left + span_x, y, span_width, title_fm.height()),
+                        QColor(colors["accent_soft"]),
+                    )
+            painter.setPen(QColor(colors["text"]))
+            painter.drawText(
+                left,
+                y,
+                title_width,
+                title_fm.height(),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                title,
+            )
+
+            doc = QTextDocument()
+            doc.setDocumentMargin(0)
+            doc.setDefaultFont(option.font)
+            doc.setHtml(
+                '<div style="color:'
+                + _hex(QColor(colors["text"]))
+                + ';">'
+                + snippet_html(
+                    result.snippet,
+                    result.spans,
+                    fg_hex=_hex(QColor(colors["text"])),
+                    hl_hex=_hex(QColor(colors["accent_soft"])),
+                )
+                + "</div>"
+            )
+            doc.setTextWidth(width)
+            painter.save()
+            painter.translate(left, snippet_y)
+            painter.setClipRect(0, 0, width, line_h + 3)
+            doc.drawContents(painter)
+            painter.restore()
 
         meta_y = snippet_y + line_h + 6
-        meta_parts = [part for part in (result.deck, result.note_type) if part]
-        if result.tags:
-            meta_parts.append(" ".join("#" + tag for tag in result.tags[:4]))
+        # Visible metadata stays quiet: deck and note type only. Raw
+        # hierarchical tags remain on the result object for tooltips,
+        # accessibility, actions, filtering, and Related matching.
+        meta_parts = [
+            part
+            for part in (
+                compact_deck_label(result.deck),
+                compact_note_type_label(result.note_type),
+            )
+            if part
+        ]
         meta_font = QFont(option.font)
         meta_font.setPointSizeF(max(meta_font.pointSizeF() - 0.8, 8.0))
         meta_font.setBold(True)
@@ -860,7 +1006,9 @@ class ResultDelegate(QStyledItemDelegate):
         painter.setFont(chip_font)
         chip_fm = painter.fontMetrics()
         chip_x = left
-        named_reasons = list(result.match_reasons[:3])
+        # One explanation is enough at a glance. Additional reasons remain
+        # represented by a compact +N chip and in the accessible row text.
+        named_reasons = list(result.match_reasons[:1])
         hidden_reasons = max(0, len(result.match_reasons) - len(named_reasons))
 
         def chip_width(label: str) -> int:

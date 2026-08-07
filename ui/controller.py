@@ -57,6 +57,8 @@ class SearchController(QObject):
     undoRequested = pyqtSignal()
     previewPreferenceChanged = pyqtSignal(bool)
     previewDefaultChanged = pyqtSignal(object)
+    initialPreviewRequested = pyqtSignal(object)  # SearchResult | None
+    previewAutoOpenCancelled = pyqtSignal()
 
     # Internal marshalling signals (emitted from arbitrary threads).
     _sig_search_success = pyqtSignal(int, object)
@@ -382,6 +384,7 @@ class SearchController(QObject):
         self._request_counter += 1
         self._active_request_id = None
         self._cancel_pending_search()
+        self.previewAutoOpenCancelled.emit()
 
     def _cancel_pending_search(self) -> None:
         if self._cancel_search is not None:
@@ -403,6 +406,15 @@ class SearchController(QObject):
         self._cancel_search = None
         visible = [c for c in response.corrections if c not in self._dismissed]
         self._dialog.show_response(response, visible)
+        # A newly accepted result set is the one programmatic selection that
+        # should open its preview without moving focus out of the query field.
+        # Emit here, after stale-response gating, rather than from
+        # ``show_response()``: correction redraws and restoring a related-card
+        # origin also render through that method.  ``None`` closes a preview
+        # left behind by an accepted empty response.
+        self.initialPreviewRequested.emit(
+            response.results[0] if response.results else None
+        )
 
     def _on_search_error(self, request_id: int, message: str) -> None:
         if self._disposed or not self._active:
@@ -508,6 +520,9 @@ class SearchController(QObject):
             )
             return
         self._dialog.show_related_response(response)
+        self.initialPreviewRequested.emit(
+            response.results[0] if response.results else None
+        )
 
     def _on_related_error(self, request_id: int, message: str) -> None:
         if self._disposed or not self._active:

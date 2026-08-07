@@ -15,7 +15,7 @@ outside Anki; import the submodules you need directly.
 
 from __future__ import annotations
 
-__version__ = "1.0.24"
+__version__ = "1.0.25"
 
 __all__ = [
     "SearchDialog",

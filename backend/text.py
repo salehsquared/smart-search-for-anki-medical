@@ -6,7 +6,7 @@ import html
 from html.parser import HTMLParser
 import re
 import unicodedata
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 
 _BLOCK_TAGS = {
@@ -179,6 +179,62 @@ def tokenize(value: str, *, already_normalized: bool = False) -> tuple[str, ...]
     return tuple(match.group(0) for match in _WORD_RE.finditer(normalized))
 
 
+def _normalized_with_source_offsets(value: str) -> tuple[str, tuple[int, ...]]:
+    """Normalize text while retaining an offset for every output character.
+
+    Unicode case-folding, diacritic removal, and medical-symbol expansion can
+    change string length. Keeping this map lets display snippets and highlight
+    spans locate normalized matches in the original human-readable text.
+    """
+
+    normalized_characters: list[str] = []
+    source_offsets: list[int] = []
+    for source_index, character in enumerate(str(value)):
+        fragment = unicodedata.normalize("NFKC", character).translate(
+            _CHAR_TRANSLATION
+        )
+        fragment = unicodedata.normalize("NFKD", fragment.casefold())
+        fragment = "".join(
+            item for item in fragment if not unicodedata.combining(item)
+        )
+        for item in fragment:
+            if item.isspace():
+                if normalized_characters and normalized_characters[-1] != " ":
+                    normalized_characters.append(" ")
+                    source_offsets.append(source_index)
+                continue
+            normalized_characters.append(item)
+            source_offsets.append(source_index)
+    if normalized_characters and normalized_characters[-1] == " ":
+        normalized_characters.pop()
+        source_offsets.pop()
+    return "".join(normalized_characters), tuple(source_offsets)
+
+
+def normalized_spans(value: str, needle: str) -> tuple[tuple[int, int], ...]:
+    """Return nonoverlapping original-text spans for a normalized needle."""
+
+    normalized, source_offsets = _normalized_with_source_offsets(value)
+    target = normalize_text(needle)
+    if not normalized or not target:
+        return ()
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    while cursor <= len(normalized) - len(target):
+        position = normalized.find(target, cursor)
+        if position < 0:
+            break
+        end_position = position + len(target) - 1
+        spans.append(
+            (
+                source_offsets[position],
+                source_offsets[end_position] + 1,
+            )
+        )
+        cursor = position + len(target)
+    return tuple(spans)
+
+
 def join_searchable_text(parts: Iterable[str]) -> str:
     return normalize_text(" ".join(part for part in parts if part))
 
@@ -202,21 +258,181 @@ def make_snippet(
     clean = _SPACE_RE.sub(" ", plain_text).strip()
     if not clean:
         return ""
-    normalized = normalize_text(clean)
-    positions = [
-        normalized.find(normalize_text(needle))
+    matches = [
+        span
         for needle in needles
-        if normalize_text(needle)
+        for span in normalized_spans(clean, needle)
     ]
-    positions = [position for position in positions if position >= 0]
-    if not positions:
+    if not matches:
         return truncate_text(clean, maximum)
-    center = min(positions)
-    start = max(0, center - radius)
-    end = min(len(clean), center + radius)
+    match_start, match_end = min(matches, key=lambda span: (span[0], span[1]))
+    start = max(0, match_start - radius)
+    end = min(len(clean), match_end + radius)
+    if start:
+        next_boundary = clean.find(" ", start, match_start)
+        if next_boundary >= 0:
+            start = next_boundary + 1
+    if end < len(clean):
+        previous_boundary = clean.rfind(" ", match_end, end)
+        if previous_boundary >= 0:
+            end = previous_boundary
     snippet = clean[start:end].strip()
     if start:
         snippet = "…" + snippet
     if end < len(clean):
         snippet += "…"
     return truncate_text(snippet, maximum)
+
+
+# ---------------------------------------------------------------------------
+# Compact result-card display contract
+# ---------------------------------------------------------------------------
+
+# Field names (compared case-insensitively after normalization) that hold the
+# card's primary prompt. These match the conventions used by the common
+# medical note types (AnKing, Basic, and Cloze variants) without depending
+# on any one template.
+_PRIMARY_FIELD_NAMES = ("text", "front", "question", "prompt", "header")
+# Only a field whose normalized name is exactly ``extra`` may become the
+# supporting line. ``Back``, ``Answer``, ``Explanation``, ``Back Extra``,
+# ``Extra 1``, lecture/resource fields, and every other field stay searchable
+# but are never substituted for the supporting line.
+_SUPPORT_FIELD_NAME = "extra"
+
+# Internal/admin/identity and image-mask fields never make useful result-row
+# text: they hold sync identities, display-mode toggles, or encoded mask data
+# rather than study content.
+_INTERNAL_FIELD_TOKENS = {
+    "ankihub",
+    "hidden",
+    "id",
+    "guid",
+    "image",
+    "images",
+    "img",
+    "mask",
+    "masks",
+    "occlusion",
+}
+_INTERNAL_FIELD_NAMES = {
+    "related card",
+    "related cards",
+}
+
+# Display bounds. The primary line is represented in the accessible row text,
+# so it is bounded independently of paint-time elision; the supporting line is
+# a single short excerpt.
+PRIMARY_DISPLAY_LIMIT = 220
+SUPPORT_DISPLAY_LIMIT = 180
+
+
+def _is_internal_field(name: str) -> bool:
+    """Whether a field name marks identity, admin, or image-mask content."""
+
+    normalized = normalize_text(name)
+    if not normalized:
+        return True
+    if normalized in _INTERNAL_FIELD_NAMES:
+        return True
+    if "one by one" in normalized:
+        return True
+    return bool(set(tokenize(normalized, already_normalized=True)) & _INTERNAL_FIELD_TOKENS)
+
+
+def display_lines(
+    fields: Mapping[str, str],
+    needles: Iterable[str] = (),
+    *,
+    note_id: int = 0,
+    primary_limit: int = PRIMARY_DISPLAY_LIMIT,
+    support_limit: int = SUPPORT_DISPLAY_LIMIT,
+) -> tuple[str, str]:
+    """Return the compact ``(primary, supporting)`` lines for one note.
+
+    This is a pure display transformation over fields already materialized
+    for a returned note; the complete field corpus stays indexed and
+    searchable. The primary line prefers ``Text``/``Front``/``Question``
+    (case-insensitively), then the first nonempty non-internal textual field.
+    The supporting line is exactly one bounded excerpt from the note's real
+    ``Extra`` field (normalized name match only). It never repeats the primary
+    text, and it is never substituted with ``Back``, ``Answer``,
+    ``Explanation``, ``Back Extra``, ``Extra 1``, lecture/resource fields, or
+    any other field — those stay searchable without being displayed. When the
+    query matches later inside ``Extra``, the excerpt is centered on that
+    match; no other field may be surfaced to explain a match. A note with no
+    displayable text falls back to ``Note <id>`` and no supporting line.
+    """
+
+    # Reject known administrative/media fields before cleaning their values.
+    # Image-occlusion masks and generated resource fields can be much larger
+    # than the human-readable content, and result projection must stay cheap.
+    displayable = [
+        (str(name), cleaned)
+        for name, value in fields.items()
+        if not _is_internal_field(str(name))
+        and (cleaned := strip_html_and_cloze(value))
+    ]
+
+    primary_index: int | None = None
+    for preferred in _PRIMARY_FIELD_NAMES:
+        for index, (name, _text) in enumerate(displayable):
+            if normalize_text(name) == preferred:
+                primary_index = index
+                break
+        if primary_index is not None:
+            break
+    if primary_index is None and displayable:
+        primary_index = 0
+
+    if primary_index is None:
+        primary = f"Note {int(note_id)}" if int(note_id) > 0 else ""
+        return primary, ""
+
+    primary_full = displayable[primary_index][1]
+    primary = truncate_text(primary_full, primary_limit)
+    primary_normalized = normalize_text(primary_full)
+    remaining = [
+        (name, text)
+        for index, (name, text) in enumerate(displayable)
+        if index != primary_index and normalize_text(text) != primary_normalized
+    ]
+    normalized_needles = tuple(
+        dict.fromkeys(
+            needle
+            for needle in (normalize_text(value) for value in needles)
+            if needle
+        )
+    )
+    extra_text = ""
+    for name, text in remaining:
+        if normalize_text(name) == _SUPPORT_FIELD_NAME:
+            extra_text = text
+            break
+    if not extra_text:
+        return primary, ""
+
+    def matching_needles(value: str) -> set[str]:
+        normalized_value = normalize_text(value)
+        return {
+            needle for needle in normalized_needles if needle in normalized_value
+        }
+
+    # A query term matched only later inside Extra earns a match-centered
+    # excerpt from Extra itself; otherwise the excerpt starts at the cleaned
+    # beginning of the field. No other field is ever surfaced.
+    uncovered_needles = tuple(
+        needle
+        for needle in normalized_needles
+        if needle not in matching_needles(primary)
+    )
+    if uncovered_needles and matching_needles(extra_text) & set(uncovered_needles):
+        support = make_snippet(
+            extra_text,
+            uncovered_needles,
+            maximum=support_limit,
+        )
+    else:
+        support = truncate_text(extra_text, support_limit)
+    if normalize_text(support) == normalize_text(primary):
+        support = ""
+    return primary, support

@@ -140,6 +140,7 @@ except ImportError:  # standalone development / testing
 from .contracts import (
     AboutInfo,
     Correction,
+    EXACT_SEARCH_DETAILS,
     FilterChip,
     IndexState,
     IndexStatus,
@@ -310,7 +311,7 @@ class SegmentedModeControl(QWidget, PaletteMixin):
 
         hints = {
             SearchMode.SMART: f"Smart search: typo tolerance and aliases ({_PRIMARY_KEY}+1)",
-            SearchMode.EXACT: f"Exact search: literal text match ({_PRIMARY_KEY}+2)",
+            SearchMode.EXACT: f"{EXACT_SEARCH_DETAILS} ({_PRIMARY_KEY}+2)",
             SearchMode.SEMANTIC: f"Semantic search: meaning-based match ({_PRIMARY_KEY}+3)",
         }
         for mode in (SearchMode.SMART, SearchMode.EXACT, SearchMode.SEMANTIC):

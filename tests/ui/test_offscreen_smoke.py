@@ -421,6 +421,226 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertFalse(dialog.grab().isNull())
         dialog.deleteLater()
 
+    def test_row_metadata_hides_raw_tags_but_accessibility_stays_complete(
+        self,
+    ) -> None:
+        source_tag = "#AK_Step2_v12::#UWorld::Step::19231"
+        result = SearchResult(
+            note_id=43,
+            card_ids=(201, 202),
+            card_states=(
+                CardState(201, flag=1, suspended=True),
+                CardState(202),
+            ),
+            title="Hypertension screening and confirmation",
+            snippet="Confirm an elevated office blood pressure.",
+            deck="Synthetic FM Shelf",
+            note_type="Preventive Care",
+            tags=(source_tag,),
+            match_reasons=("Related · UWorld · 19231",),
+            related_by_tags=(source_tag,),
+            sibling_count=2,
+        )
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_response(
+            SearchResponse(
+                request_id=3,
+                query="hypertension",
+                results=(
+                    result,
+                    SearchResult(
+                        note_id=44,
+                        card_ids=(203,),
+                        title="Adult immunization intervals",
+                        snippet="Review age, pregnancy, and risk conditions.",
+                        deck="Synthetic FM Shelf",
+                        note_type="Immunization",
+                        tags=("Synthetic::#UWorld::Step::77777",),
+                        match_reasons=("exact filter",),
+                        sibling_count=1,
+                    ),
+                ),
+                total_results=2,
+            ),
+            (),
+        )
+        self.app.processEvents()
+        index = dialog.results.results_model().index(0, 0)
+
+        display = index.data(Qt.ItemDataRole.DisplayRole)
+        accessible = index.data(Qt.ItemDataRole.AccessibleTextRole)
+        tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
+        # The displayed lines carry the compact primary/support contract.
+        self.assertIn(result.title, display)
+        self.assertIn(result.snippet, display)
+        self.assertIn("Synthetic FM Shelf", display)
+        self.assertIn("Preventive Care", display)
+        # A plain tagged row never exposes raw hierarchical tags in the text
+        # Qt displays, while the tags stay on the result object itself.
+        plain_index = dialog.results.results_model().index(1, 0)
+        plain_display = plain_index.data(Qt.ItemDataRole.DisplayRole)
+        self.assertNotIn("Synthetic::#UWorld::Step::77777", plain_display)
+        self.assertNotIn("#UWorld", plain_display)
+        self.assertIn("Adult immunization intervals", plain_display)
+        self.assertIn("Review age, pregnancy, and risk conditions.", plain_display)
+        # Accessible text keeps the full row summary.
+        self.assertIn(result.title, accessible)
+        self.assertIn(result.snippet, accessible)
+        self.assertTrue(accessible.startswith("not checked"))
+        self.assertIn("2 cards", accessible)
+        self.assertIn("Related · UWorld · 19231", accessible)
+        self.assertIn("1 of 2 cards suspended", accessible)
+        self.assertIn("Tags:", accessible)
+        self.assertIn(source_tag, accessible)
+        # The tooltip retains the precise live-state and exact related tags.
+        self.assertIn("Flags: red 1, unflagged 1", tooltip)
+        self.assertIn(source_tag, tooltip)
+        plain_tooltip = plain_index.data(Qt.ItemDataRole.ToolTipRole)
+        plain_accessible = plain_index.data(Qt.ItemDataRole.AccessibleTextRole)
+        self.assertIn("Synthetic::#UWorld::Step::77777", plain_tooltip)
+        self.assertIn("Synthetic::#UWorld::Step::77777", plain_accessible)
+        # Tags remain intact on the result object for actions and Related.
+        self.assertEqual(dialog.results.results_model().result_at(0).tags, (source_tag,))
+
+        dialog.results.results_model().set_checked(0, True)
+        self.assertTrue(
+            index.data(Qt.ItemDataRole.AccessibleTextRole).startswith("checked,")
+        )
+        # Paint the compact card, tags present, in the actual Qt runtime.
+        self.assertFalse(dialog.grab().isNull())
+        dialog.deleteLater()
+
+    def test_rows_without_extra_wrap_primary_without_exposing_other_fields(
+        self,
+    ) -> None:
+        long_title = (
+            "Hypertension screening and confirmation requires ambulatory "
+            "blood pressure monitoring to confirm an elevated office reading "
+            "outside the clinical setting before treatment decisions begin."
+        )
+        with_extra = SearchResult(
+            note_id=51,
+            card_ids=(301, 302),
+            title="Adult immunization intervals",
+            snippet="Review age, pregnancy, and risk conditions.",
+            deck="Synthetic FM Shelf",
+            note_type="Immunization",
+            match_reasons=("exact filter",),
+            sibling_count=2,
+        )
+        without_extra = SearchResult(
+            note_id=52,
+            card_ids=(303,),
+            title=long_title,
+            snippet="",
+            deck="Synthetic FM Shelf",
+            note_type="Screening",
+            match_reasons=("same deck",),
+            sibling_count=1,
+        )
+        dialog = SearchDialog()
+        dialog.show()
+        dialog.show_response(
+            SearchResponse(
+                request_id=5,
+                query="hypertension",
+                results=(with_extra, without_extra),
+                total_results=2,
+            ),
+            (),
+        )
+        self.app.processEvents()
+        model = dialog.results.results_model()
+
+        # The Extra row keeps the two-level primary/support hierarchy.
+        extra_index = model.index(0, 0)
+        extra_display = extra_index.data(Qt.ItemDataRole.DisplayRole)
+        self.assertIn("Adult immunization intervals", extra_display)
+        self.assertIn("Review age, pregnancy, and risk conditions.", extra_display)
+
+        # The no-Extra row exposes exactly the primary text plus the existing
+        # metadata — no other field content is invented for the second line.
+        plain_index = model.index(1, 0)
+        self.assertEqual(
+            plain_index.data(Qt.ItemDataRole.DisplayRole),
+            f"{long_title}, Synthetic FM Shelf, Screening, matched by same deck",
+        )
+        self.assertEqual(
+            plain_index.data(Qt.ItemDataRole.AccessibleTextRole),
+            "not checked, "
+            f"{long_title}, Synthetic FM Shelf, Screening, matched by same deck",
+        )
+
+        # Row height stays uniform whether or not a supporting excerpt exists.
+        self.assertEqual(
+            dialog.results.sizeHintForRow(0),
+            dialog.results.sizeHintForRow(1),
+        )
+
+        # Paint both layouts in the dialog.
+        self.assertFalse(dialog.grab().isNull())
+        self.assertEqual(
+            dialog.results.sizeHintForRow(0),
+            dialog.results.sizeHintForRow(1),
+        )
+        dialog.deleteLater()
+
+        # Exercise the delegate at a genuinely narrow width without the
+        # dialog controls imposing their own minimum layout width.
+        narrow_results = ResultsView()
+        narrow_results.resize(420, 300)
+        narrow_results.results_model().set_results((with_extra, without_extra))
+        narrow_results.show()
+        self.app.processEvents()
+        self.assertEqual(narrow_results.width(), 420)
+        self.assertFalse(narrow_results.grab().isNull())
+        self.assertEqual(
+            narrow_results.sizeHintForRow(0),
+            narrow_results.sizeHintForRow(1),
+        )
+        narrow_results.deleteLater()
+
+    def test_result_metadata_compacts_hierarchy_without_losing_full_values(self) -> None:
+        from ui.results import compact_deck_label, compact_note_type_label
+
+        self.assertEqual(
+            compact_deck_label("Medical School::AnKing Original::Pharmacology"),
+            "Pharmacology",
+        )
+        self.assertEqual(
+            compact_note_type_label("AnKingOverhaul (AnKing Step Deck / AnKingMed)"),
+            "AnKingOverhaul",
+        )
+        result = SearchResult(
+            note_id=45,
+            title="Bupropion inhibits norepinephrine reuptake",
+            deck="Medical School::AnKing Original::Pharmacology",
+            note_type="AnKingOverhaul (AnKing Step Deck / AnKingMed)",
+        )
+        dialog = SearchDialog()
+        dialog.show_response(
+            SearchResponse(
+                request_id=4,
+                query="bupropion",
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        index = dialog.results.results_model().index(0, 0)
+        tooltip = index.data(Qt.ItemDataRole.ToolTipRole)
+        accessible = index.data(Qt.ItemDataRole.AccessibleTextRole)
+        self.assertIn("Deck: Medical School::AnKing Original::Pharmacology", tooltip)
+        self.assertIn(
+            "Note type: AnKingOverhaul (AnKing Step Deck / AnKingMed)",
+            tooltip,
+        )
+        self.assertIn(result.deck, accessible)
+        self.assertIn(result.note_type, accessible)
+        self.assertFalse(dialog.grab().isNull())
+        dialog.deleteLater()
+
     def test_live_state_refresh_rejects_stale_sibling_scope(self) -> None:
         dialog = SearchDialog()
         model = dialog.results.results_model()
@@ -567,6 +787,30 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(requested, ["bupropion", "bupropion"])
         dialog.deleteLater()
 
+    def test_exact_mode_explains_native_word_and_phrase_semantics(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        self.app.processEvents()
+        self.assertFalse(dialog.mode_guidance.isVisibleTo(dialog))
+
+        dialog.set_mode(SearchMode.EXACT)
+        self.app.processEvents()
+
+        self.assertTrue(dialog.mode_guidance.isVisibleTo(dialog))
+        self.assertIn("separate terms must all match", dialog.mode_guidance.text())
+        self.assertIn("quoted words", dialog.mode_guidance.text())
+        self.assertIn("Anki's Browser", dialog.mode_guidance.toolTip())
+        self.assertIn("w:term", dialog.mode_guidance.toolTip())
+        self.assertIn(
+            "Anki's Browser",
+            dialog.segmented._buttons[SearchMode.EXACT].toolTip(),
+        )
+
+        dialog.set_mode(SearchMode.SMART)
+        self.app.processEvents()
+        self.assertFalse(dialog.mode_guidance.isVisibleTo(dialog))
+        dialog.deleteLater()
+
     def test_leaving_unprepared_semantic_hides_stale_setup_notice(self) -> None:
         dialog = SearchDialog()
         dialog.show()
@@ -677,6 +921,8 @@ class OffscreenSmokeTests(unittest.TestCase):
         backend = _HeldSearchBackend()
         dialog = SearchDialog()
         controller = SearchController(backend, dialog)
+        initial_previews: list[SearchResult | None] = []
+        controller.initialPreviewRequested.connect(initial_previews.append)
         dialog.search.setText("first")
         controller.submit_search("first")
         self.assertEqual(dialog.summary.text(), "Searching…")
@@ -698,6 +944,53 @@ class OffscreenSmokeTests(unittest.TestCase):
 
         self.assertEqual(dialog.results.results_model().count(), 0)
         self.assertEqual(dialog.summary.text(), "")
+        self.assertEqual(initial_previews, [])
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_accepted_search_requests_first_result_preview_without_focus(
+        self,
+    ) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        first = SearchResult(note_id=1, card_ids=(11,), title="First")
+        second = SearchResult(note_id=2, card_ids=(21,), title="Second")
+        initial_previews: list[SearchResult | None] = []
+        controller.initialPreviewRequested.connect(initial_previews.append)
+        dialog.show()
+        dialog.search.setText("accepted")
+        dialog.search.setFocus()
+        self.app.processEvents()
+
+        controller.submit_search("accepted")
+        backend.callbacks[-1][0](
+            SearchResponse(
+                request_id=backend.requests[-1].request_id,
+                query="accepted",
+                results=(first, second),
+                total_results=2,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(initial_previews, [first])
+        self.assertEqual(dialog.results.current_result(), first)
+        self.assertTrue(dialog.search.hasFocus())
+
+        controller.submit_search("empty")
+        backend.callbacks[-1][0](
+            SearchResponse(
+                request_id=backend.requests[-1].request_id,
+                query="empty",
+                results=(),
+                total_results=0,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(initial_previews, [first, None])
+        self.assertIsNone(dialog.results.current_result())
         controller.deleteLater()
         dialog.deleteLater()
 
@@ -1510,7 +1803,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.24")
+        self.assertEqual(fallback.version, "1.0.25")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())
@@ -2397,6 +2690,8 @@ class OffscreenSmokeTests(unittest.TestCase):
         dialog = SearchDialog()
         dialog.show()
         controller = SearchController(backend, dialog)
+        initial_previews: list[SearchResult | None] = []
+        controller.initialPreviewRequested.connect(initial_previews.append)
         dialog.search.setText("heart failure tag:cardio")
         roots = (
             SearchResult(
@@ -2455,6 +2750,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(model.results(), (related,))
         self.assertFalse(dialog.chip_bar.isVisibleTo(dialog))
         self.assertTrue(dialog.related_context_bar.isVisibleTo(dialog))
+        self.assertEqual(initial_previews, [related])
 
         dialog.relatedBackRequested.emit()
         self.app.processEvents()
@@ -2468,6 +2764,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertTrue(dialog.chip_bar.isVisibleTo(dialog))
         self.assertEqual(backend.requests, [])
         self.assertEqual(backend.state_refresh_requests, [roots])
+        self.assertEqual(initial_previews, [related])
 
         refreshed_roots = (
             SearchResult(
