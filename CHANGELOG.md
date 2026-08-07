@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [1.0.25] — 2026-08-07
 
 ### Added
 
@@ -17,6 +17,9 @@
 - Search Settings can now open each newly selected preview as its **Question**,
   **Answer**, or editable fields. Accepted changes apply immediately to an
   already-visible preview and are remembered per installation.
+- The first result's rendered card now opens automatically after each accepted
+  normal or Related search while the query field keeps focus. Empty and stale
+  responses cannot leave or reopen an outdated preview.
 
 ### Changed
 
@@ -36,6 +39,9 @@
   Smart and Semantic modes. Adding `deck:`, `tag:`, `is:`, or another simple
   filter no longer changes free-text scores, ordering, aliases, corrections,
   or adaptive relevance cutoffs for cards that remain eligible.
+- Exact mode now explains its native Anki Browser semantics directly in the
+  search window: separate terms are ANDed, quoted words stay together, `OR`
+  matches either side, and `w:` requests a whole-word match.
 
 ## [1.0.24] — 2026-08-03
 

@@ -38,7 +38,7 @@ CancelCheck = Callable[[], None]
 MACOS_ARM64_RUNTIME_TAG = WORKER_RUNTIME_TAG
 MACOS_ARM64_PY39_RUNTIME_TAG = "darwin-arm64-py39"
 MINIMUM_SEMANTIC_MACOS_MAJOR = 14
-DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.24"
+DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.25"
 
 
 class ModelInstallError(RuntimeError):
