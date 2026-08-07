@@ -787,6 +787,30 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(requested, ["bupropion", "bupropion"])
         dialog.deleteLater()
 
+    def test_exact_mode_explains_native_word_and_phrase_semantics(self) -> None:
+        dialog = SearchDialog()
+        dialog.show()
+        self.app.processEvents()
+        self.assertFalse(dialog.mode_guidance.isVisibleTo(dialog))
+
+        dialog.set_mode(SearchMode.EXACT)
+        self.app.processEvents()
+
+        self.assertTrue(dialog.mode_guidance.isVisibleTo(dialog))
+        self.assertIn("separate terms must all match", dialog.mode_guidance.text())
+        self.assertIn("quoted words", dialog.mode_guidance.text())
+        self.assertIn("Anki's Browser", dialog.mode_guidance.toolTip())
+        self.assertIn("w:term", dialog.mode_guidance.toolTip())
+        self.assertIn(
+            "Anki's Browser",
+            dialog.segmented._buttons[SearchMode.EXACT].toolTip(),
+        )
+
+        dialog.set_mode(SearchMode.SMART)
+        self.app.processEvents()
+        self.assertFalse(dialog.mode_guidance.isVisibleTo(dialog))
+        dialog.deleteLater()
+
     def test_leaving_unprepared_semantic_hides_stale_setup_notice(self) -> None:
         dialog = SearchDialog()
         dialog.show()

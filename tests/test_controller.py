@@ -1657,6 +1657,27 @@ class ControllerTests(unittest.TestCase):
         )
         self.assertEqual(received[0].warnings, ())
 
+    def test_exact_mode_preserves_separate_terms_and_quoted_phrases(self) -> None:
+        for request_id, query in enumerate(
+            (
+                "heart failure",
+                '"heart failure"',
+                'heart "reduced ejection fraction"',
+                "heart OR failure",
+                "w:heart -failure",
+            ),
+            start=81,
+        ):
+            received = []
+            request = contracts.SearchRequest(
+                request_id=request_id,
+                query=query,
+                mode=contracts.SearchMode.EXACT,
+            )
+            self.backend.submit_search(request, received.append, self.fail)
+            self.assertEqual(self.backend.mw.col.queries[-1], query)
+            self.assertEqual(received[0].warnings, ())
+
     def test_mixed_boolean_smart_query_preserves_native_semantics(self) -> None:
         self.backend._set_index_state(
             contracts.IndexState.READY, detail="Index ready for parser test."

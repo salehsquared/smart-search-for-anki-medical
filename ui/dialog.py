@@ -19,6 +19,8 @@ from .contracts import (
     AboutInfo,
     Correction,
     DeckCatalog,
+    EXACT_SEARCH_DETAILS,
+    EXACT_SEARCH_GUIDANCE,
     IndexState,
     IndexStatus,
     PreviewDefault,
@@ -98,7 +100,10 @@ def _semantic_availability_text() -> str:
 HELP_HTML = f"""\
 <h3>Search your collection</h3>
 <p>Type above to search notes. Smart mode fixes typos and expands common
-medical aliases; Exact matches literally; Semantic matches by meaning.</p>
+medical aliases; Exact uses Anki's standard search; Semantic matches by meaning.</p>
+<p><b>Exact:</b> <code>heart failure</code> requires both separate terms,
+while <code>&quot;heart failure&quot;</code> requires that phrase. Use
+<code>w:heart</code> when you need a whole-word match.</p>
 <p><b>Smart and Exact</b> use the initial fast-search setup. <b>Semantic</b>
 has a separate one-time preparation that takes longer. You can keep using
 Smart and Exact while Semantic is being prepared.</p>
@@ -600,6 +605,14 @@ class SearchDialog(QDialog):
         top.addWidget(self.segmented)
         root.addLayout(top)
 
+        self.mode_guidance = QLabel(EXACT_SEARCH_GUIDANCE, self)
+        self.mode_guidance.setObjectName("modeGuidance")
+        self.mode_guidance.setToolTip(EXACT_SEARCH_DETAILS)
+        self.mode_guidance.setAccessibleName("Exact search behavior")
+        self.mode_guidance.setAccessibleDescription(EXACT_SEARCH_DETAILS)
+        self.mode_guidance.setVisible(False)
+        root.addWidget(self.mode_guidance)
+
         self.chip_bar = ChipBar(self)
         self.chip_bar.filterRemoveRequested.connect(self.filterRemoveRequested)
         self.chip_bar.correctionDismissRequested.connect(self.correctionDismissRequested)
@@ -1008,6 +1021,10 @@ class SearchDialog(QDialog):
             f" background: {c['accent_soft']}; color: {c['text']};"
             f" border: 1px solid {c['accent_mid']}; border-radius: 12px;"
             " padding: 12px 16px;"
+            "}"
+            "QLabel#modeGuidance {"
+            f" color: {c['muted']}; background: transparent; border: none;"
+            " padding: 0 4px 2px 4px;"
             "}"
             "QFrame#relatedContextBar {"
             f" background: {c['accent_soft']}; border: 1px solid {c['accent_mid']};"
@@ -2542,6 +2559,7 @@ class SearchDialog(QDialog):
         # A mode change dispatches immediately through the controller.  Do
         # not let a pending text-edit debounce submit the same query again.
         self._debounce.stop()
+        self.mode_guidance.setVisible(mode is SearchMode.EXACT)
         if mode is not SearchMode.SEMANTIC:
             self._hide_stale_semantic_notice()
         if self._last_status is not None:

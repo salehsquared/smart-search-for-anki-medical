@@ -20,6 +20,8 @@ except ImportError:  # plain-Python tests import ``ui`` as a top-level package
     from backend.compat import dataclass
 
 __all__ = [
+    "EXACT_SEARCH_GUIDANCE",
+    "EXACT_SEARCH_DETAILS",
     "SearchMode",
     "PreviewDefault",
     "MatchKind",
@@ -56,6 +58,16 @@ __all__ = [
     "parse_filter_tokens",
     "remove_filter_token",
 ]
+
+
+EXACT_SEARCH_GUIDANCE = (
+    'Anki search · separate terms must all match · “quoted words” stay together'
+)
+EXACT_SEARCH_DETAILS = (
+    "Uses the same search rules as Anki's Browser. Plain terms are "
+    "case-insensitive substring matches; use w:term for a whole word, "
+    "OR for either term, and quotes for a phrase."
+)
 
 
 class SearchMode(enum.Enum):
