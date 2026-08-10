@@ -373,9 +373,8 @@ class SemanticService:
                 # one-query request finish even if newer typing supersedes it.
                 # The caller discards that stale response at the checkpoint
                 # below, while the already-loaded helper remains reusable for
-                # the replacement query. Hard lifecycle exits (review,
-                # profile close, or dialog close) still terminate the helper
-                # directly through ``abort_now()``.
+                # the replacement query. Profile/dialog closure and explicit
+                # timeout recovery still terminate it through ``abort_now()``.
                 vector = self._worker.embed(
                     [query],
                     background=False,
@@ -410,7 +409,7 @@ class SemanticService:
                 cancel_check()
             self._last_error = str(error)
             self._last_error_kind = "model"
-            return []
+            raise
         except Exception as error:
             # Cancellation uses the caller's private exception type.  Re-run
             # its checkpoint so it propagates instead of being mislabeled as a
@@ -419,7 +418,9 @@ class SemanticService:
                 cancel_check()
             self._last_error = str(error)
             self._last_error_kind = "index"
-            return []
+            raise SemanticRuntimeError(
+                "The Semantic index could not complete this search."
+            ) from error
 
 
 def _document_batches(

@@ -740,6 +740,32 @@ class TargetedAnkiReaderTests(unittest.TestCase):
         self.assertEqual(states, {41: ((401, 1, True, False),)})
         self.assertEqual(collection.card_lookups, [401])
 
+    def test_card_state_refresh_mixes_exact_and_live_note_scopes(self) -> None:
+        collection = _Collection(
+            notes={},
+            cards_by_note={41: (401, 402), 50: (501,)},
+            cards={
+                401: _Card(did=1, nid=41, queue=-1, flag=1),
+                402: _Card(did=1, nid=41, queue=2, flag=4),
+                501: _Card(did=1, nid=50, queue=2, flag=3),
+            },
+        )
+
+        states = adapter.AnkiCollectionReader.card_states_for_notes(
+            collection,
+            (41, 50),
+            card_ids_by_note={41: (401,)},
+        )
+
+        self.assertEqual(
+            states,
+            {
+                41: ((401, 1, True, False),),
+                50: ((501, 3, False, False),),
+            },
+        )
+        self.assertEqual(collection.card_lookups, [401, 501])
+
     def test_card_state_distinguishes_buried_from_suspended(self) -> None:
         collection = _Collection(
             notes={},

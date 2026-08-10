@@ -4,10 +4,10 @@
 
 - Smart Search runs in Anki Desktop only. AnkiMobile and AnkiDroid do not load
   desktop add-ons.
-- v1.0.25 supports Anki Desktop 24.11 through 26.08, including the 25.02,
+- v1.0.26 supports Anki Desktop 24.11 through 26.08, including the 25.02,
   25.07, 25.09, 26.05, and 26.08 release families.
 - The supported-version matrix was exercised on macOS with Apple silicon.
-  Windows, Linux, and Intel Mac integration are not part of the v1.0.25 support
+  Windows, Linux, and Intel Mac integration are not part of the v1.0.26 support
   claim.
 - Semantic Search currently supports **macOS 14 or later on Apple-silicon Macs
   only**.
@@ -39,11 +39,14 @@
   active. It is limited to one ONNX thread, one text sequence per inference,
   bounded messages, and a 256 MiB macOS process-memory ceiling, but a full
   first-time Semantic build is intentionally substantial work.
-- Inference runs in a standalone helper process, not inside Anki. The helper is
-  stopped before review and after a short warm search session, so its model,
-  native libraries, and allocator caches are reclaimed by the operating
-  system. A small NumPy-only vector layer remains available in Anki for
-  Semantic ranking.
+- Inference runs in a standalone helper process, not inside Anki. Review pauses
+  unsolicited Semantic preparation and indexing, but an explicitly submitted
+  Semantic query can use the helper while the search window is open. The
+  helper may remain warm for up to 90 seconds between adjacent searches.
+  Closing the search window reaps it immediately; after switching modes, the
+  existing idle timer unloads it. Its model, native libraries, and allocator
+  caches are then reclaimed by the operating system. A small NumPy-only vector
+  layer remains available in Anki for Semantic ranking.
 - The bundled standalone interpreter increases add-on download and installed
   disk size. The downloaded model and per-profile vector index add further
   local disk use.

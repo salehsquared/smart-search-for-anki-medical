@@ -1751,14 +1751,9 @@ class SearchDialog(QDialog):
             and self._last_response is not None
         ):
             current = model.results()
-            current_identity = tuple(
-                (result.note_id, tuple(result.card_ids)) for result in current
-            )
-            response_identity = tuple(
-                (result.note_id, tuple(result.card_ids))
-                for result in self._last_response.results
-            )
-            if current_identity == response_identity:
+            if tuple(result.note_id for result in current) == tuple(
+                result.note_id for result in self._last_response.results
+            ):
                 self._last_response = replace(
                     self._last_response,
                     results=current,

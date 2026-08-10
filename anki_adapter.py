@@ -933,11 +933,11 @@ class AnkiCollectionReader:
                 continue
             seen_notes.add(note_id)
 
-            if card_ids_by_note is not None:
+            if card_ids_by_note is not None and note_id in card_ids_by_note:
                 card_ids = tuple(
                     dict.fromkeys(
                         int(card_id)
-                        for card_id in card_ids_by_note.get(note_id, ())
+                        for card_id in card_ids_by_note[note_id]
                         if int(card_id) > 0
                     )
                 )
