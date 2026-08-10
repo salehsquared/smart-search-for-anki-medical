@@ -56,12 +56,18 @@ else:
 
 
 class _HeldSearchBackend:
-    def __init__(self, *, submit_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        submit_error: Exception | None = None,
+        synchronous_error: str | None = None,
+    ) -> None:
         self.status = IndexStatus(
             IndexState.READY,
             semantic=SemanticStatus(SemanticState.READY),
         )
         self.submit_error = submit_error
+        self.synchronous_error = synchronous_error
         self.requests = []
         self.callbacks = []
         self.related_requests = []
@@ -72,6 +78,7 @@ class _HeldSearchBackend:
         self.cancel_count = 0
         self.related_cancel_count = 0
         self.deck_cancel_count = 0
+        self.semantic_abort_count = 0
         self.status_reads = 0
         self.saved_settings = []
 
@@ -90,11 +97,17 @@ class _HeldSearchBackend:
             raise self.submit_error
         self.requests.append(request)
         self.callbacks.append((on_success, on_error))
+        if self.synchronous_error is not None:
+            on_error(self.synchronous_error)
 
         def cancel() -> None:
             self.cancel_count += 1
 
         return cancel
+
+    def abort_semantic_runtime_now(self) -> bool:
+        self.semantic_abort_count += 1
+        return True
 
     def submit_related_cards(self, request, on_success, on_error):
         self.related_requests.append(request)
@@ -651,6 +664,7 @@ class OffscreenSmokeTests(unittest.TestCase):
             title="New filtered result",
             snippet="Current search content",
             score=0.98,
+            card_scope_exact=True,
         )
         model.set_results((current,))
 
@@ -666,12 +680,57 @@ class OffscreenSmokeTests(unittest.TestCase):
                     title="Stale result",
                     snippet="Old search content",
                     score=0.12,
+                    card_scope_exact=True,
                 ),
             )
         )
 
         self.assertFalse(accepted)
         self.assertEqual(model.result_at(0), current)
+        dialog.deleteLater()
+
+    def test_live_state_refresh_discovers_siblings_for_unfiltered_row(
+        self,
+    ) -> None:
+        dialog = SearchDialog()
+        current = SearchResult(
+            note_id=42,
+            card_ids=(101,),
+            title="Current result",
+            snippet="Current search content",
+            sibling_count=1,
+            browser_query="cid:101",
+        )
+        dialog.show_response(
+            SearchResponse(
+                request_id=7,
+                query="current",
+                results=(current,),
+                total_results=1,
+            ),
+            (),
+        )
+        fresh = SearchResult(
+            note_id=42,
+            card_ids=(201, 202),
+            card_states=(
+                CardState(201, suspended=True),
+                CardState(202, flag=4),
+            ),
+            title="Stale title must not replace search text",
+            sibling_count=2,
+            browser_query="cid:201,202",
+        )
+
+        accepted = dialog.refresh_card_states((fresh,))
+
+        self.assertTrue(accepted)
+        merged = dialog.results.results_model().result_at(0)
+        self.assertEqual(merged.title, "Current result")
+        self.assertEqual(merged.card_ids, (201, 202))
+        self.assertEqual(merged.browser_query, "cid:201,202")
+        self.assertTrue(merged.card_states[0].suspended)
+        self.assertEqual(dialog.last_response().results, (merged,))
         dialog.deleteLater()
 
     def test_live_state_refresh_merges_only_card_status_metadata(self) -> None:
@@ -1279,6 +1338,106 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller.deleteLater()
         dialog.deleteLater()
 
+    def test_synchronous_error_callback_cannot_leave_searching_state(self) -> None:
+        backend = _HeldSearchBackend(
+            synchronous_error="Semantic search is temporarily unavailable."
+        )
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.set_mode(SearchMode.SEMANTIC)
+
+        controller.submit_search("bupropion")
+
+        self.assertEqual(dialog.summary.text(), "Error")
+        self.assertIn("temporarily unavailable", dialog.message_label.text())
+        self.assertFalse(controller._semantic_watchdog.isActive())
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_semantic_watchdog_recovers_and_ignores_late_result(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.set_mode(SearchMode.SEMANTIC)
+        controller.submit_search("presyncope with standing")
+        stale_success = backend.callbacks[-1][0]
+
+        self.assertTrue(controller._semantic_watchdog.isActive())
+        self.assertEqual(controller._semantic_watchdog.interval(), 45_000)
+        controller._on_semantic_search_timeout()
+
+        self.assertFalse(controller._semantic_watchdog.isActive())
+        self.assertEqual(backend.cancel_count, 1)
+        self.assertEqual(backend.semantic_abort_count, 1)
+        self.assertEqual(dialog.summary.text(), "Error")
+        self.assertIn("took too long", dialog.message_label.text())
+        self.assertTrue(dialog.retry_button.isVisibleTo(dialog))
+
+        stale_success(
+            SearchResponse(
+                request_id=backend.requests[0].request_id,
+                query="presyncope with standing",
+                results=(SearchResult(note_id=1, title="Too late"),),
+                total_results=1,
+            )
+        )
+        self.app.processEvents()
+        self.assertEqual(dialog.results.results_model().count(), 0)
+
+        controller.submit_search("orthostatic symptoms")
+        self.assertTrue(controller._semantic_watchdog.isActive())
+        backend.callbacks[-1][0](
+            SearchResponse(
+                request_id=backend.requests[-1].request_id,
+                query="orthostatic symptoms",
+                results=(SearchResult(note_id=2, title="Fresh result"),),
+                total_results=1,
+            )
+        )
+        self.app.processEvents()
+        self.assertFalse(controller._semantic_watchdog.isActive())
+        self.assertEqual(
+            dialog.results.results_model().result_at(0).note_id,
+            2,
+        )
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_search_renders_before_card_state_refresh_finishes(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        initial = SearchResult(note_id=1, card_ids=(11,), title="Immediate")
+        controller.submit_search("immediate")
+
+        backend.callbacks[-1][0](
+            SearchResponse(
+                request_id=backend.requests[-1].request_id,
+                query="immediate",
+                results=(initial,),
+                total_results=1,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(dialog.summary.text(), "1 result")
+        self.assertEqual(dialog.results.current_result(), initial)
+        self.assertEqual(backend.state_refresh_requests, [(initial,)])
+
+        refreshed = SearchResult(
+            note_id=1,
+            card_ids=(11,),
+            card_states=(CardState(card_id=11, suspended=True),),
+            title="Immediate",
+        )
+        backend.state_refresh_callbacks[-1][0]((refreshed,))
+        self.app.processEvents()
+        self.assertTrue(
+            dialog.results.results_model().result_at(0).card_states[0].suspended
+        )
+        controller.deleteLater()
+        dialog.deleteLater()
+
     def test_semantic_mode_explains_separate_preparation_and_starts_it(self) -> None:
         dialog = SearchDialog()
         dialog.show()
@@ -1803,7 +1962,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.25")
+        self.assertEqual(fallback.version, "1.0.26")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())

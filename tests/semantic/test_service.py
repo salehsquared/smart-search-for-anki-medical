@@ -390,10 +390,33 @@ class SemanticServiceTests(unittest.TestCase):
                 side_effect=SemanticRuntimeError("model could not load")
             )
 
-            self.assertEqual(service.search("heart failure"), [])
+            with self.assertRaisesRegex(
+                SemanticRuntimeError,
+                "model could not load",
+            ):
+                service.search("heart failure")
 
             self.assertEqual(service._last_error, "model could not load")
             self.assertEqual(service._last_error_kind, "model")
+
+    def test_vector_index_search_failure_is_visible_and_requests_reindex(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            service, _manager = self._service(Path(directory))
+            service.index = MagicMock()
+            service.index.count.return_value = 1
+            service._worker.embed = MagicMock(return_value=[[0.1, 0.2]])
+            service.index.search.side_effect = RuntimeError("index read failed")
+
+            with self.assertRaisesRegex(
+                SemanticRuntimeError,
+                "Semantic index could not complete",
+            ):
+                service.search("heart failure")
+
+            self.assertEqual(service._last_error, "index read failed")
+            self.assertEqual(service._last_error_kind, "index")
 
     def test_failed_repair_never_requires_restarting_anki(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

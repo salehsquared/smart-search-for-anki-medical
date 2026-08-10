@@ -219,33 +219,39 @@ class ResultsModel(QAbstractListModel):
         return tuple(self._results)
 
     def refresh_results(self, results: Sequence[SearchResult]) -> bool:
-        """Merge live card state only when the visible card scope still matches.
+        """Merge live card state only when the visible result set still matches.
 
         Card-state hydration runs asynchronously after a search.  A response
         from an older search can therefore arrive after a newer search that
-        happens to contain the same notes but a different subset of sibling
-        cards.  Treat both the note and its exact card IDs as the row identity,
-        and never let this refresh path replace search-owned metadata such as
-        title, snippet, highlights, score, or match reasons.
+        happens to contain the same notes. Request-generation gating handles
+        that at the controller; this model additionally preserves exact
+        card-filter scopes while allowing ordinary rows to discover current
+        sibling IDs. Never replace search-owned text/ranking metadata.
         """
 
         incoming = list(results)
-        current_identity = [
-            (result.note_id, tuple(result.card_ids))
-            for result in self._results
-        ]
-        incoming_identity = [
-            (result.note_id, tuple(result.card_ids))
-            for result in incoming
-        ]
-        if incoming_identity != current_identity:
+        if [result.note_id for result in incoming] != [
+            result.note_id for result in self._results
+        ]:
+            return False
+        if any(
+            current.card_scope_exact
+            and tuple(current.card_ids) != tuple(fresh.card_ids)
+            for current, fresh in zip(self._results, incoming)
+        ):
             return False
 
         refreshed = [
             replace(
                 current,
+                card_ids=fresh.card_ids,
                 card_states=fresh.card_states,
                 sibling_count=fresh.sibling_count,
+                browser_query=(
+                    fresh.browser_query
+                    if tuple(fresh.card_ids) != tuple(current.card_ids)
+                    else current.browser_query
+                ),
             )
             for current, fresh in zip(self._results, incoming)
         ]

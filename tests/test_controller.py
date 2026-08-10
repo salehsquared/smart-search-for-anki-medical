@@ -536,6 +536,52 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(cleanup["uses_collection"])
         cleanup["success"](cleanup["op"](None))
 
+    def test_explicit_search_can_open_existing_index_during_review(self) -> None:
+        context = self.backend._context
+        assert context is not None
+        context.index.rebuild(
+            (
+                models.IndexedNote(
+                    note_id=1001,
+                    fields={"Text": "Bupropion treats depression."},
+                    guid="review-profile-open-test",
+                ),
+            )
+        )
+        self.backend.deactivate_profile()
+        self.backend.set_background_maintenance_paused(True)
+        ready = []
+        errors = []
+
+        self.backend.activate_profile_async(
+            auto_rebuild=False,
+            allow_while_paused=True,
+            on_ready=ready.append,
+            on_error=errors.append,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(ready), 1)
+        self.assertIs(ready[0].state, contracts.IndexState.READY)
+        self.assertTrue(self.backend.active)
+        self.assertTrue(self.backend.background_maintenance_paused)
+
+    def test_on_demand_profile_open_failure_is_visible(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        refreshed = []
+        errors = []
+        addon._refresh_dialog = lambda: refreshed.append(True)
+        addon._show_error = errors.append
+
+        addon._search_profile_activation_failed("Search data could not be opened.")
+
+        self.assertEqual(refreshed, [True])
+        self.assertEqual(errors, ["Search data could not be opened."])
+
     def test_profile_deactivation_does_not_wait_for_inflight_reader_lock(self) -> None:
         self.backend.deactivate_profile()
         backend = _ConcurrentExternalBackend(
@@ -1007,7 +1053,7 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(received[0].warnings)
         self.assertEqual(self.backend.mw.col.queries, [])
 
-    def test_smart_results_include_live_flag_and_suspension_state(self) -> None:
+    def test_smart_results_render_before_live_card_state_refresh(self) -> None:
         context = self.backend._context
         assert context
         context.index.rebuild(
@@ -1049,12 +1095,19 @@ class ControllerTests(unittest.TestCase):
         )
 
         result = received[0].results[0]
-        self.assertEqual(result.card_ids, (2001, 2002))
-        self.assertEqual(result.sibling_count, 2)
+        self.assertEqual(result.card_ids, (1901,))
+        self.assertEqual(result.sibling_count, 1)
+        self.assertEqual(result.card_states, ())
+
+        refreshed = []
+        self.backend.refresh_card_states((result,), refreshed.extend, self.fail)
+        live_result = refreshed[0]
+        self.assertEqual(live_result.card_ids, (2001, 2002))
+        self.assertEqual(live_result.sibling_count, 2)
         self.assertEqual(
             [
                 (state.card_id, state.flag, state.suspended)
-                for state in result.card_states
+                for state in live_result.card_states
             ],
             [(2001, 4, True), (2002, 0, False)],
         )
@@ -1576,10 +1629,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(result.card_ids, (2001,))
         self.assertEqual(result.sibling_count, 1)
         self.assertEqual(result.score, base_result.score)
-        self.assertEqual(
-            [(state.card_id, state.flag, state.suspended) for state in result.card_states],
-            [(2001, 1, True)],
-        )
+        self.assertEqual(result.card_states, ())
         self.assertEqual(
             tuple(chip.token for chip in received[0].active_filters),
             ("deck:AnKing", "tag:Psychiatry", "is:suspended"),
@@ -1589,8 +1639,11 @@ class ControllerTests(unittest.TestCase):
         self.backend.refresh_card_states((result,), refreshed.extend, self.fail)
         self.assertEqual(refreshed[0].card_ids, (2001,))
         self.assertEqual(
-            tuple(state.card_id for state in refreshed[0].card_states),
-            (2001,),
+            [
+                (state.card_id, state.flag, state.suspended)
+                for state in refreshed[0].card_states
+            ],
+            [(2001, 1, True)],
         )
 
     def test_exact_filter_returns_and_opens_only_matching_sibling(self) -> None:
@@ -2004,7 +2057,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(semantic_activity, [True, False])
 
-    def test_review_entry_aborts_semantic_search_silently_and_next_search_works(
+    def test_review_entry_preserves_semantic_search_and_next_search_works(
         self,
     ) -> None:
         self.backend.deactivate_profile()
@@ -2059,16 +2112,16 @@ class ControllerTests(unittest.TestCase):
         addon._enter_review_mode()
 
         self.assertTrue(backend.background_maintenance_paused)
-        self.assertEqual(semantic.abort_calls, 1)
+        self.assertEqual(semantic.abort_calls, 0)
+        semantic.release_search.set()
         self.assertTrue(
             _wait_until(lambda: not any(thread.is_alive() for thread in backend.threads))
         )
-        self.assertEqual(responses, [])
+        self.assertEqual([response.request_id for response in responses], [24])
         self.assertEqual(errors, [])
         self.assertIsNone(context.semantic_error)
         self.assertIsNone(context.semantic_snapshot.error)
 
-        addon._leave_review_mode()
         semantic.search_started.clear()
         next_finished = threading.Event()
         backend.submit_search(
@@ -2082,9 +2135,273 @@ class ControllerTests(unittest.TestCase):
         )
 
         self.assertTrue(next_finished.wait(timeout=1))
-        self.assertEqual([response.request_id for response in responses], [25])
+        self.assertEqual([response.request_id for response in responses], [24, 25])
         self.assertEqual(errors, [])
         self.assertTrue(semantic.search_started.is_set())
+        addon._leave_review_mode()
+
+    def test_review_entry_never_aborts_query_with_queued_semantic_writer(
+        self,
+    ) -> None:
+        self.backend.deactivate_profile()
+        backend = _ConcurrentExternalBackend(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        self.backend = backend
+        backend.activate_profile(auto_rebuild=False)
+        context = self.backend._context
+        assert context is not None
+        note = models.IndexedNote(
+            note_id=1001,
+            fields={"Text": "Bupropion treats depression."},
+            guid="review-semantic-writer-race-test",
+        )
+        context.index.rebuild((note,))
+        context.note_count = 1
+        context.lexical_generation = context.index.generation
+        context.field_names = context.index.field_names()
+        context.engine = controller.SearchEngine(context.index)
+        semantic = _BlockingSemanticService(indexed=True, block_search=True)
+        semantic.source_generation = context.lexical_generation
+        context.semantic = semantic
+        context.semantic_needs_reconcile = False
+        self.backend._refresh_semantic_snapshot(context)
+        self.backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="1 note indexed.",
+        )
+        addon = controller.SmartSearchAddonController(
+            self.backend.mw,
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        responses = []
+        errors = []
+        maintenance_event = self.backend._new_cancellation(
+            kind="semantic_maintenance"
+        )
+
+        self.backend.submit_search(
+            contracts.SearchRequest(
+                request_id=29,
+                query="atypical antidepressant",
+                mode=contracts.SearchMode.SEMANTIC,
+            ),
+            responses.append,
+            errors.append,
+        )
+        self.assertTrue(semantic.search_started.wait(timeout=1))
+        with self.backend._state_lock:
+            self.backend._semantic_phase = "updating"
+
+        addon._enter_review_mode()
+
+        self.assertTrue(maintenance_event.is_set())
+        self.assertEqual(semantic.abort_calls, 0)
+        semantic.release_search.set()
+        self.assertTrue(
+            _wait_until(
+                lambda: not any(
+                    thread.is_alive() for thread in self.backend.threads
+                )
+            )
+        )
+        self.assertEqual([response.request_id for response in responses], [29])
+        self.assertEqual(errors, [])
+        with self.backend._state_lock:
+            self.backend._semantic_phase = None
+        self.backend._forget_cancellation(maintenance_event)
+
+    def test_semantic_query_is_admitted_while_maintenance_is_paused(self) -> None:
+        context = self.backend._context
+        assert context is not None
+        note = models.IndexedNote(
+            note_id=1001,
+            fields={"Text": "Bupropion treats depression."},
+            guid="review-semantic-admission-test",
+        )
+        context.index.rebuild((note,))
+        context.note_count = 1
+        context.lexical_generation = context.index.generation
+        context.field_names = context.index.field_names()
+        context.engine = controller.SearchEngine(context.index)
+        semantic = _BlockingSemanticService(indexed=True)
+        semantic.source_generation = context.lexical_generation
+        context.semantic = semantic
+        context.semantic_needs_reconcile = False
+        self.backend._refresh_semantic_snapshot(context)
+        self.backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="1 note indexed.",
+        )
+        self.backend.set_background_maintenance_paused(True)
+        responses = []
+        errors = []
+
+        self.backend.submit_search(
+            contracts.SearchRequest(
+                request_id=26,
+                query="atypical antidepressant",
+                mode=contracts.SearchMode.SEMANTIC,
+            ),
+            responses.append,
+            errors.append,
+        )
+
+        self.assertTrue(semantic.search_started.is_set())
+        self.assertEqual([response.request_id for response in responses], [26])
+        self.assertEqual(errors, [])
+
+    def test_semantic_worker_failure_is_visible_without_exact_fallback(self) -> None:
+        context = self.backend._context
+        assert context is not None
+        note = models.IndexedNote(
+            note_id=1001,
+            fields={"Text": "Bupropion treats depression."},
+            guid="semantic-worker-failure-test",
+        )
+        context.index.rebuild((note,))
+        context.note_count = 1
+        context.lexical_generation = context.index.generation
+        context.field_names = context.index.field_names()
+        context.engine = controller.SearchEngine(context.index)
+        semantic = _BlockingSemanticService(indexed=True)
+        semantic.source_generation = context.lexical_generation
+        context.semantic = semantic
+        context.semantic_needs_reconcile = False
+        self.backend._refresh_semantic_snapshot(context)
+        self.backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="1 note indexed.",
+        )
+        responses = []
+        errors = []
+
+        with (
+            patch.object(
+                semantic,
+                "search",
+                side_effect=controller.SemanticWorkerError("worker stopped"),
+            ),
+            patch.object(self.backend, "_submit_native_fallback") as fallback,
+        ):
+            self.backend.submit_search(
+                contracts.SearchRequest(
+                    request_id=28,
+                    query="atypical antidepressant",
+                    mode=contracts.SearchMode.SEMANTIC,
+                ),
+                responses.append,
+                errors.append,
+            )
+
+        fallback.assert_not_called()
+        self.assertEqual(responses, [])
+        self.assertEqual(
+            errors,
+            ["Semantic search stopped before it could finish. Try again."],
+        )
+
+    def test_semantic_runtime_failure_is_visible_without_empty_success(self) -> None:
+        context = self.backend._context
+        assert context is not None
+        note = models.IndexedNote(
+            note_id=1001,
+            fields={"Text": "Bupropion treats depression."},
+            guid="semantic-runtime-failure-test",
+        )
+        context.index.rebuild((note,))
+        context.note_count = 1
+        context.lexical_generation = context.index.generation
+        context.field_names = context.index.field_names()
+        context.engine = controller.SearchEngine(context.index)
+        semantic = _BlockingSemanticService(indexed=True)
+        semantic.source_generation = context.lexical_generation
+        context.semantic = semantic
+        context.semantic_needs_reconcile = False
+        self.backend._refresh_semantic_snapshot(context)
+        self.backend._set_index_state(
+            contracts.IndexState.READY,
+            detail="1 note indexed.",
+        )
+        responses = []
+        errors = []
+
+        with (
+            patch.object(
+                semantic,
+                "search",
+                side_effect=controller.SemanticRuntimeError("model failed"),
+            ),
+            patch.object(self.backend, "_submit_native_fallback") as fallback,
+        ):
+            self.backend.submit_search(
+                contracts.SearchRequest(
+                    request_id=30,
+                    query="atypical antidepressant",
+                    mode=contracts.SearchMode.SEMANTIC,
+                ),
+                responses.append,
+                errors.append,
+            )
+
+        fallback.assert_not_called()
+        self.assertEqual(responses, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("needs repair", errors[0])
+
+    def test_policy_precancelled_search_reports_terminal_error(self) -> None:
+        self.assertTrue(self.backend.begin_bundle_update())
+        responses = []
+        errors = []
+
+        self.backend.submit_search(
+            contracts.SearchRequest(
+                request_id=27,
+                query="bupropion",
+                mode=contracts.SearchMode.SEMANTIC,
+            ),
+            responses.append,
+            errors.append,
+        )
+
+        self.assertEqual(responses, [])
+        self.assertEqual(
+            errors,
+            ["Restart Anki to finish the Smart Search update."],
+        )
+        self.assertEqual(self.backend._active_cancellations, set())
+        self.backend.finish_bundle_update()
+
+    def test_hard_lifecycle_cancel_stops_semantic_queries_and_worker(self) -> None:
+        context = self.backend._context
+        assert context is not None
+        semantic = _BlockingSemanticService(indexed=True)
+        context.semantic = semantic
+        event = self.backend._new_cancellation(kind="semantic_query")
+
+        self.assertTrue(self.backend.cancel_semantic_queries_now())
+
+        self.assertTrue(event.is_set())
+        self.assertEqual(semantic.abort_calls, 1)
+        self.backend._forget_cancellation(event)
+
+    def test_dialog_session_end_does_not_abort_semantic_maintenance(self) -> None:
+        context = self.backend._context
+        assert context is not None
+        semantic = _BlockingSemanticService(indexed=True)
+        context.semantic = semantic
+        with self.backend._state_lock:
+            self.backend._semantic_phase = "updating"
+
+        self.assertFalse(self.backend.cancel_semantic_queries_now())
+
+        self.assertEqual(semantic.abort_calls, 0)
+        with self.backend._state_lock:
+            self.backend._semantic_phase = None
 
     def test_status_reads_cached_semantic_metadata_only(self) -> None:
         context = self.backend._context
@@ -2351,7 +2668,7 @@ class ControllerTests(unittest.TestCase):
         # The immutable UI snapshot was captured before the worker operation
         # failed and therefore contains no error kind.
         self.assertIsNone(getattr(context.semantic_snapshot, "error_kind", None))
-        event = self.backend._new_cancellation(kind="semantic")
+        event = self.backend._new_cancellation(kind="semantic_maintenance")
         errors = []
         with self.backend._state_lock:
             self.backend._semantic_phase = "indexing"
@@ -3956,6 +4273,20 @@ class ControllerTests(unittest.TestCase):
             restore_results_if_unfocused=True,
         )
 
+        refreshed_first = contracts.SearchResult(
+            note_id=7,
+            card_ids=(72,),
+            title="First",
+        )
+        addon._initial_preview_requested(first)
+        current[0] = refreshed_first
+        with patch.object(addon, "_toggle_previewer") as toggle:
+            addon._open_pending_previewer()
+        toggle.assert_called_once_with(
+            refreshed_first,
+            restore_results_if_unfocused=True,
+        )
+
         addon._initial_preview_requested(first)
         current[0] = replacement
         with patch.object(addon, "_toggle_previewer") as toggle:
@@ -4420,7 +4751,7 @@ class ControllerTests(unittest.TestCase):
         self.assertIsNone(addon._dialog)
         self.assertIsNone(addon._ui_controller)
 
-    def test_semantic_worker_lease_never_arms_during_review(self) -> None:
+    def test_semantic_worker_lease_arms_for_visible_search_during_review(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),
             bundle_root=self.bundle,
@@ -4431,6 +4762,29 @@ class ControllerTests(unittest.TestCase):
         addon._dialog = types.SimpleNamespace(isVisible=lambda: True)
         addon._semantic_unload_timer = timer
         addon._review_active = True
+        addon.backend.abort_semantic_runtime_now = (
+            lambda: aborts.append(True) or True
+        )
+
+        addon._arm_semantic_idle_unload()
+
+        self.assertEqual(timer.starts, [90_000])
+        self.assertEqual(timer.stop_count, 0)
+        self.assertEqual(aborts, [])
+
+    def test_semantic_worker_is_reaped_after_switching_to_smart(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        timer = _FakeTimer()
+        aborts: list[bool] = []
+        addon._dialog = types.SimpleNamespace(
+            isVisible=lambda: True,
+            mode=lambda: contracts.SearchMode.SMART,
+        )
+        addon._semantic_unload_timer = timer
         addon.backend.abort_semantic_runtime_now = (
             lambda: aborts.append(True) or True
         )
@@ -4461,11 +4815,9 @@ class ControllerTests(unittest.TestCase):
             addon._post_review_resume_timer,
         ) = timers
         pauses = []
-        aborts = []
         addon.backend.set_background_maintenance_paused = (
             lambda paused: pauses.append(bool(paused))
         )
-        addon.backend.abort_semantic_runtime_now = lambda: aborts.append(True)
 
         addon._enter_review_mode()
         first_stop_counts = tuple(timer.stop_count for timer in timers)
@@ -4473,12 +4825,18 @@ class ControllerTests(unittest.TestCase):
 
         self.assertTrue(addon._review_active)
         self.assertEqual(pauses, [True])
-        self.assertEqual(aborts, [True])
         self.assertEqual(
             tuple(timer.stop_count for timer in timers),
             first_stop_counts,
         )
-        self.assertTrue(all(count >= 1 for count in first_stop_counts))
+        self.assertTrue(
+            all(
+                count >= 1
+                for index, count in enumerate(first_stop_counts)
+                if index != 6
+            )
+        )
+        self.assertEqual(first_stop_counts[6], 0)
 
     def test_post_review_drains_durable_lexical_work_before_semantic_resume(
         self,

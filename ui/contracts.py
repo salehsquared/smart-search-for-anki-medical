@@ -293,6 +293,10 @@ class SearchResult:
     browser_query: Optional[str] = None
     score: Optional[float] = None
     title_spans: tuple[HighlightSpan, ...] = ()
+    # True when an Anki card-level filter intentionally narrowed this note to
+    # an exact subset of siblings. Live-state refreshes must preserve that
+    # scope; ordinary external results should instead discover current cards.
+    card_scope_exact: bool = False
 
 
 @dataclass(frozen=True, slots=True)

@@ -207,16 +207,19 @@ Anki while Anki owns the collection connection. External SQLite work, text
 processing, spelling vocabulary construction, model inference, profile
 initialization, and cleanup run outside Anki's graphical interface thread.
 
-Reviewing has an explicit performance embargo: card answers schedule no search
-maintenance, the Semantic worker is not allowed to remain resident, and
-pending edit/sync work resumes only after the reviewer closes and the interface
-has settled.
+Reviewing has an explicit background-work embargo: card answers schedule no
+search maintenance, and pending edit/sync/index work resumes only after the
+reviewer closes and the interface has settled. An explicitly submitted
+Semantic query remains available in the foreground; it is bounded by an
+end-to-end timeout and cannot silently leave the interface in `Searching…`.
 
 Model inference is isolated in a pinned standalone Python 3.13 worker with one
 ONNX thread, single-sequence inference, bounded input messages, and a 256 MiB
 macOS process-memory ceiling. The worker starts only for Semantic work and
 exits afterward, allowing the operating system to reclaim its model, ONNX
-Runtime, and Tokenizers memory. The Anki process receives only a bounded,
+Runtime, and Tokenizers memory. While the visible palette remains in Semantic
+mode, a short idle lease avoids reloading the helper between adjacent searches;
+switching modes or closing the palette reaps it. The Anki process receives only a bounded,
 NumPy-based vector-index layer; it never imports those inference libraries.
 
 Adds, edits, and deletes normally refresh only affected notes. Operations for

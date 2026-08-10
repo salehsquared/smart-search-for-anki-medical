@@ -24,6 +24,10 @@ from .models import (
 )
 from .query import QueryParser
 from .text import display_lines, normalize_text, tokenize
+try:
+    from ..semantic.errors import SemanticRuntimeError, SemanticWorkerError
+except ImportError:  # top-level source-test import
+    from semantic.errors import SemanticRuntimeError, SemanticWorkerError
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +339,15 @@ class SearchEngine:
                     allowed_note_ids=relevance_scope,
                     cancel_check=checkpoint,
                 )
+            except SemanticWorkerError:
+                # A crashed or killed helper is a terminal request failure,
+                # not an empty semantic result set. The host owns one clean
+                # retry/reset policy and must be allowed to surface it.
+                raise
+            except SemanticRuntimeError:
+                # Model/index failures carry a repair classification in the
+                # service. Preserve that terminal state for the host UI.
+                raise
             except Exception as error:
                 semantic_hits = ()
                 warnings.append(f"Semantic search is temporarily unavailable: {error}")

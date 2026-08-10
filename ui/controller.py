@@ -37,6 +37,10 @@ from .widgets import QObject, QTimer, pyqtSignal
 BrowserOpener = Callable[[SearchResult], None]
 MultiBrowserOpener = Callable[[tuple[SearchResult, ...]], None]
 SearchGeneration = tuple[int, str, SearchMode]
+_SEMANTIC_SEARCH_TIMEOUT_MS = 45_000
+_SEMANTIC_TIMEOUT_MESSAGE = (
+    "Semantic search took too long and was stopped. Try again."
+)
 
 
 class SearchController(QObject):
@@ -87,6 +91,7 @@ class SearchController(QObject):
         self._request_counter = 0
         self._active_request_id: Optional[int] = None
         self._cancel_search: Optional[CancelCallback] = None
+        self._semantic_watchdog_request_id: Optional[int] = None
         self._cancel_rebuild: Optional[CancelCallback] = None
         self._deck_request_counter = 0
         self._active_deck_request_id: Optional[int] = None
@@ -151,6 +156,12 @@ class SearchController(QObject):
         self._status_timer = QTimer(self)
         self._status_timer.setInterval(5000)
         self._status_timer.timeout.connect(self.refresh_status)
+        self._semantic_watchdog = QTimer(self)
+        self._semantic_watchdog.setSingleShot(True)
+        self._semantic_watchdog.setInterval(_SEMANTIC_SEARCH_TIMEOUT_MS)
+        self._semantic_watchdog.timeout.connect(
+            self._on_semantic_search_timeout
+        )
         self.resume()
 
     # ---------------------------------------------------------- integration
@@ -372,6 +383,12 @@ class SearchController(QObject):
         # the backend has accepted it.
         if self._active_request_id == request_id:
             self._cancel_search = cancel
+            if (
+                request.mode is SearchMode.SEMANTIC
+                and not request.literal
+            ):
+                self._semantic_watchdog_request_id = request_id
+                self._semantic_watchdog.start()
             self._dialog.show_searching()
 
     def _on_query_edited(self, _query: str) -> None:
@@ -383,8 +400,41 @@ class SearchController(QObject):
     def _invalidate_pending_search(self) -> None:
         self._request_counter += 1
         self._active_request_id = None
+        self._stop_semantic_watchdog()
         self._cancel_pending_search()
         self.previewAutoOpenCancelled.emit()
+
+    def _stop_semantic_watchdog(self, request_id: int | None = None) -> None:
+        if (
+            request_id is not None
+            and request_id != self._semantic_watchdog_request_id
+        ):
+            return
+        self._semantic_watchdog.stop()
+        self._semantic_watchdog_request_id = None
+
+    def _on_semantic_search_timeout(self) -> None:
+        request_id = self._semantic_watchdog_request_id
+        if (
+            request_id is None
+            or request_id != self._request_counter
+            or request_id != self._active_request_id
+        ):
+            self._stop_semantic_watchdog(request_id)
+            return
+
+        # Invalidate before aborting the disposable helper so any callback
+        # already queued on the GUI thread is stale. A later user request then
+        # starts with a fresh generation and cannot wait behind this one.
+        self._invalidate_pending_search()
+        abort = getattr(self._backend, "abort_semantic_runtime_now", None)
+        if callable(abort):
+            try:
+                abort()
+            except Exception:  # noqa: BLE001 - timeout recovery is best effort
+                pass
+        if not self._disposed and self._active:
+            self._dialog.show_error(_SEMANTIC_TIMEOUT_MESSAGE)
 
     def _cancel_pending_search(self) -> None:
         if self._cancel_search is not None:
@@ -402,6 +452,7 @@ class SearchController(QObject):
             or request_id != self._active_request_id
         ):
             return  # stale response from a superseded request
+        self._stop_semantic_watchdog(request_id)
         self._active_request_id = None
         self._cancel_search = None
         visible = [c for c in response.corrections if c not in self._dismissed]
@@ -415,6 +466,10 @@ class SearchController(QObject):
         self.initialPreviewRequested.emit(
             response.results[0] if response.results else None
         )
+        # Search text is already useful. Mutable card scheduling indicators are
+        # a separate, best-effort collection read and must never prolong the
+        # visible Searching state.
+        self._refresh_visible_card_states(response)
 
     def _on_search_error(self, request_id: int, message: str) -> None:
         if self._disposed or not self._active:
@@ -424,6 +479,7 @@ class SearchController(QObject):
             or request_id != self._active_request_id
         ):
             return
+        self._stop_semantic_watchdog(request_id)
         self._active_request_id = None
         self._cancel_search = None
         self._dialog.show_error(message)
@@ -556,12 +612,12 @@ class SearchController(QObject):
             return
         response, corrections, state = origin
         self._dialog.restore_search_view(response, corrections, state)
-        self._refresh_restored_card_states(response)
+        self._refresh_visible_card_states(response)
         if notice:
             self._dialog.set_summary(notice)
 
-    def _refresh_restored_card_states(self, response: SearchResponse) -> None:
-        """Refresh mutable indicators after Back without rerunning search."""
+    def _refresh_visible_card_states(self, response: SearchResponse) -> None:
+        """Refresh mutable indicators without blocking visible search text."""
 
         refresher = getattr(self._backend, "refresh_card_states", None)
         if not callable(refresher) or not response.results:

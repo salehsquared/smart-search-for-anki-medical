@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.0.26] — 2026-08-10
+
+### Fixed
+
+- Explicit Semantic searches now run normally while Anki is in review mode;
+  reviewing still pauses all unsolicited indexing, reconciliation, and model
+  preparation.
+- Every current Semantic request now leaves the searching state through
+  results, a visible retryable error, or a 45-second end-to-end timeout. The
+  timeout also covers work stranded before the isolated helper starts.
+- A stopped or crashed Semantic helper now produces a clear error instead of
+  silently returning unrelated Exact results or an empty successful response.
+- Reviewer entry no longer aborts a foreground Semantic request when canceled
+  background Semantic work happens to be queued behind it.
+
+### Changed
+
+- Newer queries continue to supersede older work, and a timed-out helper is
+  discarded so the next request starts from a clean generation.
+- External Smart and Semantic matches render as soon as retrieval finishes.
+  Mutable card flags, suspension, burial, and live sibling IDs refresh through
+  a separate best-effort collection task and can no longer hold the interface
+  in `Searching…`.
+- The isolated helper stays warm only while the visible search window remains
+  in Semantic mode, then unloads after the existing short idle lease.
+
 ## [1.0.25] — 2026-08-07
 
 ### Added
