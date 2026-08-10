@@ -218,8 +218,9 @@ ONNX thread, single-sequence inference, bounded input messages, and a 256 MiB
 macOS process-memory ceiling. The worker starts only for Semantic work and
 exits afterward, allowing the operating system to reclaim its model, ONNX
 Runtime, and Tokenizers memory. While the visible palette remains in Semantic
-mode, a short idle lease avoids reloading the helper between adjacent searches;
-switching modes or closing the palette reaps it. The Anki process receives only a bounded,
+mode, a 90-second idle lease avoids reloading the helper between adjacent
+searches. Closing the palette reaps it immediately; switching modes leaves the
+existing idle timer to unload it. The Anki process receives only a bounded,
 NumPy-based vector-index layer; it never imports those inference libraries.
 
 Adds, edits, and deletes normally refresh only affected notes. Operations for

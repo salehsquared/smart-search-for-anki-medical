@@ -23,8 +23,9 @@
   Mutable card flags, suspension, burial, and live sibling IDs refresh through
   a separate best-effort collection task and can no longer hold the interface
   in `Searching…`.
-- The isolated helper stays warm only while the visible search window remains
-  in Semantic mode, then unloads after the existing short idle lease.
+- The isolated helper uses the existing 90-second idle lease between adjacent
+  searches. Closing the search window reaps it immediately; after a mode
+  switch, the existing idle timer unloads it.
 
 ## [1.0.25] — 2026-08-07
 
