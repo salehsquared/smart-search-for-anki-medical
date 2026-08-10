@@ -1,10 +1,11 @@
-# AnkiWeb upload handoff — v1.0.26
+# Completed AnkiWeb upload handoff — v1.0.26
 
-## Target
+## Publication outcome
 
-- Update existing public item `677438639` and its single compatibility branch
-  in place.
-- Do not create a duplicate listing or overlapping compatibility branch.
+- Existing public item `677438639` and its single compatibility branch were
+  updated in place on 2026-08-10.
+- No duplicate listing or overlapping compatibility branch was created.
+- Server timestamp: `1786378023` (`2026-08-10T16:07:03Z`).
 
 ## Upload fields
 
@@ -18,15 +19,23 @@
 
 Use `release/ANKIWEB_DESCRIPTION_1.0.26.md` as the exact description source.
 
-## Required post-upload checks
+## Completed post-upload checks
 
-1. Confirm AnkiWeb reports human version `1.0.26`, minimum `241100`, and hard
-   maximum `-260800`.
-2. Confirm boundary downloads at `241100` and `260800` are byte-identical to
-   the frozen archive; reject `241099`, `260801`, and `260900`.
-3. Confirm code `677438639` completes disposable clean installs on Anki 24.11
-   and 26.08 through Anki's official installer.
-4. Confirm a live v1.0.25-to-v1.0.26 update preserves customized configuration,
-   `user_files`, and a synthetic SQLite index.
-5. Verify the rendered listing, tagged image, support/privacy links, and
-   compatibility text.
+1. AnkiWeb reports one branch with minimum `241100` and hard maximum
+   `-260800`; every served archive's manifest reports
+   `human_version=1.0.26`.
+2. All seven supported point versions served `58,116,764` bytes with the
+   frozen SHA-256 and 67 unique members. Boundary downloads were independently
+   byte-compared; `241099`, `260801`, and `260900` returned HTTP 404.
+3. Code `677438639` completed disposable clean installs on Anki 24.11 and
+   26.08 through `aqt.addons.download_and_install_addon()`.
+4. Public v1.0.25-to-v1.0.26 upgrades passed on all seven supported Anki
+   versions while preserving customized configuration, top-level metadata,
+   complete `user_files`, sentinels, and a synthetic SQLite index byte-for-byte.
+5. The rendered listing shows the v1.0.26 description and compatibility text;
+   the tagged synthetic image loads at `1040×732`, **Contact Author** targets
+   the GitHub issue chooser, and the privacy statement renders. The intended
+   privacy endpoint returns HTTP 200 but is not linked from the listing;
+   AnkiWeb leaves bare project/mobile/email strings as text rather than links.
+
+The complete evidence is in `release/RELEASE_RECORD_1.0.26.md`.

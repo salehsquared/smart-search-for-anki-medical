@@ -91,10 +91,10 @@ not part of the public package.
 - [x] Ensure the public repository does not contain generated profile indexes or
       expanded runtimes.
 
-## 6. Distribution-path validation — v1.0.25 public release
+## 6. Distribution-path validation — v1.0.26 public release
 
-Complete local and public v1.0.25 evidence is in
-`RELEASE_RECORD_1.0.25.md`. Historical releases remain in their versioned
+Complete local and public v1.0.26 evidence is in
+`RELEASE_RECORD_1.0.26.md`. Historical releases remain in their versioned
 release records.
 
 ### A. Isolated clean-install matrix
@@ -104,8 +104,9 @@ release records.
 - [x] Create a synthetic profile containing only generated, non-personal notes.
 - [x] Install the release through the same route users will use: first as a
       local `.ankiaddon`, then from the public AnkiWeb numeric code. The frozen
-      archive passed disposable local installs on all seven supported versions;
-      the live code passed clean installs through Anki 24.11 and 26.08.
+      archive and the live code passed disposable clean installs at the Anki
+      24.11 and 26.08 support boundaries; the full automated suite passed under
+      all seven supported Anki runtimes.
 - [x] Restart Anki and confirm no duplicate add-on folders or startup warnings.
 - [x] Verify Smart and Exact before enabling Semantic.
 - [ ] Enable Semantic explicitly; verify download progress, digest validation,
@@ -114,6 +115,10 @@ release records.
       automated tests rather than a second destructive live setup.
 - [x] While Semantic indexes, switch modes repeatedly and confirm Smart and Exact
       stay responsive.
+- [x] Submit live Semantic searches during review and confirm normal completion
+      and rapid replacement-query supersession. Automated tests confirm
+      reviewer-paused background work plus timeout, error, supersession, and
+      result-refresh paths leave `Searching…` deterministically.
 - [ ] Exercise selection, Browser opening, flags, suspend/unsuspend, tags, Undo,
       profile switching, sync, import, and Anki shutdown during idle work.
       Selection, Browser invocation, inline editing, and shutdown passed live;
@@ -125,7 +130,7 @@ release records.
 - [x] Install the oldest version users could reasonably have.
 - [x] Create synthetic indexes and non-default settings.
 - [x] Upgrade through Anki's native `AddonManager.install()` mechanism to the
-      release candidate on every supported version. v1.0.24-to-v1.0.25 passed
+      release candidate on every supported version. v1.0.25-to-v1.0.26 passed
       on all seven supported environments.
 - [x] Confirm intended `user_files` survive, stale generated assets are migrated
       or safely rebuilt, and no duplicate menu item appears.
@@ -160,10 +165,12 @@ fully usable.
 - [x] Update the existing public item in place with the frozen archive; no
       duplicate staging item or compatibility branch was created.
 - [x] Record the assigned numeric add-on code: `677438639`.
-- [x] Repeat clean install and v1.0.24 → v1.0.25 upgrade tests using that
+- [x] Repeat clean install and v1.0.25 → v1.0.26 upgrade tests using that
       numeric code through Anki's official updater.
-- [x] Verify the listing, images, links, formatting, version range, and support
-      contact in AnkiWeb's rendered page.
+- [x] Verify the listing formatting and version range, the tagged image, the
+      **Contact Author** target, and the privacy text in AnkiWeb's rendered
+      page. Bare project/mobile/email strings remain text and the privacy URL is
+      not linked; both presentation details are recorded in the release record.
 - [x] Obtain explicit approval for the public listing.
 - [x] Make the listing public.
 - [x] Install once more from the public code and compare all 67 installed
@@ -178,6 +185,6 @@ release record and are not part of the public beta support claim.
 
 ## 7. Release record
 
-The v1.0.25 artifact, hashes, compatibility evidence, GitHub release, live
+The v1.0.26 artifact, hashes, compatibility evidence, GitHub release, live
 AnkiWeb boundaries, and numeric-code installation evidence are recorded in
-`RELEASE_RECORD_1.0.25.md`. Earlier releases remain in their versioned records.
+`RELEASE_RECORD_1.0.26.md`. Earlier releases remain in their versioned records.
