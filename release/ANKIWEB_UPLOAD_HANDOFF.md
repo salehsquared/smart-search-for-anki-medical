@@ -1,16 +1,17 @@
-# Completed AnkiWeb upload handoff — v1.0.25
+# Completed AnkiWeb upload handoff — v1.0.26
 
 Use the versioned source of truth:
 
-- Upload instructions: `release/ANKIWEB_UPLOAD_HANDOFF_1.0.25.md`
-- Listing description: `release/ANKIWEB_DESCRIPTION_1.0.25.md`
-- Release evidence: `release/RELEASE_RECORD_1.0.25.md`
-- Archive: `dist/Smart_Search_Medical_1.0.25.ankiaddon`
-- SHA-256: `f80d3eb17082c3c2574f5efb3a2ec90be6cc6ceb6d6c76aa1257e41f4c956119`
+- Upload instructions: `release/ANKIWEB_UPLOAD_HANDOFF_1.0.26.md`
+- Listing description: `release/ANKIWEB_DESCRIPTION_1.0.26.md`
+- Release evidence: `release/RELEASE_RECORD_1.0.26.md`
+- Archive: `dist/Smart_Search_Medical_1.0.26.ankiaddon`
+- SHA-256: `07b96d826d88280355babf70ad8311dbac3a2fb3a84c95fbf0b2642586fb027c`
 
-v1.0.25 is live under existing item `677438639` with minimum `241100` and hard
+v1.0.26 is live under existing item `677438639` with minimum `241100` and hard
 maximum `-260800`. The exact public downloads, numeric-code installs, upgrade,
-listing, and GitHub assets passed the checks in the versioned handoff.
+listing, and GitHub assets passed the checks in the versioned handoff and
+release record.
 
-The prior v1.0.15 publication evidence remains in
-`release/RELEASE_RECORD_1.0.15.md`.
+Historical publication evidence remains in the versioned
+`release/RELEASE_RECORD_*.md` files.

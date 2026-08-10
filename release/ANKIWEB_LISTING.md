@@ -1,9 +1,9 @@
-# AnkiWeb listing record — v1.0.25
+# AnkiWeb listing record — v1.0.26
 
 ## Live listing
 
-- **Status:** v1.0.25 public beta is live
-- **Published:** 2026-08-07 UTC (2026-08-07 America/Phoenix)
+- **Status:** v1.0.26 public beta is live
+- **Published:** 2026-08-10 UTC (2026-08-10 America/Phoenix)
 - **AnkiWeb code:** `677438639`
 - **Public URL:** https://ankiweb.net/shared/info/677438639
 - **Supported Anki versions:** 24.11 through hard maximum 26.08
@@ -45,20 +45,21 @@ components and terminology covered by `THIRD_PARTY_NOTICES.md` and `licenses/`.
 
 ## Canonical listing description
 
-`release/ANKIWEB_DESCRIPTION_1.0.25.md` is the exact source published to the
+`release/ANKIWEB_DESCRIPTION_1.0.26.md` is the exact source published to the
 listing. It describes Smart, Exact, and Semantic modes; the searchable deck
 picker and native Anki filters; reviewer-style preview controls and bulk
-actions; automatic first-result preview; compact field-aware rows; Related
-Cards; native Exact semantics; Undo and preview defaults; the native Create
-Copy workflow; Anki 24.11–26.08 compatibility; macOS-only Semantic support;
-local privacy; and the MedBrevia creator/support links.
+actions; request-driven Semantic searches during review; visible worker and
+index errors; the 45-second end-to-end timeout; latest-request-wins
+supersession; prompt Smart/Semantic result rendering; the bounded helper idle
+lease; Anki 24.11–26.08 compatibility; macOS-only Semantic support; local
+privacy; and the MedBrevia creator/support details.
 
 The live description embeds:
 
 1. `assets/screenshots/01-smart-search.png` — typo recovery and ranked results.
 
 It is a synthetic clean-profile capture and rendered successfully from the
-tagged `v1.0.25` GitHub path. No real collection data is shown.
+tagged `v1.0.26` GitHub path. No real collection data is shown.
 
 ## Publication record
 
@@ -86,9 +87,13 @@ tagged `v1.0.25` GitHub path. No real collection data is shown.
   America/Phoenix). All supported downloads, out-of-range routing,
   numeric-code clean installs, and the full live v1.0.24-to-v1.0.25 upgrade
   matrix passed.
-- `release/ANKIWEB_DESCRIPTION_1.0.25.md` is the canonical description source.
+- v1.0.26 updated the same item and branch on 2026-08-10 UTC (2026-08-10
+  America/Phoenix). The served package and compatibility routing, public
+  numeric-code clean installs, and the full v1.0.25-to-v1.0.26 upgrade matrix
+  are recorded in the versioned release record.
+- `release/ANKIWEB_DESCRIPTION_1.0.26.md` is the canonical description source.
 - The rendered listing, server metadata, served-archive comparison, and
-  numeric-code QA are recorded in `release/RELEASE_RECORD_1.0.25.md`.
+  numeric-code QA are recorded in `release/RELEASE_RECORD_1.0.26.md`.
 
 ## Listing maintenance notes
 
