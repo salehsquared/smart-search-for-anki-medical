@@ -170,15 +170,24 @@ replacement query returned the newest result in 642 ms. No cards were answered
 or rescheduled; configuration, the complete `user_files` tree, and the active
 40,683-note generation-1130 lexical and Semantic indexes were preserved.
 
-After publication, a member-by-member comparison against the exact public
-archive found all functional packaged files byte-identical. Only
-`CHANGELOG.md`, `PRIVACY.md`, `README.md`, and `SUPPORT.md` differ because the
-personal copy was installed before final release-document wording was frozen.
-An unfinished Add-note window was active during the public-parity check, so the
-documentation-only reinstall and restart were deliberately deferred rather
-than risk discarding or interrupting card input. This does not affect runtime
-behavior, and the exact public archive is independently certified by the nine
-disposable numeric-code installer cases above.
+After the Add-note work was saved and Anki had quit cleanly, the complete
+named add-on folder was backed up to
+`/Users/saleh/Documents/Personal/anki-smart-search-backups/2026-08-10-092940-pre-public-v1.0.26`.
+The literal AnkiWeb-served `p=241100` archive was then installed through Anki's
+supported add-on installer and Anki was restarted. All 67 public archive
+members matched the installed bytes, only the named `smart_search_medical`
+folder was present, and no numeric duplicate or `files_backup` appeared.
+
+The canonical configuration and complete `meta.json` hashes were unchanged.
+The persistent `user_files` tree retained 4,516 files and 514,374,014 bytes;
+its active external index files reconciled normally from generation 1139 with
+40,691 notes to aligned lexical and Semantic generation 1141 with 40,690
+notes. Search, maintenance, and Semantic SQLite `quick_check` each returned
+`ok`, the dirty-note queue was empty, and vector metadata matched the active
+lexical index. Smart Search opened normally and reported
+`Smart & Exact ready — 40,690 notes ready`. No direct writes were made to the
+Anki collection; external-index changes occurred only through the add-on's
+supported reconciliation path, and no cards were answered or rescheduled.
 
 ## Publication gates
 
@@ -195,8 +204,9 @@ disposable numeric-code installer cases above.
 - [x] The public v1.0.25-to-v1.0.26 upgrade preserves configuration,
       `user_files`, and synthetic SQLite data on all seven supported Anki
       versions.
-- [x] The personal Anki installation runs the certified v1.0.26 functional
-      code and passed the reviewer-mode live smoke; a documentation-only exact
-      archive reinstall is deferred until Anki is quiescent.
+- [x] The exact AnkiWeb-served v1.0.26 archive is installed in the personal
+      Anki installation; configuration and persistent files were preserved,
+      the external indexes reconciled cleanly, and the pre-publication
+      reviewer-mode smoke and post-install exact-archive smoke passed.
 
 First-window support monitoring remains ongoing.
