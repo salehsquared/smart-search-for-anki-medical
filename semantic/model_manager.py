@@ -23,7 +23,6 @@ from .manifest import (
     MODEL_NAME,
     MODEL_REPOSITORY,
     MODEL_REVISION,
-    HOST_VECTOR_WHEELS,
     WORKER_PYTHON_FILENAME,
     WORKER_PYTHON_SHA256,
     WORKER_RUNTIME_TAG,
@@ -36,9 +35,16 @@ from .manifest import (
 ProgressCallback = Callable[[str, int, int], None]
 CancelCheck = Callable[[], None]
 MACOS_ARM64_RUNTIME_TAG = WORKER_RUNTIME_TAG
-MACOS_ARM64_PY39_RUNTIME_TAG = "darwin-arm64-py39"
 MINIMUM_SEMANTIC_MACOS_MAJOR = 14
-DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.26"
+DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.27"
+
+_OBSOLETE_DERIVED_RUNTIME_NAMES = (
+    "darwin-arm64-py39",
+    "darwin-arm64-py313",
+    "vector-darwin-arm64-py39",
+    "vector-darwin-arm64-py313",
+)
+_OBSOLETE_DERIVED_RUNTIME_SUFFIXES = ("", ".previous", ".staging")
 
 
 class ModelInstallError(RuntimeError):
@@ -103,21 +109,6 @@ class ModelManager:
         return self.runtime_dir / "site-packages"
 
     @property
-    def host_vector_tag(self) -> str:
-        system = platform.system().casefold()
-        machine = platform.machine().casefold()
-        if system == "darwin" and machine in {"arm64", "aarch64"}:
-            machine = "arm64"
-        return (
-            f"{system}-{machine}-py"
-            f"{sys.version_info.major}{sys.version_info.minor}"
-        )
-
-    @property
-    def host_vector_runtime_dir(self) -> Path:
-        return self.data_root / "runtime" / ("vector-" + self.host_vector_tag)
-
-    @property
     def model_path(self) -> Path:
         return self.model_dir / "model_int8.onnx"
 
@@ -137,16 +128,12 @@ class ModelManager:
 
     def runtime_supported(self) -> bool:
         tag = runtime_tag()
-        return (
-            tag == WORKER_RUNTIME_TAG
-            and self.host_vector_tag in HOST_VECTOR_WHEELS
-            and _runtime_platform_supported(tag)
-        )
+        return tag == WORKER_RUNTIME_TAG and _runtime_platform_supported(tag)
 
     def runtime_ready(self) -> bool:
         if not self.runtime_supported():
             return False
-        return self.worker_runtime_ready() and self._host_vector_runtime_ready()
+        return self.worker_runtime_ready()
 
     def worker_runtime_ready(self) -> bool:
         """Validate only the isolated worker's pinned runtime payload."""
@@ -182,22 +169,6 @@ class ModelManager:
         return all(
             (self.worker_site_packages / relative).is_file()
             for relative in required_packages
-        )
-
-    def _host_vector_runtime_ready(self) -> bool:
-        marker = self.host_vector_runtime_dir / ".smart-search-vector-runtime.json"
-        try:
-            payload = json.loads(marker.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return False
-        return (
-            payload.get("runtime_tag") == self.host_vector_tag
-            and payload.get("wheels")
-            == [
-                wheel.filename
-                for wheel in HOST_VECTOR_WHEELS.get(self.host_vector_tag, ())
-            ]
-            and (self.host_vector_runtime_dir / "numpy" / "__init__.py").is_file()
         )
 
     def install_model(
@@ -254,7 +225,6 @@ class ModelManager:
         tag = runtime_tag()
         if (
             tag != WORKER_RUNTIME_TAG
-            or self.host_vector_tag not in HOST_VECTOR_WHEELS
             or not _runtime_platform_supported(tag)
         ):
             raise UnsupportedRuntimeError(
@@ -262,6 +232,7 @@ class ModelManager:
                 "Apple silicon. Smart and Exact search remain available."
             )
         if self.runtime_ready() and not force:
+            self._remove_obsolete_derived_runtimes()
             return
 
         python_archive = (
@@ -278,13 +249,6 @@ class ModelManager:
         ]
         if not python_archive.is_file():
             missing.insert(0, WORKER_PYTHON_FILENAME)
-        host_vector_wheels = HOST_VECTOR_WHEELS[self.host_vector_tag]
-        host_wheel_dir = self.bundle_root / "vendor_wheels" / self.host_vector_tag
-        missing.extend(
-            wheel.filename
-            for wheel in host_vector_wheels
-            if not (host_wheel_dir / wheel.filename).is_file()
-        )
         if missing:
             raise RuntimeInstallError(
                 "The semantic runtime bundle is incomplete: " + ", ".join(missing)
@@ -333,11 +297,7 @@ class ModelManager:
                 },
             )
             self._replace_directory(staging, self.runtime_dir)
-            self._install_host_vector_runtime(
-                force=force,
-                cancel_check=cancel_check,
-            )
-            self._remove_legacy_runtimes()
+            self._remove_obsolete_derived_runtimes()
         except Exception:
             if staging.exists():
                 shutil.rmtree(staging)
@@ -347,13 +307,6 @@ class ModelManager:
         if not self.worker_runtime_ready():
             raise RuntimeInstallError("The local semantic runtime is not installed.")
         runtime_text = str(self.worker_site_packages)
-        if runtime_text not in sys.path:
-            sys.path.insert(0, runtime_text)
-
-    def activate_vector_runtime(self) -> None:
-        if not self.runtime_ready():
-            raise RuntimeInstallError("The local semantic runtime is not installed.")
-        runtime_text = str(self.host_vector_runtime_dir)
         if runtime_text not in sys.path:
             sys.path.insert(0, runtime_text)
 
@@ -380,55 +333,19 @@ class ModelManager:
             "download_bytes": sum(item.size for item in MODEL_ARTIFACTS),
         }
 
-    def _install_host_vector_runtime(
-        self,
-        *,
-        force: bool,
-        cancel_check: CancelCheck | None,
-    ) -> None:
-        if self._host_vector_runtime_ready() and not force:
-            return
-        wheels = HOST_VECTOR_WHEELS[self.host_vector_tag]
-        wheel_dir = self.bundle_root / "vendor_wheels" / self.host_vector_tag
-        destination = self.host_vector_runtime_dir
-        staging = destination.with_name(destination.name + ".staging")
-        if staging.exists():
-            shutil.rmtree(staging)
-        staging.mkdir(parents=True, exist_ok=True)
-        try:
-            for wheel in wheels:
-                if cancel_check is not None:
-                    cancel_check()
-                source = wheel_dir / wheel.filename
-                if sha256_file(source, cancel_check=cancel_check) != wheel.sha256:
-                    raise RuntimeInstallError(f"Checksum failed for {wheel.filename}")
-                self._extract_wheel(
-                    source,
-                    staging,
-                    cancel_check=cancel_check,
-                )
-            self._atomic_write_json(
-                staging / ".smart-search-vector-runtime.json",
-                {
-                    "runtime_tag": self.host_vector_tag,
-                    "installed_at": int(time.time()),
-                    "wheels": [wheel.filename for wheel in wheels],
-                },
-            )
-            self._replace_directory(staging, destination)
-        except Exception:
-            if staging.exists():
-                shutil.rmtree(staging)
-            raise
-
-    def _remove_legacy_runtimes(self) -> None:
-        """Remove only obsolete derived native runtimes after a good upgrade."""
+    def _remove_obsolete_derived_runtimes(self) -> None:
+        """Remove only known obsolete runtimes after worker verification."""
 
         runtime_root = self.data_root / "runtime"
-        for name in ("darwin-arm64-py39", "darwin-arm64-py313"):
-            legacy = runtime_root / name
-            if legacy != self.runtime_dir and legacy.exists():
-                shutil.rmtree(legacy)
+        for name in _OBSOLETE_DERIVED_RUNTIME_NAMES:
+            for suffix in _OBSOLETE_DERIVED_RUNTIME_SUFFIXES:
+                obsolete = runtime_root / (name + suffix)
+                if obsolete == self.runtime_dir:
+                    continue
+                if obsolete.is_symlink() or obsolete.is_file():
+                    obsolete.unlink()
+                elif obsolete.exists():
+                    shutil.rmtree(obsolete)
 
     @staticmethod
     def _replace_directory(staging: Path, destination: Path) -> None:

@@ -17,6 +17,20 @@ PROTOCOL_VERSION = 1
 MAX_TEXT_UTF8_BYTES = 16 * 1024
 MAX_TEXTS_PER_REQUEST = 32
 MAX_TOTAL_TEXT_UTF8_BYTES = MAX_TEXT_UTF8_BYTES * MAX_TEXTS_PER_REQUEST
+# Vector payloads are fixed-size float32 values. Keep a vector mutation no
+# larger than an embedding request so a malformed or accidental caller cannot
+# make either process build an unbounded matrix.
+MAX_VECTORS_PER_REQUEST = MAX_TEXTS_PER_REQUEST
+# SQLite INTEGER values are signed 64-bit values, as are Anki note IDs.
+MAX_NOTE_ID = (1 << 63) - 1
+# A full profile filter is normally much smaller than this. Larger filters are
+# split into independent requests by the host client, then merged there from
+# plain validated hit records.
+MAX_NOTE_IDS_PER_REQUEST = 50_000
+# Search results cross the process boundary as small JSON records. The normal
+# UI limit is 50; this ceiling keeps even direct callers inside the 1 MiB
+# response budget.
+MAX_SEARCH_HITS_PER_RESPONSE = 10_000
 MAX_REQUEST_FRAME_BYTES = 4 * 1024 * 1024
 MAX_RESPONSE_FRAME_BYTES = 1024 * 1024
 # Backward-compatible name for callers/tests that mean the largest legal

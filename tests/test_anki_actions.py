@@ -7,6 +7,11 @@ import types
 import unittest
 from unittest.mock import patch
 
+from backend.host_safety import (
+    HostBackendUnavailable,
+    _reset_host_backend_quarantine_for_tests,
+)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE_NAME = "_smart_search_anki_actions_tests"
@@ -989,6 +994,9 @@ class GuardedUndoTests(unittest.TestCase):
 
 
 class CollectionOpTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _reset_host_backend_quarantine_for_tests()
+
     def test_start_uses_exactly_one_collection_op_and_initiator(self) -> None:
         collection = _Collection(notes={10: object(), 11: object()})
         action = actions.CollectionAction(
@@ -1114,6 +1122,65 @@ class CollectionOpTests(unittest.TestCase):
         self.assertIs(created[0].initiator, initiator)
         self.assertEqual(successes, [])
         self.assertEqual(failures, [expected_error])
+
+    def test_pyo3_base_exception_becomes_normal_collection_op_failure(self) -> None:
+        panic_type = type(
+            "PanicException",
+            (BaseException,),
+            {"__module__": "pyo3_runtime"},
+        )
+        failures = []
+        escaped = []
+
+        class FakeCollectionOp:
+            def __init__(self, *, parent, op) -> None:
+                del parent
+                self.op = op
+                self.success_callback = None
+                self.failure_callback = None
+
+            def success(self, callback):
+                self.success_callback = callback
+                return self
+
+            def failure(self, callback):
+                self.failure_callback = callback
+                return self
+
+            def run_in_background(self, *, initiator):
+                del initiator
+                try:
+                    output = self.op(
+                        types.SimpleNamespace(
+                            get_card=lambda _card_id: (_ for _ in ()).throw(
+                                panic_type("poisoned")
+                            )
+                        )
+                    )
+                except Exception as error:
+                    self.failure_callback(error)
+                except BaseException as error:
+                    escaped.append(error)
+                else:
+                    self.success_callback(output)
+                return self
+
+        actions.start_collection_action(
+            parent=object(),
+            initiator=object(),
+            action=actions.CollectionAction(
+                actions.ActionKind.FLAG,
+                card_ids=(1,),
+                flag=1,
+            ),
+            on_success=lambda _outcome: self.fail("unexpected success"),
+            on_failure=failures.append,
+            collection_op_factory=FakeCollectionOp,
+        )
+
+        self.assertEqual(escaped, [])
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], HostBackendUnavailable)
 
 
 if __name__ == "__main__":

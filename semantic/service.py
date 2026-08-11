@@ -13,7 +13,7 @@ from typing import Any
 from .errors import SemanticRuntimeError, SemanticWorkerError
 from .model_manager import ModelManager
 from .vector_index import VectorIndex
-from .worker_client import SemanticWorkerClient
+from .worker_client import SemanticIndexWorkerError, SemanticWorkerClient
 
 
 _HASH_LOOKUP_BATCH_SIZE = 900
@@ -102,7 +102,7 @@ class SemanticService:
     def status(self) -> SemanticStatus:
         return SemanticStatus(
             supported=self.manager.runtime_supported(),
-            runtime_ready=self.manager.runtime_ready(),
+            runtime_ready=self.manager.worker_runtime_ready(),
             model_ready=self.manager.model_ready(),
             index_count=self.index.count(),
             error=self._last_error,
@@ -293,6 +293,12 @@ class SemanticService:
             self._last_error = None
             self._last_error_kind = None
             return indexed
+        except SemanticIndexWorkerError as error:
+            if cancel_check is not None:
+                cancel_check()
+            self._last_error = str(error)
+            self._last_error_kind = "index"
+            raise
         except SemanticWorkerError:
             # A killed/crashed helper is disposable. Reviewer cancellation is
             # re-raised by the caller's checkpoint; any other transient child
@@ -328,15 +334,20 @@ class SemanticService:
         )
         if cancel_check is not None:
             cancel_check()
-        self.manager.activate_vector_runtime()
-        self.index.upsert_many(
+        indexed = self._worker.upsert_vectors(
+            self.index.root,
             [document.note_id for document in documents],
             [document.content_hash for document in documents],
             vectors,
+            cancel_check=cancel_check,
         )
         if cancel_check is not None:
             cancel_check()
-        return len(documents)
+        if indexed != len(documents):
+            raise SemanticWorkerError(
+                "Semantic worker returned the wrong indexed count."
+            )
+        return indexed
 
     def remove_notes(
         self,
@@ -382,8 +393,8 @@ class SemanticService:
                 )[0]
             if cancel_check is not None:
                 cancel_check()
-            self.manager.activate_vector_runtime()
-            hits = self.index.search(
+            hits = self._worker.search_vector(
+                self.index.root,
                 vector,
                 limit=limit,
                 allowed_note_ids=allowed_note_ids,
@@ -392,9 +403,17 @@ class SemanticService:
             self._last_error = None
             self._last_error_kind = None
             return [
-                SemanticHit(note_id=hit.note_id, score=hit.score)
-                for hit in hits
+                SemanticHit(note_id=note_id, score=score)
+                for note_id, score in hits
             ]
+        except SemanticIndexWorkerError as error:
+            if cancel_check is not None:
+                cancel_check()
+            self._last_error = str(error)
+            self._last_error_kind = "index"
+            raise SemanticRuntimeError(
+                "The Semantic index could not complete this search."
+            ) from error
         except SemanticWorkerError:
             # A child crash, lifecycle termination, or protocol fault does not
             # imply that the verified local assets are corrupt. Surface one

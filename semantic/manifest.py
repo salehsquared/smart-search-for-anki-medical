@@ -92,11 +92,6 @@ class RuntimeWheel:
     sha256: str
 
 
-DARWIN_ARM64_PY39_NUMPY = RuntimeWheel(
-    filename="numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl",
-    sha256="2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b",
-)
-
 DARWIN_ARM64_PY313 = (
     RuntimeWheel(
         filename="onnxruntime-1.28.0-cp313-cp313-macosx_14_0_arm64.whl",
@@ -118,12 +113,6 @@ DARWIN_ARM64_PY313 = (
 
 WORKER_RUNTIME_WHEELS = DARWIN_ARM64_PY313
 RUNTIME_WHEELS = {WORKER_RUNTIME_TAG: WORKER_RUNTIME_WHEELS}
-HOST_VECTOR_WHEELS = {
-    # The host process receives NumPy only. Inference libraries are confined
-    # to the standalone worker so they can be fully reclaimed after use.
-    "darwin-arm64-py39": (DARWIN_ARM64_PY39_NUMPY,),
-    "darwin-arm64-py313": (DARWIN_ARM64_PY313[1],),
-}
 
 
 def runtime_tag() -> str:

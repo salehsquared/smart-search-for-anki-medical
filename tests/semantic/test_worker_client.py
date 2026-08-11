@@ -12,8 +12,8 @@ from unittest.mock import patch
 
 from semantic.errors import SemanticRuntimeError, SemanticWorkerError
 from semantic.manifest import MODEL_DIMENSION, MODEL_REVISION
-from semantic.worker_client import SemanticWorkerClient
-from semantic.worker_protocol import MAX_TEXT_UTF8_BYTES
+from semantic.worker_client import SemanticIndexWorkerError, SemanticWorkerClient
+from semantic.worker_protocol import MAX_NOTE_IDS_PER_REQUEST, MAX_TEXT_UTF8_BYTES
 
 
 _FAKE_WORKER = r'''import argparse
@@ -83,6 +83,42 @@ while True:
         time.sleep(30)
     request_id = request["request_id"] + (1 if args.mode == "stale" else 0)
     dimension = args.dimension + (1 if args.mode == "wrong_dim" else 0)
+    if request.get("op") == "upsert_vectors":
+        indexed = len(request.get("note_ids", []))
+        if args.mode == "bad_index_count":
+            indexed += 1
+        response = {
+            "protocol": 1,
+            "nonce": args.nonce,
+            "request_id": request_id,
+            "ok": args.mode != "index_error",
+            "indexed": indexed,
+        }
+        if args.mode == "index_error":
+            response["error"] = "index write failed"
+            response["error_kind"] = "index"
+        send(response, fragmented=args.mode == "fragmented")
+        continue
+    if request.get("op") == "search_vector":
+        allowed = request.get("allowed_note_ids")
+        note_id = 42 if allowed is None else allowed[0]
+        hits = [{"note_id": note_id, "score": 0.75}]
+        if args.mode == "bad_hit":
+            hits = [{"note_id": note_id, "score": float("nan")}]
+        elif args.mode == "outside_hit":
+            hits = [{"note_id": 999999, "score": 0.75}]
+        response = {
+            "protocol": 1,
+            "nonce": args.nonce,
+            "request_id": request_id,
+            "ok": args.mode != "index_error",
+            "hits": hits,
+        }
+        if args.mode == "index_error":
+            response["error"] = "index read failed"
+            response["error_kind"] = "index"
+        send(response, fragmented=args.mode == "fragmented")
+        continue
     vectors = []
     for _text in request.get("texts", []):
         values = [0.0] * args.dimension
@@ -222,6 +258,80 @@ class SemanticWorkerClientTests(unittest.TestCase):
 
         self.assertEqual(len(vectors), 65)
         self.assertEqual(client._request_id, 3)
+
+    def test_vector_upsert_and_search_stay_inside_worker(self) -> None:
+        client = self._client()
+        index_root = self.root / "data" / "profiles" / "profile" / "vectors"
+        vectors = client.embed(["heart failure"], background=True)
+
+        indexed = client.upsert_vectors(
+            index_root,
+            [42],
+            ["a" * 64],
+            vectors,
+        )
+        hits = client.search_vector(
+            index_root,
+            vectors[0],
+            limit=5,
+            allowed_note_ids={42},
+        )
+
+        self.assertEqual(indexed, 1)
+        self.assertEqual(hits, [(42, 0.75)])
+
+    def test_large_vector_operations_are_chunked_and_merged(self) -> None:
+        client = self._client()
+        index_root = self.root / "data" / "profiles" / "profile" / "vectors"
+        vector = [1.0] + [0.0] * (MODEL_DIMENSION - 1)
+
+        indexed = client.upsert_vectors(
+            index_root,
+            list(range(65)),
+            ["a" * 64] * 65,
+            [vector] * 65,
+        )
+        upsert_requests = client._request_id
+        hits = client.search_vector(
+            index_root,
+            vector,
+            limit=5,
+            allowed_note_ids=set(range(MAX_NOTE_IDS_PER_REQUEST + 1)),
+        )
+
+        self.assertEqual(indexed, 65)
+        self.assertEqual(upsert_requests, 3)
+        self.assertEqual(client._request_id, 5)
+        self.assertEqual(hits, [(0, 0.75), (MAX_NOTE_IDS_PER_REQUEST, 0.75)])
+
+    def test_vector_worker_errors_and_invalid_results_fail_closed(self) -> None:
+        index_root = self.root / "data" / "profiles" / "profile" / "vectors"
+
+        client = self._client("index_error")
+        vector = [1.0] + [0.0] * (MODEL_DIMENSION - 1)
+        with self.assertRaisesRegex(SemanticIndexWorkerError, "index write failed"):
+            client.upsert_vectors(index_root, [42], ["a" * 64], [vector])
+        self.assertFalse(client.running)
+
+        for mode, message in (
+            ("bad_hit", "invalid search result"),
+            ("outside_hit", "invalid search result"),
+        ):
+            with self.subTest(mode=mode):
+                client = self._client(mode)
+                with self.assertRaisesRegex(SemanticWorkerError, message):
+                    client.search_vector(
+                        index_root,
+                        vector,
+                        limit=5,
+                        allowed_note_ids={42},
+                    )
+                self.assertFalse(client.running)
+
+        client = self._client("bad_index_count")
+        with self.assertRaisesRegex(SemanticWorkerError, "indexed count"):
+            client.upsert_vectors(index_root, [42], ["a" * 64], [vector])
+        self.assertFalse(client.running)
 
     def test_pathological_text_is_bounded_before_worker_ipc(self) -> None:
         client = self._client()

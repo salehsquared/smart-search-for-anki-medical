@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 import platform
+import subprocess
+import sys
 import tempfile
 import unittest
 
-from scripts.perf.benchmark_semantic_worker import run_benchmark
-
-
 _MODEL_ENVIRONMENT_VARIABLE = "SMART_SEARCH_REAL_MODEL_DIR"
+_BENCHMARK = (
+    Path(__file__).resolve().parents[2]
+    / "scripts"
+    / "perf"
+    / "benchmark_semantic_worker.py"
+)
 _SUPPORTED_PLATFORM = (
     platform.system() == "Darwin"
     and platform.machine().casefold() in {"arm64", "aarch64"}
@@ -26,28 +32,59 @@ class RealSemanticWorkerIntegrationTests(unittest.TestCase):
         model_dir = Path(os.environ[_MODEL_ENVIRONMENT_VARIABLE])
         cycles = max(2, int(os.environ.get("SMART_SEARCH_REAL_CYCLES", "2")))
         with tempfile.TemporaryDirectory(prefix="smart-search-real-test-") as root:
-            result = run_benchmark(
-                model_dir=model_dir,
-                data_root=Path(root) / "data",
-                cycles=cycles,
-                idle_seconds=0.2,
-                host_reference_mib=300.0,
-                max_worker_mib=192.0,
-                max_host_overhead_percent=15.0,
-                vector_index_dir=(
-                    Path(os.environ["SMART_SEARCH_REAL_VECTOR_INDEX_DIR"])
-                    if os.environ.get("SMART_SEARCH_REAL_VECTOR_INDEX_DIR")
-                    else None
-                ),
+            output = Path(root) / "result.json"
+            command = [
+                sys.executable,
+                "-I",
+                str(_BENCHMARK),
+                "--model-dir",
+                str(model_dir),
+                "--data-root",
+                str(Path(root) / "data"),
+                "--cycles",
+                str(cycles),
+                "--idle-seconds",
+                "0.2",
+                "--host-reference-mib",
+                "300",
+                "--max-worker-mib",
+                "224",
+                "--max-host-overhead-percent",
+                "15",
+                "--json-output",
+                str(output),
+            ]
+            vector_index = os.environ.get(
+                "SMART_SEARCH_REAL_VECTOR_INDEX_DIR"
             )
+            if vector_index:
+                command.extend(("--vector-index-dir", vector_index))
+            environment = os.environ.copy()
+            environment.pop("PYTHONPATH", None)
+            environment["PYTHONNOUSERSITE"] = "1"
+            completed = subprocess.run(
+                command,
+                cwd=Path(root),
+                env=environment,
+                capture_output=True,
+                text=True,
+                timeout=900,
+                check=False,
+            )
+            self.assertEqual(
+                completed.returncode,
+                0,
+                completed.stdout + "\n" + completed.stderr,
+            )
+            result = json.loads(output.read_text(encoding="utf-8"))
 
         self.assertTrue(result["passed"], result)
         self.assertTrue(result["checks"]["all_workers_reaped"])
         self.assertTrue(
-            result["checks"]["native_inference_modules_not_loaded_in_host"]
+            result["checks"]["native_semantic_modules_not_loaded_in_host"]
         )
-        self.assertTrue(result["checks"]["host_vector_runtime_is_numpy_only"])
-        self.assertTrue(result["checks"]["host_vector_search_round_trip"])
+        self.assertTrue(result["checks"]["worker_vector_round_trip"])
+        self.assertFalse(result["native_modules_after"]["numpy"])
         self.assertLessEqual(result["deterministic_max_abs_difference"], 1e-6)
 
 

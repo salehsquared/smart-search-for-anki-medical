@@ -254,6 +254,37 @@ class VectorIndexTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "size does not match"):
                 VectorIndex(root, dimension=2)
 
+    def test_constructor_trims_uncommitted_vector_file_growth(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index = VectorIndex(root, dimension=2)
+            index.upsert_many(
+                [10],
+                ["hash-10"],
+                np.asarray([[1.0, 0.0]], dtype=np.float32),
+            )
+            committed_size = index.vector_path.stat().st_size
+            with index.vector_path.open("r+b") as handle:
+                handle.truncate(committed_size + 1024 * 2 * 2)
+
+            recovered = VectorIndex(root, dimension=2)
+
+            self.assertEqual(recovered.vector_path.stat().st_size, committed_size)
+            self.assertEqual(recovered.count(), 1)
+            self.assertEqual(recovered.search([1.0, 0.0])[0].note_id, 10)
+
+    def test_constructor_trims_interrupted_first_growth_to_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            index = VectorIndex(root, dimension=2)
+            with index.vector_path.open("r+b") as handle:
+                handle.truncate(1024 * 2 * 2)
+
+            recovered = VectorIndex(root, dimension=2)
+
+            self.assertEqual(recovered.vector_path.stat().st_size, 0)
+            self.assertEqual(recovered.count(), 0)
+
     def test_constructor_rejects_negative_or_excessive_next_slot(self) -> None:
         for invalid in (-1, 1_025):
             with self.subTest(next_slot=invalid), tempfile.TemporaryDirectory() as directory:

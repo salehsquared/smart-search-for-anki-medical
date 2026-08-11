@@ -10,6 +10,10 @@ import sys
 from typing import Any, NamedTuple
 
 from .backend.models import IndexedNote
+from .backend.host_safety import (
+    contain_host_backend_panic,
+    require_host_backend,
+)
 from .ui.contracts import DeckCatalog, DeckEntry
 
 CardStateSnapshot = tuple[int, int, bool, bool]  # id, flag, suspended, buried
@@ -202,7 +206,9 @@ def create_result_previewer(
             if card_id <= 0 or getattr(self.mw, "col", None) is None:
                 return None
             try:
-                card = self.mw.col.get_card(card_id)
+                card = contain_host_backend_panic(
+                    lambda: self.mw.col.get_card(card_id)
+                )
             except Exception:
                 # A card can be deleted after the immutable result arrives.
                 return None
@@ -1076,7 +1082,9 @@ def open_note_ids_in_browser(
     if not ids:
         return
     nodes = tuple(SearchNode(nid=note_id) for note_id in ids)
-    grouped = mw.col.group_searches(*nodes, joiner="OR")
+    grouped = contain_host_backend_panic(
+        lambda: mw.col.group_searches(*nodes, joiner="OR")
+    )
     # Keep the Browser's visible query identical to the query it executed.
     # Showing the Smart Search prompt here would make a later Enter press run
     # different native Anki semantics against the same result set.
@@ -1092,6 +1100,7 @@ def open_card_ids_in_browser(card_ids: Iterable[int]) -> None:
     ids = tuple(dict.fromkeys(int(card_id) for card_id in card_ids if int(card_id) > 0))
     if not ids:
         return
+    require_host_backend()
     # ``cid:1,2,3`` is Anki's documented exact card-ID search syntax.
     query = "cid:" + ",".join(str(card_id) for card_id in ids)
     aqt.dialogs.open("Browser", mw, search=(query,))
@@ -1101,4 +1110,5 @@ def open_native_query_in_browser(query: str) -> None:
     import aqt
     from aqt import mw
 
+    require_host_backend()
     aqt.dialogs.open("Browser", mw, search=(str(query or ""),))

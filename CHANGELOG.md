@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.0.27] — 2026-08-10
+
+### Fixed
+
+- Smart Search now closes its collection-access gate before Anki queues a
+  collection or media sync. Queued add-on work rechecks the gate inside its
+  worker, and maintenance resumes only after sync, media sync, temporary
+  collection replacement, and Anki's deferred reset have all finished.
+- A PyO3-wrapped Rust backend panic from an add-on collection call is now
+  converted to one normal restart-required error. A process-lifetime circuit
+  breaker cancels add-on work and prevents every later Smart Search collection
+  read, preview, editor action, or mutation from touching a poisoned backend.
+- Interrupted Semantic vector-file growth now trims only the uncommitted tail
+  recorded beyond SQLite's committed capacity, so a killed helper can retry
+  without leaving Semantic Search in a repair loop.
+
+### Changed
+
+- Embedding, NumPy vector writes, and vector search now all run in the bounded,
+  disposable Semantic worker. Anki's process receives validated plain results
+  and no longer imports any native Semantic package.
+- The obsolete Python 3.9 host NumPy payload and derived host-vector runtimes
+  were removed. Existing derived copies are deleted only after the isolated
+  worker runtime verifies successfully.
+- A host-backend panic fails Smart Search closed for the rest of that Anki
+  process and stops the optional Semantic helper. Restarting Anki creates a
+  fresh host backend; Smart Search never retries against a poisoned one.
+
 ## [1.0.26] — 2026-08-10
 
 ### Fixed

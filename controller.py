@@ -34,6 +34,12 @@ import time
 from typing import Any
 
 from .backend.compat import dataclass, optional_hook
+from .backend.host_safety import (
+    HOST_BACKEND_RESTART_MESSAGE,
+    HostBackendUnavailable,
+    contain_host_backend_panic,
+    host_backend_quarantined,
+)
 
 from .anki_actions import (
     ActionKind,
@@ -141,6 +147,10 @@ class _CancelledOperation(RuntimeError):
 
 
 class _BundleUpdatePending(RuntimeError):
+    pass
+
+
+class _CollectionAccessPaused(RuntimeError):
     pass
 
 
@@ -288,6 +298,7 @@ class AnkiSearchBackend:
         self._background_op_count = 0
         self._bundle_update_running = False
         self._background_maintenance_paused = False
+        self._collection_access_paused = False
         self._maintenance_running = False
         self._vocabulary_refresh_running = False
         self._vocabulary_refresh_token: int | None = None
@@ -302,6 +313,8 @@ class AnkiSearchBackend:
         self._auto_semantic_index = True
         self._semantic_activity_callback: Callable[[bool], None] = _noop
         self._semantic_cancelled_callback: Callable[[], None] = _noop
+        self._host_backend_failure_callback: Callable[[Exception], None] = _noop
+        self._host_backend_failure_notified = False
 
     # ------------------------------------------------------------------
     # Profile lifecycle
@@ -334,6 +347,54 @@ class AnkiSearchBackend:
         """Notify the host when canceled model maintenance has fully unwound."""
 
         self._semantic_cancelled_callback = callback or _noop
+
+    def set_host_backend_failure_callback(
+        self,
+        callback: Callable[[Exception], None] | None,
+    ) -> None:
+        """Notify the GUI once when Anki's collection backend is quarantined."""
+
+        self._host_backend_failure_callback = callback or _noop
+
+    @property
+    def collection_access_blocked(self) -> bool:
+        """Whether Smart Search must not touch Anki's collection right now."""
+
+        with self._state_lock:
+            paused = self._collection_access_paused
+        return paused or host_backend_quarantined()
+
+    def set_collection_access_paused(self, paused: bool) -> None:
+        """Apply the transient sync/media/full-sync collection gate."""
+
+        with self._state_lock:
+            self._collection_access_paused = bool(paused)
+
+    def _notify_host_backend_failure(self, error: Exception) -> None:
+        """Open the sticky circuit and report one restart-required failure."""
+
+        events: tuple[threading.Event, ...]
+        callback: Callable[[Exception], None]
+        with self._state_lock:
+            self._collection_access_paused = True
+            self._background_maintenance_paused = True
+            events = tuple(self._active_cancellations)
+            if self._host_backend_failure_notified:
+                callback = _noop
+            else:
+                self._host_backend_failure_notified = True
+                callback = self._host_backend_failure_callback
+        for event in events:
+            event.set()
+        try:
+            callback(error)
+        except Exception:
+            pass
+
+    def quarantine_host_backend(self, error: Exception) -> None:
+        """Stop every add-on operation after a direct GUI host panic."""
+
+        self._notify_host_backend_failure(error)
 
     def begin_bundle_update(self) -> bool:
         """Claim an exclusive, fail-closed lane for Anki's native updater.
@@ -438,6 +499,10 @@ class AnkiSearchBackend:
         never authorizes collection maintenance or an automatic rebuild.
         """
 
+        if host_backend_quarantined():
+            status = self.get_status()
+            on_error(HOST_BACKEND_RESTART_MESSAGE)
+            return status
         if allow_while_paused:
             auto_rebuild = False
         setup = self._begin_profile_activation()
@@ -863,6 +928,10 @@ class AnkiSearchBackend:
         """Load the active profile's deck catalog on Anki's collection worker."""
 
         event = self._new_cancellation()
+        if host_backend_quarantined():
+            self._forget_cancellation(event)
+            on_error(HOST_BACKEND_RESTART_MESSAGE)
+            return event.set
         context = self._context
         token = context.token if context is not None else -1
         if context is None:
@@ -1171,6 +1240,9 @@ class AnkiSearchBackend:
         on_success: Callable[[SearchResponse], None],
         on_error: ErrorCallback,
     ) -> Callable[[], None]:
+        if host_backend_quarantined():
+            on_error(HOST_BACKEND_RESTART_MESSAGE)
+            return _noop
         event = self._new_cancellation(
             kind=(
                 "semantic_query"
@@ -1393,6 +1465,10 @@ class AnkiSearchBackend:
         """
 
         event = self._new_cancellation(kind="interactive")
+        if host_backend_quarantined():
+            self._forget_cancellation(event)
+            on_error(HOST_BACKEND_RESTART_MESSAGE)
+            return event.set
         context = self._context
         if context is None or self.get_status().state is not IndexState.READY:
             self._forget_cancellation(event)
@@ -1763,6 +1839,9 @@ class AnkiSearchBackend:
         on_success: StatusCallback,
         on_error: ErrorCallback,
     ) -> Callable[[], None] | None:
+        if host_backend_quarantined():
+            on_error(HOST_BACKEND_RESTART_MESSAGE)
+            return None
         context = self._context
         if context is None:
             on_error("No Anki profile is open.")
@@ -3249,6 +3328,9 @@ class AnkiSearchBackend:
         on_success: StatusCallback = _noop,
         on_error: ErrorCallback = _noop,
     ) -> Callable[[], None] | None:
+        if host_backend_quarantined():
+            on_error(HOST_BACKEND_RESTART_MESSAGE)
+            return None
         with self._state_lock:
             if self._bundle_update_running:
                 on_error("Restart Anki to finish the Smart Search update.")
@@ -3366,6 +3448,9 @@ class AnkiSearchBackend:
         on_success: StatusCallback = _noop,
         on_error: ErrorCallback = _noop,
     ) -> Callable[[], None] | None:
+        if host_backend_quarantined():
+            on_error(HOST_BACKEND_RESTART_MESSAGE)
+            return None
         with self._state_lock:
             if self._bundle_update_running:
                 on_error("Restart Anki to finish the Smart Search update.")
@@ -3818,6 +3903,7 @@ class AnkiSearchBackend:
         """
 
         with self._state_lock:
+            collection_paused = self._collection_access_paused
             blocked = (
                 self._bundle_update_running
                 and not allow_during_bundle_update
@@ -3830,6 +3916,26 @@ class AnkiSearchBackend:
                     "Restart Anki to finish the Smart Search update."
                 )
             )
+            return
+        if uses_collection and (
+            collection_paused or host_backend_quarantined()
+        ):
+            error: Exception
+            if host_backend_quarantined():
+                error = HostBackendUnavailable(HOST_BACKEND_RESTART_MESSAGE)
+                self._notify_host_backend_failure(error)
+            else:
+                error = _CollectionAccessPaused(
+                    "Anki is syncing. Try again when sync finishes."
+                )
+            try:
+                failure(error)
+            finally:
+                with self._state_lock:
+                    self._background_op_count = max(
+                        0,
+                        self._background_op_count - 1,
+                    )
             return
 
         def finish() -> None:
@@ -3847,16 +3953,29 @@ class AnkiSearchBackend:
 
         def failed(error: Exception) -> None:
             try:
+                if isinstance(error, HostBackendUnavailable):
+                    self._notify_host_backend_failure(error)
                 failure(error)
             finally:
                 finish()
+
+        def guarded_op(collection: Any) -> Any:
+            if not uses_collection:
+                return op(collection)
+            with self._state_lock:
+                paused = self._collection_access_paused
+            if paused:
+                raise _CollectionAccessPaused(
+                    "Anki is syncing. Try again when sync finishes."
+                )
+            return contain_host_backend_panic(lambda: op(collection))
 
         try:
             from aqt.operations import QueryOp
 
             operation = QueryOp(
                 parent=self.mw,
-                op=op,
+                op=guarded_op,
                 success=succeeded,
             ).failure(failed)
             if not uses_collection:
@@ -3869,7 +3988,7 @@ class AnkiSearchBackend:
     def _new_cancellation(self, *, kind: str = "interactive") -> threading.Event:
         event = threading.Event()
         with self._state_lock:
-            if self._bundle_update_running or (
+            if host_backend_quarantined() or self._bundle_update_running or (
                 kind in {"maintenance", "semantic_maintenance"}
                 and self._background_maintenance_paused
             ):
@@ -3942,6 +4061,15 @@ class AnkiSearchBackend:
     def background_maintenance_paused(self) -> bool:
         with self._state_lock:
             return self._background_maintenance_paused
+
+    @property
+    def collection_maintenance_active(self) -> bool:
+        """Return whether media-sync pause can interrupt lexical work."""
+
+        with self._state_lock:
+            return bool(
+                self._maintenance_running or self._maintenance_cancellations
+            )
 
     def release_semantic_runtime(self) -> bool:
         """Release the optional native model without touching the collection."""
@@ -4176,7 +4304,15 @@ class SmartSearchAddonController:
         self._vocabulary_refresh_timer: Any | None = None
         self._semantic_unload_timer: Any | None = None
         self._post_review_resume_timer: Any | None = None
+        self._host_activity_resume_timer: Any | None = None
         self._review_active = _host_state_name(getattr(mw, "state", "")) == "review"
+        self._sync_in_progress = False
+        self._media_sync_in_progress = False
+        self._host_resume_pending = False
+        self._host_reconcile_pending = False
+        self._host_activity_epoch = 0
+        self._host_resume_epoch = -1
+        self._host_backend_warning_shown = False
         self._collection_temporarily_closed = False
         self._update_check_running = False
         self._update_profile_was_active = False
@@ -4216,7 +4352,17 @@ class SmartSearchAddonController:
             "add_cards_did_add_note",
             self._capture_added_note,
         )
+        self._append_named_hook(
+            gui_hooks,
+            "sync_will_start",
+            self._on_sync_will_start,
+        )
         self._append_named_hook(gui_hooks, "sync_did_finish", self._on_sync_finished)
+        self._append_named_hook(
+            gui_hooks,
+            "media_sync_did_start_or_stop",
+            self._on_media_sync_state_changed,
+        )
         self._append_named_hook(
             gui_hooks,
             "collection_will_temporarily_close",
@@ -4282,6 +4428,11 @@ class SmartSearchAddonController:
         self._post_review_resume_timer.timeout.connect(
             self._resume_after_review
         )
+        self._host_activity_resume_timer = QTimer(self.mw)
+        self._host_activity_resume_timer.setSingleShot(True)
+        self._host_activity_resume_timer.timeout.connect(
+            self._resume_after_host_collection_activity
+        )
         self.backend.set_semantic_activity_callback(
             lambda active: self._run_on_main(
                 lambda: self._semantic_activity_changed(active)
@@ -4290,7 +4441,12 @@ class SmartSearchAddonController:
         self.backend.set_semantic_cancelled_callback(
             lambda: self._run_on_main(self._semantic_maintenance_cancelled)
         )
-        self.backend.set_background_maintenance_paused(self._review_active)
+        self.backend.set_host_backend_failure_callback(
+            lambda error: self._run_on_main(
+                lambda: self._on_host_backend_failure(error)
+            )
+        )
+        self._apply_host_activity_gates()
 
         if getattr(self.mw, "col", None) is not None:
             self._on_profile_open()
@@ -4315,6 +4471,8 @@ class SmartSearchAddonController:
             self._semantic_unload_timer.stop()
         if self._post_review_resume_timer is not None:
             self._post_review_resume_timer.stop()
+        if self._host_activity_resume_timer is not None:
+            self._host_activity_resume_timer.stop()
         with self._dialog_refresh_lock:
             self._dialog_refresh_queued = False
         self._pending_preview_result = None
@@ -4327,6 +4485,7 @@ class SmartSearchAddonController:
         self.backend.deactivate_profile()
         self.backend.set_semantic_activity_callback(None)
         self.backend.set_semantic_cancelled_callback(None)
+        self.backend.set_host_backend_failure_callback(None)
         for hook, callback in reversed(self._hooks):
             try:
                 hook.remove(callback)
@@ -4336,19 +4495,170 @@ class SmartSearchAddonController:
         self._started = False
 
     def _maintenance_blocked(self) -> bool:
-        """True while background work would compete with core reviewing."""
+        """True while background work would compete with core host activity."""
 
         current = _host_state_name(getattr(self.mw, "state", ""))
         return (
-            self._collection_temporarily_closed
+            self._host_collection_activity_active()
             or self._review_active
             or current == "review"
+            or host_backend_quarantined()
         )
+
+    def _host_collection_activity_active(self) -> bool:
+        """Return whether Anki owns or is replacing the live collection."""
+
+        return bool(
+            self._sync_in_progress
+            or self._media_sync_in_progress
+            or self._collection_temporarily_closed
+            or self._host_resume_pending
+        )
+
+    def _host_collection_activity_physically_active(self) -> bool:
+        """Return whether a host sync/close operation is still in progress."""
+
+        return bool(
+            self._sync_in_progress
+            or self._media_sync_in_progress
+            or self._collection_temporarily_closed
+        )
+
+    def _collection_access_blocked(self) -> bool:
+        return bool(
+            self._host_collection_activity_active()
+            or self.backend.collection_access_blocked
+        )
+
+    def _reject_collection_access_if_blocked(self) -> bool:
+        if not self._collection_access_blocked():
+            return False
+        if host_backend_quarantined():
+            self._on_host_backend_failure(
+                HostBackendUnavailable(HOST_BACKEND_RESTART_MESSAGE)
+            )
+        else:
+            self._show_error("Wait for Anki to finish syncing, then try again.")
+        return True
 
     def _set_backend_maintenance_pause(self, paused: bool) -> None:
         setter = getattr(self.backend, "set_background_maintenance_paused", None)
         if callable(setter):
             setter(bool(paused))
+
+    def _apply_host_activity_gates(self) -> None:
+        """Publish combined host state without clearing an independent gate."""
+
+        activity = self._host_collection_activity_active()
+        setter = getattr(self.backend, "set_collection_access_paused", None)
+        if callable(setter):
+            setter(activity)
+        self._set_backend_maintenance_pause(self._maintenance_blocked())
+        previewer = self._previewer
+        preview_setter = getattr(
+            previewer,
+            "set_collection_access_paused",
+            None,
+        )
+        if callable(preview_setter):
+            try:
+                preview_setter(activity or host_backend_quarantined())
+            except RuntimeError:
+                pass
+
+    def _pause_for_host_collection_activity(
+        self,
+        *,
+        reconciliation_required: bool,
+    ) -> None:
+        """Synchronously stop add-on collection work before Anki queues sync."""
+
+        self._host_activity_epoch += 1
+        self._host_resume_pending = False
+        if reconciliation_required:
+            self._host_reconcile_pending = True
+        self._clear_undo_offer()
+        self._apply_host_activity_gates()
+        for timer in (
+            self._reconcile_timer,
+            self._semantic_autostart_timer,
+            self._card_state_refresh_timer,
+            self._vocabulary_refresh_timer,
+            self._preview_open_timer,
+            self._post_review_resume_timer,
+            self._host_activity_resume_timer,
+        ):
+            if timer is not None:
+                timer.stop()
+        self._cancel_pending_previewer()
+
+    def _queue_host_activity_resume(self) -> None:
+        """Resume only after Anki's reset and every nested sync gate finish."""
+
+        if (
+            self._host_collection_activity_physically_active()
+            or host_backend_quarantined()
+        ):
+            self._apply_host_activity_gates()
+            return
+        timer = self._host_activity_resume_timer
+        if timer is None:
+            return
+        self._host_resume_pending = True
+        self._apply_host_activity_gates()
+        self._host_resume_epoch = self._host_activity_epoch
+        timer.start(250)
+
+    def _resume_after_host_collection_activity(self) -> None:
+        if (
+            self._host_resume_epoch != self._host_activity_epoch
+            or self._host_collection_activity_physically_active()
+            or host_backend_quarantined()
+        ):
+            return
+        self._host_resume_pending = False
+        self._apply_host_activity_gates()
+        reconcile = self._host_reconcile_pending
+        self._host_reconcile_pending = False
+        if reconcile:
+            self.schedule_reconcile()
+            self._refresh_visible_card_states()
+        if (
+            not self._maintenance_blocked()
+            and self._post_review_resume_timer is not None
+        ):
+            self._post_review_resume_timer.start(250)
+
+    def _on_host_backend_failure(self, error: Exception) -> None:
+        """Quarantine optional work after Anki reports a poisoned backend."""
+
+        self.backend.quarantine_host_backend(error)
+        if self._host_backend_warning_shown:
+            return
+        self._host_backend_warning_shown = True
+        self._apply_host_activity_gates()
+        for timer in (
+            self._reconcile_timer,
+            self._semantic_autostart_timer,
+            self._card_state_refresh_timer,
+            self._vocabulary_refresh_timer,
+            self._preview_open_timer,
+            self._post_review_resume_timer,
+            self._host_activity_resume_timer,
+        ):
+            if timer is not None:
+                timer.stop()
+        self._cancel_pending_previewer()
+        self._clear_undo_offer()
+        abort = getattr(self.backend, "abort_semantic_runtime_now", None)
+        if callable(abort):
+            abort()
+        message = (
+            str(error).strip()
+            if str(error).strip()
+            else HOST_BACKEND_RESTART_MESSAGE
+        )
+        self._show_error(message)
 
     def _on_state_will_change(self, new_state: Any, *_args: Any) -> None:
         if _host_state_name(new_state) == "review":
@@ -4392,7 +4702,7 @@ class SmartSearchAddonController:
         """Resume queued maintenance only after the reviewer has settled."""
 
         self._review_active = False
-        still_paused = self._collection_temporarily_closed
+        still_paused = self._host_collection_activity_active()
         self._set_backend_maintenance_pause(still_paused)
         if not still_paused and self._post_review_resume_timer is not None:
             self._post_review_resume_timer.start(
@@ -4538,6 +4848,11 @@ class SmartSearchAddonController:
     def show_search(self) -> None:
         """Open or focus the keyboard-first Smart Search palette."""
 
+        if host_backend_quarantined():
+            self._on_host_backend_failure(
+                HostBackendUnavailable(HOST_BACKEND_RESTART_MESSAGE)
+            )
+            return
         if self.backend.bundle_update_running:
             self._show_message(
                 "Restart Anki to finish the Smart Search update."
@@ -4816,8 +5131,21 @@ class SmartSearchAddonController:
     ) -> None:
         """Prevent two live Anki editors from racing on the same note."""
 
+        if self._reject_collection_access_if_blocked():
+            return
+
+        def open_browser() -> None:
+            if self._reject_collection_access_if_blocked():
+                return
+            try:
+                contain_host_backend_panic(
+                    lambda: _open_results_in_browser(results)
+                )
+            except HostBackendUnavailable as error:
+                self._on_host_backend_failure(error)
+
         self._with_preview_saved(
-            lambda: _open_results_in_browser(results),
+            open_browser,
             detach_editor=True,
         )
 
@@ -4847,6 +5175,9 @@ class SmartSearchAddonController:
         *,
         restore_results_if_unfocused: bool = False,
     ) -> None:
+        if self._collection_access_blocked():
+            self._cancel_pending_previewer()
+            return
         if result is None:
             # X is a temporary dismissal. Selecting another result (or
             # clicking the current one again) reopens the pane; Settings is
@@ -4871,13 +5202,16 @@ class SmartSearchAddonController:
         self._preview_auto_suppressed = False
         try:
             if self._previewer is None:
-                self._previewer = create_inline_result_inspector(
-                    self.mw,
-                    pane=dialog.preview_pane,
-                    parent_window=dialog,
-                    initial_result=result,
-                    on_error=self._show_error,
-                    default_view=self._preview_default_view(),
+                self._previewer = contain_host_backend_panic(
+                    lambda: create_inline_result_inspector(
+                        self.mw,
+                        pane=dialog.preview_pane,
+                        parent_window=dialog,
+                        initial_result=result,
+                        on_error=self._show_error,
+                        on_host_failure=self._on_host_backend_failure,
+                        default_view=self._preview_default_view(),
+                    )
                 )
             else:
                 self._previewer.set_result(result, apply_default=True)
@@ -4903,6 +5237,9 @@ class SmartSearchAddonController:
                     )
                 except (ImportError, RuntimeError):
                     pass
+        except HostBackendUnavailable as error:
+            self._close_previewer()
+            self._on_host_backend_failure(error)
         except Exception as error:
             self._close_previewer()
             try:
@@ -4926,6 +5263,9 @@ class SmartSearchAddonController:
             pass
 
     def _preview_selection_changed(self, result: object | None) -> None:
+        if self._collection_access_blocked():
+            self._cancel_pending_previewer()
+            return
         if not self._preview_feature_enabled():
             self._hide_previewer()
             return
@@ -4962,6 +5302,8 @@ class SmartSearchAddonController:
     def _show_preview_side(self, result: object | None, side: str) -> None:
         """Open the selected card preview and deterministically show one side."""
 
+        if self._collection_access_blocked():
+            return
         if not self._preview_feature_enabled() or not preview_card_ids(result):
             return
         dialog = self._dialog
@@ -5016,6 +5358,9 @@ class SmartSearchAddonController:
     def _initial_preview_requested(self, result: object | None) -> None:
         """Open an accepted result set's first card without stealing focus."""
 
+        if self._collection_access_blocked():
+            self._cancel_pending_previewer()
+            return
         if not self._preview_feature_enabled() or not preview_card_ids(result):
             self._hide_previewer()
             return
@@ -5034,6 +5379,9 @@ class SmartSearchAddonController:
         *,
         require_focus: bool = True,
     ) -> None:
+        if self._collection_access_blocked():
+            self._cancel_pending_previewer()
+            return
         self._pending_preview_result = result
         self._pending_preview_requires_focus = bool(require_focus)
         timer = self._preview_open_timer
@@ -5047,7 +5395,11 @@ class SmartSearchAddonController:
         require_focus = self._pending_preview_requires_focus
         self._pending_preview_result = None
         self._pending_preview_requires_focus = True
-        if result is None or not self._preview_feature_enabled():
+        if (
+            result is None
+            or self._collection_access_blocked()
+            or not self._preview_feature_enabled()
+        ):
             return
         dialog = self._dialog
         if dialog is None or self._preview_auto_suppressed:
@@ -5134,7 +5486,11 @@ class SmartSearchAddonController:
     def _refresh_previewer(self) -> None:
         previewer = self._previewer
         dialog = self._dialog
-        if previewer is None or dialog is None:
+        if (
+            previewer is None
+            or dialog is None
+            or self._collection_access_blocked()
+        ):
             return
         try:
             previewer.set_result(
@@ -5220,7 +5576,14 @@ class SmartSearchAddonController:
     def open_native_search(self, query: str) -> None:
         """Public escape hatch for callers that explicitly want native search."""
 
-        open_native_query_in_browser(_canonical_query(query))
+        if self._reject_collection_access_if_blocked():
+            return
+        try:
+            contain_host_backend_panic(
+                lambda: open_native_query_in_browser(_canonical_query(query))
+            )
+        except HostBackendUnavailable as error:
+            self._on_host_backend_failure(error)
 
     # ------------------------------------------------------- collection ops
 
@@ -5284,6 +5647,9 @@ class SmartSearchAddonController:
         )
 
     def _run_guarded_undo_after_save(self, pending: _PendingUndo) -> None:
+        if self._reject_collection_access_if_blocked():
+            self._undo_cancelled_after_save()
+            return
         context = self.backend._context
         if (
             self._pending_undo != pending
@@ -5335,6 +5701,9 @@ class SmartSearchAddonController:
 
     def _undo_failed(self, error: Exception) -> None:
         self._clear_undo_offer()
+        if isinstance(error, HostBackendUnavailable):
+            self._on_host_backend_failure(error)
+            return
         if isinstance(error, UndoUnavailable):
             message = str(error)
         else:
@@ -5399,19 +5768,27 @@ class SmartSearchAddonController:
     ) -> None:
         """Revalidate the source, then mirror Anki's Create Copy action."""
 
+        if self._reject_collection_access_if_blocked():
+            return
         collection = getattr(self.mw, "col", None)
         if collection is None:
             self._show_error("Open an Anki profile before creating a copy.")
             return
 
         try:
-            note = collection.get_note(int(note_id))
+            note = contain_host_backend_panic(
+                lambda: collection.get_note(int(note_id))
+            )
             if note is None:
                 raise LookupError("The source note is no longer available.")
             source_card = None
             for card_id in card_ids:
                 try:
-                    candidate = collection.get_card(int(card_id))
+                    candidate = contain_host_backend_panic(
+                        lambda current_id=card_id: collection.get_card(
+                            int(current_id)
+                        )
+                    )
                 except Exception as error:
                     if error.__class__.__name__ in {
                         "NotFoundError",
@@ -5429,7 +5806,7 @@ class SmartSearchAddonController:
 
             current_deck_id = getattr(source_card, "current_deck_id", None)
             if callable(current_deck_id):
-                deck_id = int(current_deck_id())
+                deck_id = int(contain_host_backend_panic(current_deck_id))
             else:
                 original = int(getattr(source_card, "odid", 0) or 0)
                 deck_id = original or int(getattr(source_card, "did", 0) or 0)
@@ -5442,11 +5819,15 @@ class SmartSearchAddonController:
                 None,
             )
             if callable(modern_opener):
-                add_cards = modern_opener("AddCards")
+                add_cards = contain_host_backend_panic(
+                    lambda: modern_opener("AddCards")
+                )
             else:
                 import aqt
 
-                add_cards = aqt.dialogs.open("AddCards", self.mw)
+                add_cards = contain_host_backend_panic(
+                    lambda: aqt.dialogs.open("AddCards", self.mw)
+                )
             if add_cards is None or not callable(
                 getattr(add_cards, "set_note", None)
             ):
@@ -5461,8 +5842,13 @@ class SmartSearchAddonController:
                     # mirrors AnkiHub's native Browser integration without
                     # ever flushing the change back to the source note.
                     note.fields = list(sanitized_fields)
-            add_cards.set_note(note, deck_id)
+            contain_host_backend_panic(
+                lambda: add_cards.set_note(note, deck_id)
+            )
         except Exception as error:
+            if isinstance(error, HostBackendUnavailable):
+                self._on_host_backend_failure(error)
+                return
             if error.__class__.__name__ in {"NotFoundError", "KeyError"}:
                 message = "The source note is no longer available."
             else:
@@ -5538,6 +5924,8 @@ class SmartSearchAddonController:
         results: Sequence[object],
         add: bool,
     ) -> None:
+        if self._reject_collection_access_if_blocked():
+            return
         if getattr(self.mw, "col", None) is None:
             self._show_error("Open an Anki profile before changing tags.")
             return
@@ -5545,12 +5933,17 @@ class SmartSearchAddonController:
             from aqt.utils import getTag
 
             prompt = "Enter tags to add:" if add else "Enter tags to remove:"
-            tags, accepted = getTag(
-                self._dialog or self.mw,
-                self.mw.col,
-                prompt,
+            tags, accepted = contain_host_backend_panic(
+                lambda: getTag(
+                    self._dialog or self.mw,
+                    self.mw.col,
+                    prompt,
+                )
             )
         except Exception as error:
+            if isinstance(error, HostBackendUnavailable):
+                self._on_host_backend_failure(error)
+                return
             self._show_error(f"Could not open the tag chooser: {error}")
             return
         if not accepted:
@@ -5582,6 +5975,8 @@ class SmartSearchAddonController:
         self,
         action: CollectionAction,
     ) -> None:
+        if self._reject_collection_access_if_blocked():
+            return
         if getattr(self.mw, "col", None) is None or not self.backend.active:
             self._show_error("Open an Anki profile before changing cards.")
             return
@@ -5681,6 +6076,9 @@ class SmartSearchAddonController:
 
     def _collection_action_failed(self, error: Exception) -> None:
         self._clear_undo_offer()
+        if isinstance(error, HostBackendUnavailable):
+            self._on_host_backend_failure(error)
+            return
         message = f"Could not apply the selected change: {error}"
         dialog = self._dialog
         if dialog is not None:
@@ -6246,7 +6644,13 @@ class SmartSearchAddonController:
     def _on_profile_open(self) -> None:
         if self.backend.bundle_update_running:
             return
+        self._sync_in_progress = False
+        self._media_sync_in_progress = False
+        self._host_resume_pending = False
         self._collection_temporarily_closed = False
+        self._host_reconcile_pending = False
+        self._host_activity_epoch += 1
+        self._host_resume_epoch = -1
         self._clear_undo_offer()
         self._close_dialog()
         self._clear_pending_reconciles()
@@ -6264,12 +6668,19 @@ class SmartSearchAddonController:
             self._semantic_unload_timer.stop()
         if self._post_review_resume_timer is not None:
             self._post_review_resume_timer.stop()
+        if self._host_activity_resume_timer is not None:
+            self._host_activity_resume_timer.stop()
         with self._dialog_refresh_lock:
             self._dialog_refresh_queued = False
         self._semantic_autostart_token = None
         self._semantic_autostart_attempted_token = None
         self._initial_setup_deferred = False
-        self._set_backend_maintenance_pause(self._maintenance_blocked())
+        self._apply_host_activity_gates()
+        if host_backend_quarantined():
+            self._on_host_backend_failure(
+                HostBackendUnavailable(HOST_BACKEND_RESTART_MESSAGE)
+            )
+            return
         if self._maintenance_blocked():
             # A profile can be opened while Anki is already restoring the
             # reviewer. Do not even open the disposable indexes in that case;
@@ -6305,8 +6716,18 @@ class SmartSearchAddonController:
             # Auto-rebuild is running for a fresh profile. Retain a restart
             # marker so reviewer cancellation cannot strand initial setup.
             self._initial_setup_deferred = True
-        elif status.state is IndexState.UNAVAILABLE and self._maintenance_blocked():
+        elif status.state is IndexState.UNAVAILABLE and (
+            self._maintenance_blocked() or not self.backend.active
+        ):
+            # A policy-cancelled activation can finish after the host gate has
+            # already reopened. Retain and re-arm the setup intent whenever no
+            # profile context was published, independent of callback timing.
             self._initial_setup_deferred = True
+            if (
+                not self._maintenance_blocked()
+                and self._post_review_resume_timer is not None
+            ):
+                self._post_review_resume_timer.start(250)
         self._schedule_semantic_autostart()
         self._refresh_dialog()
 
@@ -6326,6 +6747,8 @@ class SmartSearchAddonController:
             self._semantic_unload_timer.stop()
         if self._post_review_resume_timer is not None:
             self._post_review_resume_timer.stop()
+        if self._host_activity_resume_timer is not None:
+            self._host_activity_resume_timer.stop()
         with self._dialog_refresh_lock:
             self._dialog_refresh_queued = False
         self._clear_pending_reconciles()
@@ -6483,10 +6906,40 @@ class SmartSearchAddonController:
             # queue, reps, flags, and filtered-deck placement are not indexed.
             self.schedule_reconcile(full=True)
 
+    def _on_sync_will_start(self) -> None:
+        if self._sync_in_progress:
+            return
+        self._sync_in_progress = True
+        self._pause_for_host_collection_activity(
+            reconciliation_required=True,
+        )
+
     def _on_sync_finished(self) -> None:
         self._clear_undo_offer()
-        self.schedule_reconcile()
-        self._refresh_visible_card_states()
+        self._sync_in_progress = False
+        self._queue_host_activity_resume()
+
+    def _on_media_sync_state_changed(self, running: bool) -> None:
+        active = bool(running)
+        if active == self._media_sync_in_progress:
+            return
+        self._media_sync_in_progress = active
+        if active:
+            with self._reconcile_request_lock:
+                local_reconcile_pending = bool(
+                    self._pending_reconcile_note_ids
+                    or self._pending_reconcile_deleted_ids
+                    or self._reconcile_full
+                    or self._reconcile_startup_check
+                )
+            self._pause_for_host_collection_activity(
+                reconciliation_required=(
+                    self.backend.collection_maintenance_active
+                    or local_reconcile_pending
+                ),
+            )
+        else:
+            self._queue_host_activity_resume()
 
     def _on_collection_will_temporarily_close(
         self,
@@ -6495,20 +6948,13 @@ class SmartSearchAddonController:
         # Match Anki's Browser: a live Editor must save and close before sync
         # temporarily swaps out the collection beneath its note/card objects.
         self._collection_temporarily_closed = True
-        self._clear_undo_offer()
-        self._set_backend_maintenance_pause(True)
-        for timer in (
-            self._reconcile_timer,
-            self._semantic_autostart_timer,
-            self._dialog_refresh_timer,
-            self._vocabulary_refresh_timer,
-            self._card_state_refresh_timer,
-            self._preview_open_timer,
-            self._semantic_unload_timer,
-            self._post_review_resume_timer,
-        ):
-            if timer is not None:
-                timer.stop()
+        self._pause_for_host_collection_activity(
+            reconciliation_required=True,
+        )
+        if self._dialog_refresh_timer is not None:
+            self._dialog_refresh_timer.stop()
+        if self._semantic_unload_timer is not None:
+            self._semantic_unload_timer.stop()
         cancel = getattr(self.backend, "cancel_semantic_queries_now", None)
         if callable(cancel):
             cancel()
@@ -6520,10 +6966,7 @@ class SmartSearchAddonController:
 
     def _on_collection_reopened(self, _collection: Any) -> None:
         self._collection_temporarily_closed = False
-        self._set_backend_maintenance_pause(self._review_active)
-        self.schedule_reconcile()
-        if not self._review_active and self._post_review_resume_timer is not None:
-            self._post_review_resume_timer.start(250)
+        self._queue_host_activity_resume()
 
     def _install_semantic(self) -> None:
         if self.backend.bundle_update_running:
