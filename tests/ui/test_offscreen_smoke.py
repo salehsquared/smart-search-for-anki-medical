@@ -2097,6 +2097,13 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller.resume()
         controller.open_native_search("")
         self.assertEqual(opened, [""])
+
+        def fail_soft(_query: str) -> None:
+            raise RuntimeError("native Browser unavailable")
+
+        controller.set_native_search_opener(fail_soft)
+        controller.open_native_search("contained")
+        self.assertEqual(opened, [""])
         controller.dispose()
         controller.open_native_search("disposed")
         self.assertEqual(opened, [""])

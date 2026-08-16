@@ -834,7 +834,12 @@ class SearchController(QObject):
             or self._native_search_opener is None
         ):
             return
-        self._native_search_opener(str(query))
+        try:
+            self._native_search_opener(str(query))
+        except Exception:
+            # Qt can terminate the host when an ordinary Python exception
+            # escapes a signal slot. This handoff is optional, so fail soft.
+            return
 
     # ---------------------------------------------------- filters/chips
 
