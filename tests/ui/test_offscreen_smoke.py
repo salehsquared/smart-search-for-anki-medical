@@ -144,6 +144,241 @@ class OffscreenSmokeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_suspended_only_control_is_compact_and_aligned_with_query(self) -> None:
+        dialog = SearchDialog()
+        dialog.resize(760, 520)
+        dialog.show()
+        self.app.processEvents()
+
+        control = dialog.suspended_only
+        control_left = control.mapTo(dialog, control.rect().topLeft()).x()
+        search_left = dialog.search.mapTo(dialog, dialog.search.rect().topLeft()).x()
+        self.assertEqual(control.text(), "Suspended only")
+        self.assertEqual(control.accessibleName(), "Show suspended cards only")
+        self.assertTrue(control.isVisibleTo(dialog))
+        self.assertGreaterEqual(control_left, search_left - 2)
+        self.assertLess(control.sizeHint().width(), 160)
+
+        unchecked = control.grab().toImage()
+        self.assertNotEqual(
+            unchecked.pixelColor(2, unchecked.height() // 2),
+            unchecked.pixelColor(8, unchecked.height() // 2),
+        )
+        control.setChecked(True)
+        control.update()
+        self.app.processEvents()
+        checked = control.grab().toImage()
+        self.assertNotEqual(
+            unchecked.pixelColor(8, unchecked.height() // 2),
+            checked.pixelColor(8, checked.height() // 2),
+        )
+        self.assertNotEqual(
+            checked.pixelColor(9, 15),
+            checked.pixelColor(8, checked.height() // 2),
+        )
+
+        control.clearFocus()
+        self.app.processEvents()
+        unfocused = control.grab().toImage()
+        control.setFocus()
+        self.app.processEvents()
+        focused = control.grab().toImage()
+        border_changed = any(
+            focused.pixelColor(x, 0) != unfocused.pixelColor(x, 0)
+            for x in range(focused.width())
+        )
+        self.assertTrue(border_changed)
+        dialog.deleteLater()
+
+    def test_suspended_only_click_submits_once_and_empty_clear_cancels(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            dialog.suspended_only.click()
+
+            self.assertTrue(dialog.suspended_only.isChecked())
+            self.assertEqual(dialog.query(), "is:suspended")
+            self.assertEqual(
+                [request.query for request in backend.requests],
+                ["is:suspended"],
+            )
+            stale_success = backend.callbacks[0][0]
+
+            dialog.suspended_only.click()
+
+            self.assertFalse(dialog.suspended_only.isChecked())
+            self.assertEqual(dialog.query(), "")
+            self.assertEqual(len(backend.requests), 1)
+            self.assertEqual(backend.cancel_count, 1)
+            self.assertEqual(dialog.results.results_model().count(), 0)
+            stale_success(
+                SearchResponse(
+                    request_id=backend.requests[0].request_id,
+                    query="is:suspended",
+                    results=(SearchResult(note_id=99, title="Stale"),),
+                    total_results=1,
+                )
+            )
+            self.app.processEvents()
+            self.assertEqual(dialog.results.results_model().count(), 0)
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_suspended_only_stops_armed_debounce_before_one_search(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            dialog.search.setText("bupropion")
+            dialog._on_text_edited("bupropion")
+            self.assertTrue(dialog._debounce.isActive())
+
+            dialog.suspended_only.click()
+            QTest.qWait(200)
+
+            self.assertFalse(dialog._debounce.isActive())
+            self.assertEqual(dialog.query(), "bupropion is:suspended")
+            self.assertEqual(len(backend.requests), 1)
+            self.assertEqual(
+                backend.requests[0].query,
+                "bupropion is:suspended",
+            )
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_suspended_only_never_truncates_a_query_at_field_limit(self) -> None:
+        for maximum, original in ((20, "x" * 20), (16, "😀😀")):
+            with self.subTest(maximum=maximum, original=original):
+                backend = _HeldSearchBackend()
+                dialog = SearchDialog()
+                controller = SearchController(backend, dialog)
+                try:
+                    dialog.search.setMaxLength(maximum)
+                    dialog.set_query_text(original)
+
+                    dialog.suspended_only.click()
+
+                    self.assertEqual(dialog.query(), original)
+                    self.assertFalse(dialog.suspended_only.isChecked())
+                    self.assertEqual(backend.requests, [])
+                    self.assertIn("too long", dialog.summary.text().casefold())
+                finally:
+                    controller.dispose()
+                    dialog.deleteLater()
+
+    def test_browser_handoff_syncs_suspension_control_without_rewriting(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            positive = "IS:suspended tag:marked"
+            self.assertTrue(controller.replace_and_submit(positive))
+            self.assertEqual(dialog.query(), positive)
+            self.assertTrue(dialog.suspended_only.isChecked())
+            self.assertTrue(dialog.suspended_only.isEnabled())
+
+            negative = "-is:suspended tag:marked"
+            self.assertTrue(controller.replace_and_submit(negative))
+            self.assertEqual(dialog.query(), negative)
+            self.assertFalse(dialog.suspended_only.isChecked())
+            self.assertFalse(dialog.suspended_only.isEnabled())
+            self.assertEqual(
+                [request.query for request in backend.requests],
+                [positive, negative],
+            )
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_custom_suspension_syntax_is_disabled_and_never_dispatches(self) -> None:
+        for query in (
+            "flag:",
+            "foo AND",
+            "foo\tis:suspended",
+            'foo"is:suspended"',
+            '"foo"AND',
+            'field:"x"AND',
+            "-is:suspended",
+        ):
+            with self.subTest(query=query):
+                dialog = SearchDialog()
+                requested: list[str] = []
+                dialog.searchRequested.connect(requested.append)
+                dialog.set_query_text(query)
+
+                self.assertFalse(dialog.suspended_only.isEnabled())
+                dialog.suspended_only.click()
+
+                self.assertEqual(dialog.query(), query)
+                self.assertEqual(requested, [])
+                dialog.deleteLater()
+
+    def test_suspension_intent_disarms_late_default_deck(self) -> None:
+        backend = _HeldSearchBackend(
+            settings=UISettings(default_deck=DefaultDeckRef(2, "Cardiology"))
+        )
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            self.assertTrue(controller.start_default_deck_session())
+            dialog.suspended_only.click()
+            backend.deck_callbacks[-1][0](
+                DeckCatalog((DeckEntry(2, "Cardiology"),), 2)
+            )
+            self.app.processEvents()
+
+            self.assertEqual(dialog.query(), "is:suspended")
+            self.assertEqual(
+                [request.query for request in backend.requests],
+                ["is:suspended"],
+            )
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_suspension_filter_uses_checkbox_instead_of_duplicate_chip(self) -> None:
+        dialog = SearchDialog()
+        dialog.set_query_text("is:suspended tag:cardio")
+        dialog.show_response(
+            SearchResponse(
+                request_id=1,
+                query=dialog.query(),
+                results=(),
+                active_filters=(
+                    FilterChip("is", "suspended"),
+                    FilterChip("tag", "cardio"),
+                ),
+            ),
+            (),
+        )
+
+        self.assertTrue(dialog.suspended_only.isChecked())
+        self.assertEqual(dialog.chip_bar._layout.count(), 2)
+        dialog.deleteLater()
+
+    def test_suspended_only_stays_available_in_each_mode_and_obeys_busy_state(self) -> None:
+        dialog = SearchDialog()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                semantic=SemanticStatus(SemanticState.READY),
+            )
+        )
+        for mode in SearchMode:
+            with self.subTest(mode=mode):
+                dialog.set_mode(mode)
+                self.assertFalse(dialog.suspended_only.isHidden())
+                self.assertTrue(dialog.suspended_only.isEnabled())
+
+        dialog.set_batch_action_busy(True)
+        self.assertFalse(dialog.suspended_only.isEnabled())
+        dialog.set_batch_action_busy(False)
+        self.assertTrue(dialog.suspended_only.isEnabled())
+        dialog.deleteLater()
+
     def test_dialog_renders_results_and_semantic_setup_state(self) -> None:
         dialog = SearchDialog()
         dialog.show_status(
@@ -2327,7 +2562,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.32")
+        self.assertEqual(fallback.version, "1.0.33")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())

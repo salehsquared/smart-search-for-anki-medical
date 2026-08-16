@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.33] — 2026-08-15
+
+### Added
+
+- The main search window now has a compact **Suspended only** checkbox below
+  the query field. It adds or removes Anki's visible `is:suspended` filter in
+  Smart, Exact, and Semantic modes.
+
+### Changed
+
+- Complex, negated, quoted, incomplete, or version-dependent suspension
+  expressions remain untouched and disable the quick control. Safe edits
+  preserve the rest of the query, cancel stale results, and submit once.
+
 ## [1.0.32] — 2026-08-15
 
 ### Changed

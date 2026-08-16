@@ -35,12 +35,18 @@ from .contracts import (
 )
 from .deck_picker import DeckDestinationPopup, DeckPickerPopup, DeckScopeButton
 from .deck_query import apply_deck_selection
+from .suspension_query import (
+    SuspensionQueryState,
+    analyze_suspension_query,
+    apply_suspension_filter,
+)
 from .results import ResultsView
 from .theme import chrome_colors, semantic_icon_pixmap
 from .preview_pane import InlineResultPane
 from .widgets import (  # Qt shim + custom widgets
     AboutPanel,
     ChipBar,
+    CompactCheckBox,
     IndexStatusWidget,
     SearchField,
     SegmentedModeControl,
@@ -616,11 +622,34 @@ class SearchDialog(QDialog):
         self.mode_guidance.setVisible(False)
         root.addWidget(self.mode_guidance)
 
+        self.filter_row = QWidget(self)
+        self.filter_row.setObjectName("quickFilterRow")
+        filter_layout = QHBoxLayout(self.filter_row)
+        filter_layout.setContentsMargins(
+            self.deck_scope.minimumWidth(),
+            0,
+            0,
+            0,
+        )
+        filter_layout.setSpacing(10)
+
+        self.suspended_only = CompactCheckBox("Suspended only", self.filter_row)
+        self.suspended_only.setObjectName("suspendedOnly")
+        self.suspended_only.setAccessibleName("Show suspended cards only")
+        self.suspended_only.clicked.connect(self._toggle_suspended_only)
+        filter_layout.addWidget(
+            self.suspended_only,
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+
         self.chip_bar = ChipBar(self)
         self.chip_bar.filterRemoveRequested.connect(self.filterRemoveRequested)
         self.chip_bar.correctionDismissRequested.connect(self.correctionDismissRequested)
         self.chip_bar.correctionLiteralRequested.connect(self.correctionLiteralRequested)
-        root.addWidget(self.chip_bar)
+        filter_layout.addWidget(self.chip_bar, 1)
+        root.addWidget(self.filter_row)
+        self._sync_suspension_control("")
 
         self.related_context_bar = QFrame(self)
         self.related_context_bar.setObjectName("relatedContextBar")
@@ -1225,6 +1254,7 @@ class SearchDialog(QDialog):
         visible = query + " "
         self.search.setText(visible)
         self.deck_scope.set_scope(query)
+        self._sync_suspension_control(visible)
         self.search.setFocus(Qt.FocusReason.ShortcutFocusReason)
         self.search.setCursorPosition(len(visible))
         return query
@@ -1721,6 +1751,7 @@ class SearchDialog(QDialog):
                 self.search,
                 self.deck_scope,
                 self.segmented,
+                self.suspended_only,
                 self.results,
                 self.related_back_button,
                 self.settings_button,
@@ -1739,6 +1770,7 @@ class SearchDialog(QDialog):
                 control.setEnabled(enabled)
             self._batch_control_states.clear()
         self._batch_busy = busy
+        self._sync_suspension_control()
         if message:
             self.set_summary(message)
         self._update_batch_bar()
@@ -1892,7 +1924,20 @@ class SearchDialog(QDialog):
         self._set_message_presentation(semantic=False)
         self.results.setEnabled(True)
         self.message_action.setVisible(False)
-        self.chip_bar.set_chips(response.active_filters, corrections)
+        suspension_is_managed = (
+            analyze_suspension_query(response.query).state
+            is SuspensionQueryState.ON
+        )
+        visible_filters = tuple(
+            chip
+            for chip in response.active_filters
+            if not (
+                suspension_is_managed
+                and str(chip.key).lower() == "is"
+                and str(chip.value) == "suspended"
+            )
+        )
+        self.chip_bar.set_chips(visible_filters, corrections)
         model = self.results.results_model()
         model.set_results(response.results)
         self._batch_results_available = bool(response.results)
@@ -2133,6 +2178,7 @@ class SearchDialog(QDialog):
         interactive = text_ready and not self._batch_busy
         self.search.setEnabled(interactive)
         self.segmented.setEnabled(interactive)
+        self._sync_suspension_control()
         if text_ready:
             self.search.setPlaceholderText("Search notes, tags, decks…")
         else:
@@ -2451,6 +2497,7 @@ class SearchDialog(QDialog):
         self._debounce.stop()
         self.search.setText(text)
         self.deck_scope.set_scope(text)
+        self._sync_suspension_control(text)
         self.focus_query()
 
     def set_query(self, text: str) -> None:
@@ -2461,6 +2508,7 @@ class SearchDialog(QDialog):
 
     def _on_text_edited(self, text: str) -> None:
         self.deck_scope.set_scope(text)
+        self._sync_suspension_control(text)
         query = str(text).strip()
         self.queryEdited.emit(query)
         if not query:
@@ -2489,6 +2537,65 @@ class SearchDialog(QDialog):
             # model while a user pauses briefly in the middle of a term.
             delay = max(delay, SEMANTIC_DEBOUNCE_MIN_MS)
         self._debounce.start(delay)
+
+    def _sync_suspension_control(self, text: str | None = None) -> None:
+        """Reflect the visible query without emitting another search intent."""
+
+        query = self.query() if text is None else str(text)
+        analysis = analyze_suspension_query(query)
+        previous = self.suspended_only.blockSignals(True)
+        try:
+            self.suspended_only.setChecked(
+                analysis.state is SuspensionQueryState.ON
+            )
+        finally:
+            self.suspended_only.blockSignals(previous)
+
+        if analysis.state is SuspensionQueryState.CUSTOM:
+            description = analysis.reason
+        else:
+            description = (
+                "Show only suspended cards. This adds is:suspended to the "
+                "Anki query."
+            )
+        self.suspended_only.setToolTip(description)
+        self.suspended_only.setAccessibleDescription(description)
+        self.suspended_only.setEnabled(
+            self.search.isEnabled()
+            and not self._batch_busy
+            and analysis.state is not SuspensionQueryState.CUSTOM
+        )
+
+    def _toggle_suspended_only(self, checked: bool) -> None:
+        """Apply the quick filter once without taking focus from the control."""
+
+        current = self.query()
+        replacement = apply_suspension_filter(current, bool(checked))
+        if replacement == current:
+            self._sync_suspension_control(current)
+            return
+        qt_units = len(
+            replacement.encode("utf-16-le", errors="surrogatepass")
+        ) // 2
+        if qt_units > self.search.maxLength():
+            self._sync_suspension_control(current)
+            self.set_summary(
+                "The query is too long to add the suspended filter."
+            )
+            return
+        self._debounce.stop()
+        self.search.setText(replacement)
+        if self.search.text() != replacement:
+            self.search.setText(current)
+            self._sync_suspension_control(current)
+            self.set_summary(
+                "The query is too long to add the suspended filter."
+            )
+            return
+        self.deck_scope.set_scope(replacement)
+        self._sync_suspension_control(replacement)
+        self.queryEdited.emit(replacement.strip())
+        self._emit_search()
 
     def _open_deck_picker(self) -> None:
         """Open immediately, then refresh choices asynchronously."""
@@ -2725,6 +2832,7 @@ class SearchDialog(QDialog):
             return
         if event.key() == Qt.Key.Key_Escape and self.query():
             self.search.clear()
+            self._sync_suspension_control("")
             self._emit_search()
             self.focus_query()
             event.accept()

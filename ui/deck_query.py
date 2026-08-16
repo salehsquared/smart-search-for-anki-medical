@@ -255,6 +255,28 @@ def apply_deck_selection(
     return _conjoin(analysis.remaining_query, clause)
 
 
+def query_expression_is_valid(query: str) -> bool:
+    """Return whether Anki's Boolean term shape is complete and balanced.
+
+    This helper exposes the deck picker's small expression validator so other
+    visible query controls can fail closed without copying its grammar. Callers
+    that support older Anki parsers must reject version-dependent whitespace
+    before using it.
+    """
+
+    normalized = re.sub(r"\s", " ", str(query or ""))
+    if not normalized.strip():
+        return True
+    tokens, balanced = _scan(normalized)
+    return balanced and _ExpressionParser(tokens).parse() is not None
+
+
+def query_has_quote_adjacency(query: str) -> bool:
+    """Return whether quotes form zero-width native Anki term boundaries."""
+
+    return _has_quote_adjacency(str(query or ""))
+
+
 def _canonical_names(names: Iterable[str]) -> tuple[str, ...]:
     canonical: list[str] = []
     keys: list[str] = []

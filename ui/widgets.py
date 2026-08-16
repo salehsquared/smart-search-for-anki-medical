@@ -211,6 +211,126 @@ class PaletteMixin:
         }
 
 
+class CompactCheckBox(QCheckBox, PaletteMixin):
+    """A native checkable control with an explicit compact indicator.
+
+    Some Anki/Qt styles paint an unchecked checkbox as blank space. Drawing
+    this small indicator ourselves keeps both states and keyboard focus clear
+    while the QCheckBox retains its normal input and accessibility semantics.
+    """
+
+    _BOX_SIZE = 16
+    _FOCUS_MARGIN = 2
+    _TEXT_GAP = 7
+
+    def __init__(
+        self,
+        text: str = "",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def sizeHint(self) -> QSize:
+        metrics = QFontMetrics(self.font())
+        width = (
+            self._FOCUS_MARGIN * 2
+            + self._BOX_SIZE
+            + self._TEXT_GAP
+            + metrics.horizontalAdvance(self.text())
+            + 2
+        )
+        height = max(
+            22,
+            metrics.height() + self._FOCUS_MARGIN * 2,
+        )
+        return QSize(width, height)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        colors = self._palette_colors()
+        enabled = self.isEnabled()
+        rtl = self.layoutDirection() is Qt.LayoutDirection.RightToLeft
+
+        box_x = (
+            self.width() - self._FOCUS_MARGIN - self._BOX_SIZE
+            if rtl
+            else self._FOCUS_MARGIN
+        )
+        box_y = (self.height() - self._BOX_SIZE) // 2
+        box = QRect(box_x, box_y, self._BOX_SIZE, self._BOX_SIZE)
+
+        border = (
+            colors["accent"]
+            if enabled and (self.isChecked() or self.underMouse())
+            else colors["chip_border"]
+        )
+        fill = (
+            colors["accent"]
+            if enabled and self.isChecked()
+            else colors["surface_high"]
+        )
+        if not enabled:
+            border = colors["chip_border"]
+            fill = colors["surface"]
+        pen = QPen(QColor(border), 1.2)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(QColor(fill))
+        painter.drawRoundedRect(box, 4, 4)
+
+        if self.isChecked():
+            check_color = (
+                colors["accent_text"] if enabled else colors["muted"]
+            )
+            check_pen = QPen(QColor(check_color), 2.0)
+            check_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            check_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(check_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(box_x + 3, box_y + 8, box_x + 7, box_y + 12)
+            painter.drawLine(box_x + 7, box_y + 12, box_x + 13, box_y + 4)
+
+        text_color = colors["text"] if enabled else colors["muted"]
+        painter.setPen(QColor(text_color))
+        painter.setFont(self.font())
+        if rtl:
+            text_rect = QRect(
+                self._FOCUS_MARGIN,
+                0,
+                max(0, box_x - self._TEXT_GAP - self._FOCUS_MARGIN),
+                self.height(),
+            )
+            alignment = (
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
+            )
+        else:
+            text_x = box.right() + 1 + self._TEXT_GAP
+            text_rect = QRect(
+                text_x,
+                0,
+                max(0, self.width() - text_x - self._FOCUS_MARGIN),
+                self.height(),
+            )
+            alignment = (
+                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+            )
+        painter.drawText(text_rect, alignment, self.text())
+
+        if self.hasFocus():
+            focus_pen = QPen(QColor(colors["accent"]), 1.0)
+            focus_pen.setStyle(Qt.PenStyle.DotLine)
+            painter.setPen(focus_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 5, 5)
+        painter.end()
+
+
 class SearchField(QLineEdit, PaletteMixin):
     """The dominant query input with a quiet leading search glyph."""
 
