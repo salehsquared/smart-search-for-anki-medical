@@ -261,11 +261,62 @@ class DeckPickerTests(unittest.TestCase):
             "Set as default deck",
         )
         self.assertIn("Step 2", popup.default_checkbox.toolTip())
-        self.assertTrue(popup.clear_default_button.isHidden())
+        self.assertFalse(popup.clear_default_button.isHidden())
+        self.assertTrue(popup.clear_default_button.isEnabled())
+        self.assertEqual(popup.clear_default_button.text(), "Clear default")
+        self.assertIn("AnKing::Step 2", popup.clear_default_button.toolTip())
+        self.assertIn(
+            "AnKing::Step 2",
+            popup.clear_default_button.accessibleName(),
+        )
 
         popup.default_checkbox.click()
-        self.assertEqual(defaults[-1], None)
+        self.assertEqual(defaults, [DeckEntry(3, "AnKing::Step 2"), None])
         self.assertEqual(applied, [])
+
+        popup.set_default_deck(DefaultDeckRef(3, "AnKing::Step 2"))
+        popup.clear_default_button.click()
+        self.assertEqual(
+            defaults,
+            [DeckEntry(3, "AnKing::Step 2"), None, None],
+            "The button emits exactly one additional defaultRequested(None)",
+        )
+        self.assertEqual(applied, [])
+        popup.deleteLater()
+
+    def test_clear_default_button_handles_different_and_absent_defaults(self) -> None:
+        popup = DeckPickerPopup()
+        with patch(
+            "ui.deck_picker.analyze_deck_query",
+            return_value=_analysis("all"),
+        ):
+            popup.set_query("")
+        popup.set_catalog(self.catalog())
+        defaults = []
+        applied = []
+        popup.defaultRequested.connect(defaults.append)
+        popup.applied.connect(applied.append)
+
+        self.assertTrue(popup.clear_default_button.isHidden())
+
+        popup._items["Personal"].setCheckState(0, Qt.CheckState.Checked)
+        popup.set_default_deck(DefaultDeckRef(3, "AnKing::Step 2"))
+        self.assertFalse(popup.clear_default_button.isHidden())
+        self.assertEqual(popup.clear_default_button.text(), "Clear default")
+        self.assertIn("AnKing::Step 2", popup.clear_default_button.toolTip())
+        self.assertIn(
+            "AnKing::Step 2",
+            popup.clear_default_button.accessibleName(),
+        )
+        self.assertFalse(popup.default_checkbox.isChecked())
+
+        popup.clear_default_button.click()
+        self.assertEqual(defaults, [None])
+        self.assertEqual(applied, [])
+
+        popup.set_default_deck(None)
+        self.assertTrue(popup.clear_default_button.isHidden())
+        self.assertEqual(defaults, [None])
         popup.deleteLater()
 
     def test_default_row_rejects_multi_excluded_filtered_and_missing_scopes(self) -> None:
@@ -309,7 +360,20 @@ class DeckPickerTests(unittest.TestCase):
         popup.set_default_deck(DefaultDeckRef(99, "Deleted::Deck"))
         self.assertIn("unavailable", popup.default_checkbox.toolTip().casefold())
         self.assertFalse(popup.clear_default_button.isHidden())
+        self.assertEqual(popup.clear_default_button.text(), "Clear default")
         self.assertIn("Deleted::Deck", popup.clear_default_button.toolTip())
+        self.assertIn(
+            "Deleted::Deck",
+            popup.clear_default_button.accessibleName(),
+        )
+
+        defaults = []
+        applied = []
+        popup.defaultRequested.connect(defaults.append)
+        popup.applied.connect(applied.append)
+        popup.clear_default_button.click()
+        self.assertEqual(defaults, [None])
+        self.assertEqual(applied, [])
         popup.deleteLater()
 
     def test_long_default_name_stays_in_metadata_without_expanding_popup(self) -> None:

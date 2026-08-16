@@ -400,10 +400,17 @@ class OffscreenSmokeTests(unittest.TestCase):
             DefaultDeckRef(7, "Medicine"),
         )
 
-        dialog.defaultDeckRequested.emit(None)
+        self.assertFalse(dialog.deck_picker.clear_default_button.isHidden())
+        self.assertEqual(
+            dialog.deck_picker.clear_default_button.text(),
+            "Clear default",
+        )
+        dialog.deck_picker.clear_default_button.click()
         self.assertIsNone(controller.settings.default_deck)
         self.assertEqual(len(backend.saved_settings), 2)
         self.assertEqual(backend.requests, [])
+        self.assertEqual(dialog.query(), "bupropion")
+        self.assertTrue(dialog.deck_picker.clear_default_button.isHidden())
         controller.dispose()
         dialog.deleteLater()
 
@@ -432,11 +439,13 @@ class OffscreenSmokeTests(unittest.TestCase):
 
         backend.save_settings = fail_save
         self.assertTrue(dialog.deck_picker.default_checkbox.isChecked())
-        dialog.deck_picker.default_checkbox.click()
+        self.assertFalse(dialog.deck_picker.clear_default_button.isHidden())
+        dialog.deck_picker.clear_default_button.click()
 
         self.assertEqual(controller.settings.default_deck, original)
         self.assertEqual(dialog.deck_picker.default_deck, original)
         self.assertTrue(dialog.deck_picker.default_checkbox.isChecked())
+        self.assertFalse(dialog.deck_picker.clear_default_button.isHidden())
         self.assertIn("could not be saved", dialog.deck_picker.message_label.text())
         self.assertEqual(backend.requests, [])
         controller.dispose()
@@ -2318,7 +2327,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.31")
+        self.assertEqual(fallback.version, "1.0.32")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())

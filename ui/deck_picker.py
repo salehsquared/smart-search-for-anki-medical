@@ -419,8 +419,8 @@ class DeckPickerPopup(QDialog):
         default_row.addStretch(1)
         self.clear_default_button = QToolButton(self.surface)
         self.clear_default_button.setObjectName("deckPickerDefaultClear")
-        self.clear_default_button.setText("Clear")
-        self.clear_default_button.setAccessibleName("Clear the default deck")
+        self.clear_default_button.setText("Clear default")
+        self.clear_default_button.setAccessibleName("Clear default deck")
         self.clear_default_button.setToolTip(
             "Make All decks the default for new Smart Search windows."
         )
@@ -1095,7 +1095,7 @@ class DeckPickerPopup(QDialog):
         self.default_checkbox.setToolTip(tooltip)
         self.default_checkbox.setAccessibleDescription(tooltip)
 
-        show_clear = default is not None and not same
+        show_clear = default is not None
         self.clear_default_button.setVisible(show_clear)
         self.clear_default_button.setEnabled(show_clear)
         if default is not None:
@@ -1107,6 +1107,9 @@ class DeckPickerPopup(QDialog):
                 "New Smart Search windows will use All decks."
             )
             self.clear_default_button.setToolTip(clear_detail)
+            self.clear_default_button.setAccessibleName(
+                f"Clear default deck {current_name}"
+            )
             self.clear_default_button.setAccessibleDescription(clear_detail)
 
     def _toggle_default(self, checked: bool) -> None:

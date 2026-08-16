@@ -36,7 +36,7 @@ ProgressCallback = Callable[[str, int, int], None]
 CancelCheck = Callable[[], None]
 MACOS_ARM64_RUNTIME_TAG = WORKER_RUNTIME_TAG
 MINIMUM_SEMANTIC_MACOS_MAJOR = 14
-DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.31"
+DOWNLOAD_USER_AGENT = "Smart-Search-for-Anki/1.0.32"
 
 _OBSOLETE_DERIVED_RUNTIME_NAMES = (
     "darwin-arm64-py39",

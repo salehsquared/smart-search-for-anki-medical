@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.32] — 2026-08-15
+
+### Changed
+
+- The deck picker now shows a compact **Clear default** button whenever a
+  default deck is saved, including when that deck is currently selected.
+
 ## [1.0.31] — 2026-08-15
 
 ### Changed
