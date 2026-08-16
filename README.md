@@ -18,6 +18,8 @@ Open the palette with **Command-K** on macOS or **Ctrl-K** on Windows/Linux,
 type naturally, and press **Return** to open the result in Anki's Browser.
 In Anki's Browser, click the green magnifier-plus at the left edge of the main
 search field to open that visible query in Smart Search.
+In Smart Search, right-click the query field and choose **Search in Anki
+Browser** to send the current query back to Anki's native Browser.
 
 - `buproprion` can find **bupropion**.
 - A supported brand name can find its generic medication.
