@@ -359,8 +359,17 @@ class CompactCheckBox(QCheckBox, PaletteMixin):
         painter.end()
 
 
+_NATIVE_BROWSER_ACTION_TIP = (
+    "Search the current query with Anki's native Browser."
+)
+
+
 class SearchField(QLineEdit, PaletteMixin):
     """The dominant query input with a quiet leading search glyph."""
+
+    # Emitted with the exact visible query when the context-menu Browser
+    # handoff command is triggered.
+    nativeSearchRequested = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -379,7 +388,8 @@ class SearchField(QLineEdit, PaletteMixin):
         self.setAccessibleDescription(
             "Type to search notes. Press Return to search now, "
             "Down to move to results, "
-            f"{_PRIMARY_KEY}+1, 2 or 3 switches search mode."
+            f"{_PRIMARY_KEY}+1, 2 or 3 switches search mode. "
+            "Open the context menu to search this query in Anki's Browser."
         )
         self.refresh_palette()
 
@@ -388,6 +398,61 @@ class SearchField(QLineEdit, PaletteMixin):
 
         self._compound = bool(compound)
         self.refresh_palette()
+
+    def build_context_menu(self) -> QMenu:
+        """Standard edit menu plus the Anki Browser handoff command.
+
+        Kept separate from :meth:`contextMenuEvent` so tests can inspect the
+        menu without a modal ``exec()``. An empty query remains valid: Anki's
+        native Browser interprets it as the whole collection.
+        """
+
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+        action = menu.addAction("Search in Anki Browser")
+        action.setObjectName("searchFieldNativeBrowserAction")
+        action.setEnabled(self.isEnabled())
+        action.setStatusTip(_NATIVE_BROWSER_ACTION_TIP)
+        action.setToolTip(_NATIVE_BROWSER_ACTION_TIP)
+        return menu
+
+    def contextMenuEvent(self, event) -> None:
+        try:
+            menu = self.build_context_menu()
+        except Exception:
+            # This optional command must never remove the native text menu or
+            # let an API/style mismatch escape through Qt.
+            try:
+                super().contextMenuEvent(event)
+            except Exception:
+                event.accept()
+            return
+        query: str | None = None
+        try:
+            chosen = self._execute_context_menu(menu, event.globalPos())
+            if (
+                chosen is not None
+                and chosen.objectName() == "searchFieldNativeBrowserAction"
+            ):
+                # Snapshot at activation time, after the native menu has
+                # finished, so opening Browser cannot disrupt its event loop.
+                query = self.text()
+        except Exception:
+            query = None
+        finally:
+            try:
+                menu.deleteLater()
+            except Exception:
+                pass
+            event.accept()
+        if query is not None:
+            self.nativeSearchRequested.emit(query)
+
+    @staticmethod
+    def _execute_context_menu(menu: QMenu, global_position):
+        """Run the native menu; isolated as a deterministic test seam."""
+
+        return menu.exec(global_position)
 
     def _search_icon(self, color: str) -> QIcon:
         pixmap = QPixmap(22, 22)

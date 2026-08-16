@@ -4363,6 +4363,147 @@ class ControllerTests(unittest.TestCase):
             pending.pop()()
         self.assertEqual(events[-1], "mutation")
 
+    def test_native_query_browser_open_waits_for_editor_detach(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        events: list[str] = []
+        pending = []
+
+        class _Preview:
+            def prepare_for_external_change(self, callback) -> None:
+                events.append("save-detach")
+                pending.append(callback)
+
+        addon._previewer = _Preview()
+        opened: list[str] = []
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=lambda query: opened.append(query),
+        ):
+            addon.open_native_search(
+                'notetype:Cloze deck:"Med::Cardio" café'
+            )
+            self.assertEqual(events, ["save-detach"])
+            self.assertEqual(opened, [])
+            pending.pop()()
+        # The visible query survives verbatim; only the canonical
+        # ``notetype:`` to ``note:`` conversion runs before Browser opening.
+        self.assertEqual(opened, ['note:Cloze deck:"Med::Cardio" café'])
+
+    def test_native_query_browser_open_rechecks_gate_after_save(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        pending = []
+
+        class _Preview:
+            def prepare_for_external_change(self, callback) -> None:
+                pending.append(callback)
+
+        addon._previewer = _Preview()
+        errors: list[str] = []
+        addon._show_error = errors.append
+        opened: list[str] = []
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=opened.append,
+        ):
+            addon.open_native_search("heart failure")
+            self.assertEqual(len(pending), 1)
+            # Sync starts after the editor save was requested but before the
+            # deferred open runs: the gate must fail closed again.
+            addon._sync_in_progress = True
+            pending.pop()()
+        self.assertEqual(opened, [])
+        self.assertEqual(len(errors), 1)
+
+    def test_native_query_browser_open_fails_closed_when_blocked(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        errors: list[str] = []
+        addon._show_error = errors.append
+        opened: list[str] = []
+        addon._sync_in_progress = True
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=opened.append,
+        ):
+            addon.open_native_search("heart failure")
+        self.assertEqual(opened, [])
+        self.assertEqual(len(errors), 1)
+
+    def test_native_query_browser_open_forwards_blank_query(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        errors: list[str] = []
+        addon._show_error = errors.append
+        opened: list[str] = []
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=opened.append,
+        ):
+            addon.open_native_search("")
+            addon.open_native_search("   ")
+        self.assertEqual(opened, ["", ""])
+        self.assertEqual(errors, [])
+
+    def test_native_query_browser_open_ordinary_error_is_nonfatal(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        errors: list[str] = []
+        addon._show_error = errors.append
+
+        def boom(_query: str) -> None:
+            raise RuntimeError("browser unavailable")
+
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=boom,
+        ):
+            addon.open_native_search("heart failure")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("browser unavailable", errors[0])
+
+    def test_native_query_browser_open_quarantines_host_failure(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        failures: list[Exception] = []
+        addon._on_host_backend_failure = failures.append
+
+        def unavailable(_query: str) -> None:
+            raise controller.HostBackendUnavailable("restart required")
+
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=unavailable,
+        ):
+            addon.open_native_search("heart failure")
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], controller.HostBackendUnavailable)
+
     def test_temporary_collection_close_uses_managed_save_path(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),

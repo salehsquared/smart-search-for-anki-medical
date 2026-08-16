@@ -4961,6 +4961,9 @@ class SmartSearchAddonController:
             ui_controller.set_multi_browser_opener(
                 self._open_results_in_browser_safely
             )
+            ui_controller.set_native_search_opener(
+                self.open_native_search
+            )
             ui_controller.semanticInstallRequested.connect(self._install_semantic)
             ui_controller.semanticIndexRequested.connect(self._index_semantic)
             ui_controller.updateRequested.connect(self._check_for_updates)
@@ -5727,16 +5730,29 @@ class SmartSearchAddonController:
             pass
 
     def open_native_search(self, query: str) -> None:
-        """Public escape hatch for callers that explicitly want native search."""
+        """Open the current query safely with Anki's native Browser search."""
 
+        text = str(query or "")
         if self._reject_collection_access_if_blocked():
             return
-        try:
-            contain_host_backend_panic(
-                lambda: open_native_query_in_browser(_canonical_query(query))
-            )
-        except HostBackendUnavailable as error:
-            self._on_host_backend_failure(error)
+
+        def open_browser() -> None:
+            if self._reject_collection_access_if_blocked():
+                return
+            try:
+                contain_host_backend_panic(
+                    lambda: open_native_query_in_browser(
+                        _canonical_query(text)
+                    )
+                )
+            except HostBackendUnavailable as error:
+                self._on_host_backend_failure(error)
+            except Exception as error:
+                self._show_error(
+                    f"Could not open the query in Anki's Browser: {error}"
+                )
+
+        self._with_preview_saved(open_browser, detach_editor=True)
 
     # ------------------------------------------------------- collection ops
 

@@ -38,6 +38,7 @@ from .widgets import QObject, QTimer, pyqtSignal
 
 BrowserOpener = Callable[[SearchResult], None]
 MultiBrowserOpener = Callable[[tuple[SearchResult, ...]], None]
+NativeSearchOpener = Callable[[str], None]
 SearchGeneration = tuple[int, str, SearchMode]
 _SEMANTIC_SEARCH_TIMEOUT_MS = 45_000
 _SEMANTIC_TIMEOUT_MESSAGE = (
@@ -89,6 +90,7 @@ class SearchController(QObject):
         self._dialog = dialog
         self._browser_opener: Optional[BrowserOpener] = None
         self._multi_browser_opener: Optional[MultiBrowserOpener] = None
+        self._native_search_opener: Optional[NativeSearchOpener] = None
 
         self._request_counter = 0
         self._active_request_id: Optional[int] = None
@@ -147,6 +149,7 @@ class SearchController(QObject):
         dialog.deckChangeRequested.connect(self.deckChangeRequested)
         dialog.tagActionRequested.connect(self.tagActionRequested)
         dialog.undoRequested.connect(self.undoRequested)
+        dialog.nativeSearchRequested.connect(self.open_native_search)
         dialog.deckPickerRequested.connect(self._on_deck_picker_requested)
         dialog.defaultDeckRequested.connect(self._on_default_deck_requested)
         dialog.settingsChanged.connect(self._on_settings_changed)
@@ -180,6 +183,13 @@ class SearchController(QObject):
     def set_multi_browser_opener(self, opener: Optional[MultiBrowserOpener]) -> None:
         """Install the host callback that opens all visible notes together."""
         self._multi_browser_opener = opener
+
+    def set_native_search_opener(
+        self,
+        opener: Optional[NativeSearchOpener],
+    ) -> None:
+        """Install the optional host callback for query-field Browser handoff."""
+        self._native_search_opener = opener
 
     @property
     def settings(self) -> UISettings:
@@ -814,6 +824,17 @@ class SearchController(QObject):
         self.openAllRequested.emit(results)
         if self._multi_browser_opener is not None:
             self._multi_browser_opener(results)
+
+    def open_native_search(self, query: str) -> None:
+        """Forward the visible query only while this dialog is active."""
+
+        if (
+            self._disposed
+            or not self._active
+            or self._native_search_opener is None
+        ):
+            return
+        self._native_search_opener(str(query))
 
     # ---------------------------------------------------- filters/chips
 

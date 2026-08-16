@@ -1944,6 +1944,193 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller.deleteLater()
         dialog.deleteLater()
 
+    def test_query_field_menu_keeps_standard_actions_and_adds_one_command(
+        self,
+    ) -> None:
+        dialog = SearchDialog()
+        dialog.search.setText("heart failure")
+
+        menu = dialog.search.build_context_menu()
+        standard = dialog.search.createStandardContextMenu()
+        actions = menu.actions()
+        standard_actions = standard.actions()
+
+        # Every native edit action remains, followed by exactly one
+        # separator and one new command.
+        self.assertEqual(len(actions), len(standard_actions) + 2)
+        self.assertEqual(
+            [a.text() for a in actions[:-2]],
+            [a.text() for a in standard_actions],
+        )
+        self.assertTrue(actions[-2].isSeparator())
+        command = actions[-1]
+        self.assertEqual(command.text(), "Search in Anki Browser")
+        self.assertEqual(command.objectName(), "searchFieldNativeBrowserAction")
+        duplicates = [
+            a
+            for a in actions
+            if a.objectName() == "searchFieldNativeBrowserAction"
+        ]
+        self.assertEqual(len(duplicates), 1)
+        self.assertIn("native Browser", command.statusTip())
+        self.assertIn("native Browser", command.toolTip())
+        self.assertTrue(command.isEnabled())
+        persistent_actions = len(dialog.search.actions())
+        menu.deleteLater()
+        standard.deleteLater()
+        second = dialog.search.build_context_menu()
+        self.assertEqual(
+            len(
+                [
+                    action
+                    for action in second.actions()
+                    if action.objectName()
+                    == "searchFieldNativeBrowserAction"
+                ]
+            ),
+            1,
+        )
+        self.assertEqual(len(dialog.search.actions()), persistent_actions)
+        second.deleteLater()
+        dialog.deleteLater()
+
+    def test_query_field_menu_browser_command_supports_blank_query_and_state(
+        self,
+    ) -> None:
+        dialog = SearchDialog()
+        for blank in ("", "   ", " \t\n "):
+            dialog.search.setText(blank)
+            menu = dialog.search.build_context_menu()
+            command = menu.actions()[-1]
+            self.assertTrue(command.isEnabled())
+            menu.deleteLater()
+        dialog.search.setEnabled(False)
+        menu = dialog.search.build_context_menu()
+        self.assertFalse(menu.actions()[-1].isEnabled())
+        menu.deleteLater()
+        dialog.deleteLater()
+
+    def test_query_field_browser_command_forwards_exact_query_once(
+        self,
+    ) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        result = SearchResult(note_id=5, title="Café")
+        query = 'deck:"Med::Cardio"  notetype:Cloze café AND (tag:x OR "heart failure")'
+        dialog.set_mode(SearchMode.EXACT)
+        dialog.search.setText(query)
+        dialog.show_response(
+            SearchResponse(
+                request_id=1,
+                query=query,
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        dialog.results.results_model().set_checked(0, True)
+        opened: list[str] = []
+        controller.set_native_search_opener(opened.append)
+
+        dialog.search.setSelection(6, 13)
+        selection = (
+            dialog.search.selectionStart(),
+            dialog.search.selectedText(),
+            dialog.search.cursorPosition(),
+        )
+
+        class _ContextEvent:
+            accepted = False
+
+            @staticmethod
+            def globalPos():
+                return QPoint(10, 10)
+
+            def accept(self) -> None:
+                self.accepted = True
+
+        event = _ContextEvent()
+        dialog.search._execute_context_menu = (
+            lambda menu, _position: menu.actions()[-1]
+        )
+        dialog.search.contextMenuEvent(event)
+
+        self.assertEqual(opened, [query])
+        self.assertTrue(event.accepted)
+        # Query, mode, results, and checked selection are untouched.
+        self.assertEqual(dialog.query(), query)
+        self.assertEqual(
+            (
+                dialog.search.selectionStart(),
+                dialog.search.selectedText(),
+                dialog.search.cursorPosition(),
+            ),
+            selection,
+        )
+        self.assertIs(dialog.segmented.mode(), SearchMode.EXACT)
+        self.assertEqual(dialog.results.results_model().count(), 1)
+        self.assertEqual(
+            dialog.results.results_model().checked_results(),
+            (result,),
+        )
+        self.assertEqual(backend.requests, [])
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_query_field_browser_command_opener_is_optional_fail_soft(
+        self,
+    ) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("heart failure")
+        controller.open_native_search("heart failure")
+        self.assertEqual(dialog.query(), "heart failure")
+        self.assertEqual(backend.requests, [])
+
+        opened: list[str] = []
+        controller.set_native_search_opener(opened.append)
+        controller.pause()
+        controller.open_native_search("paused")
+        self.assertEqual(opened, [])
+        controller.resume()
+        controller.open_native_search("")
+        self.assertEqual(opened, [""])
+        controller.dispose()
+        controller.open_native_search("disposed")
+        self.assertEqual(opened, [""])
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_query_field_context_menu_runtime_failure_is_nonfatal(self) -> None:
+        dialog = SearchDialog()
+        dialog.search.setText("heart failure")
+        received: list[str] = []
+        dialog.search.nativeSearchRequested.connect(received.append)
+
+        class _ContextEvent:
+            accepted = False
+
+            @staticmethod
+            def globalPos():
+                return QPoint(10, 10)
+
+            def accept(self) -> None:
+                self.accepted = True
+
+        def fail(_menu, _position):
+            raise RuntimeError("deleted native menu")
+
+        event = _ContextEvent()
+        dialog.search._execute_context_menu = fail
+        dialog.search.contextMenuEvent(event)
+
+        self.assertTrue(event.accepted)
+        self.assertEqual(received, [])
+        self.assertEqual(dialog.query(), "heart failure")
+        dialog.deleteLater()
+
     def test_search_error_keeps_query_field_editable_and_focused(self) -> None:
         dialog = SearchDialog()
         dialog.show()

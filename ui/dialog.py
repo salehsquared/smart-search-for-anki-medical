@@ -520,6 +520,7 @@ class SearchDialog(QDialog):
     undoRequested = pyqtSignal()
     deckPickerRequested = pyqtSignal()
     defaultDeckRequested = pyqtSignal(object)  # DeckEntry | None
+    nativeSearchRequested = pyqtSignal(str)  # exact visible query text
     dialogClosed = pyqtSignal()
 
     def __init__(
@@ -591,6 +592,9 @@ class SearchDialog(QDialog):
         self.search.set_compound(True)
         self.search.textEdited.connect(self._on_text_edited)
         self.search.returnPressed.connect(self._on_search_return)
+        self.search.nativeSearchRequested.connect(
+            self.nativeSearchRequested.emit
+        )
         search_group_layout.addWidget(self.search, 1)
         top.addWidget(self.search_group, 1)
 
