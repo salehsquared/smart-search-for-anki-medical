@@ -622,16 +622,14 @@ class SearchDialog(QDialog):
         self.mode_guidance.setVisible(False)
         root.addWidget(self.mode_guidance)
 
+        # Full-width filter row: the suspension toggle leads as a checkable
+        # pill and the active filter/correction chips follow, all sharing one
+        # visual language. No artificial indent under the search field.
         self.filter_row = QWidget(self)
         self.filter_row.setObjectName("quickFilterRow")
         filter_layout = QHBoxLayout(self.filter_row)
-        filter_layout.setContentsMargins(
-            self.deck_scope.minimumWidth(),
-            0,
-            0,
-            0,
-        )
-        filter_layout.setSpacing(10)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(8)
 
         self.suspended_only = CompactCheckBox("Suspended only", self.filter_row)
         self.suspended_only.setObjectName("suspendedOnly")

@@ -212,16 +212,23 @@ class PaletteMixin:
 
 
 class CompactCheckBox(QCheckBox, PaletteMixin):
-    """A native checkable control with an explicit compact indicator.
+    """A native checkable control painted as a compact filter pill.
 
-    Some Anki/Qt styles paint an unchecked checkbox as blank space. Drawing
-    this small indicator ourselves keeps both states and keyboard focus clear
-    while the QCheckBox retains its normal input and accessibility semantics.
+    The pill shares its height, radius, border, and palette family with the
+    filter chips, so the quick filter reads as part of the active-filter row
+    instead of a separate control hanging under the search field.  Its square
+    indicator stays visible in both states, and the filled check plus soft
+    accent background makes the active state clear without competing with the
+    mode buttons.  Painting it ourselves keeps both states, hover, and keyboard
+    focus clear on every style, while the QCheckBox retains its normal input
+    and accessibility semantics.
     """
 
-    _BOX_SIZE = 16
     _FOCUS_MARGIN = 2
-    _TEXT_GAP = 7
+    _PAD_X = 11
+    _CHECK_SIZE = 16
+    _CHECK_GAP = 7
+    _MIN_HEIGHT = 32
 
     def __init__(
         self,
@@ -236,14 +243,15 @@ class CompactCheckBox(QCheckBox, PaletteMixin):
         metrics = QFontMetrics(self.font())
         width = (
             self._FOCUS_MARGIN * 2
-            + self._BOX_SIZE
-            + self._TEXT_GAP
+            + self._PAD_X * 2
+            + self._CHECK_SIZE
+            + self._CHECK_GAP
             + metrics.horizontalAdvance(self.text())
             + 2
         )
         height = max(
-            22,
-            metrics.height() + self._FOCUS_MARGIN * 2,
+            self._MIN_HEIGHT,
+            metrics.height() + self._FOCUS_MARGIN * 2 + 6,
         )
         return QSize(width, height)
 
@@ -255,71 +263,85 @@ class CompactCheckBox(QCheckBox, PaletteMixin):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         colors = self._palette_colors()
         enabled = self.isEnabled()
+        checked = self.isChecked()
         rtl = self.layoutDirection() is Qt.LayoutDirection.RightToLeft
 
-        box_x = (
-            self.width() - self._FOCUS_MARGIN - self._BOX_SIZE
-            if rtl
-            else self._FOCUS_MARGIN
+        pill = self.rect().adjusted(
+            self._FOCUS_MARGIN,
+            self._FOCUS_MARGIN,
+            -self._FOCUS_MARGIN,
+            -self._FOCUS_MARGIN,
         )
-        box_y = (self.height() - self._BOX_SIZE) // 2
-        box = QRect(box_x, box_y, self._BOX_SIZE, self._BOX_SIZE)
+        radius = pill.height() / 2.0
 
-        border = (
-            colors["accent"]
-            if enabled and (self.isChecked() or self.underMouse())
-            else colors["chip_border"]
-        )
-        fill = (
-            colors["accent"]
-            if enabled and self.isChecked()
-            else colors["surface_high"]
-        )
         if not enabled:
-            border = colors["chip_border"]
             fill = colors["surface"]
-        pen = QPen(QColor(border), 1.2)
+            border = colors["chip_border"]
+        elif checked:
+            fill = colors["accent_soft"]
+            border = colors["accent_mid"]
+        elif self.underMouse():
+            fill = colors["surface_high"]
+            border = colors["accent_mid"]
+        else:
+            fill = colors["chip_bg"]
+            border = colors["chip_border"]
+        pen = QPen(QColor(border), 1.0)
         pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
         painter.setPen(pen)
         painter.setBrush(QColor(fill))
-        painter.drawRoundedRect(box, 4, 4)
+        painter.drawRoundedRect(pill, radius, radius)
 
-        if self.isChecked():
-            check_color = (
-                colors["accent_text"] if enabled else colors["muted"]
-            )
+        text_left = pill.left() + self._PAD_X
+        text_right = pill.right() - self._PAD_X
+        mark_x = (
+            text_right - self._CHECK_SIZE
+            if rtl
+            else text_left
+        )
+        mark_y = (self.height() - self._CHECK_SIZE) // 2
+        mark = QRect(mark_x, mark_y, self._CHECK_SIZE, self._CHECK_SIZE)
+        mark_border = (
+            colors["accent"]
+            if enabled and checked
+            else colors["chip_border"]
+        )
+        mark_fill = (
+            colors["accent"]
+            if enabled and checked
+            else colors["surface_high"]
+        )
+        painter.setPen(QPen(QColor(mark_border), 1.0))
+        painter.setBrush(QColor(mark_fill))
+        painter.drawRoundedRect(mark, 4, 4)
+        if checked:
+            check_color = colors["accent_text"] if enabled else colors["muted"]
             check_pen = QPen(QColor(check_color), 2.0)
             check_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             check_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(check_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawLine(box_x + 3, box_y + 8, box_x + 7, box_y + 12)
-            painter.drawLine(box_x + 7, box_y + 12, box_x + 13, box_y + 4)
+            painter.drawLine(mark_x + 3, mark_y + 8, mark_x + 7, mark_y + 12)
+            painter.drawLine(mark_x + 7, mark_y + 12, mark_x + 13, mark_y + 4)
+        if rtl:
+            text_right = mark_x - self._CHECK_GAP
+        else:
+            text_left = mark_x + self._CHECK_SIZE + self._CHECK_GAP
 
         text_color = colors["text"] if enabled else colors["muted"]
         painter.setPen(QColor(text_color))
         painter.setFont(self.font())
-        if rtl:
-            text_rect = QRect(
-                self._FOCUS_MARGIN,
-                0,
-                max(0, box_x - self._TEXT_GAP - self._FOCUS_MARGIN),
-                self.height(),
-            )
-            alignment = (
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight
-            )
-        else:
-            text_x = box.right() + 1 + self._TEXT_GAP
-            text_rect = QRect(
-                text_x,
-                0,
-                max(0, self.width() - text_x - self._FOCUS_MARGIN),
-                self.height(),
-            )
-            alignment = (
-                Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
-            )
+        alignment = Qt.AlignmentFlag.AlignVCenter | (
+            Qt.AlignmentFlag.AlignRight
+            if rtl
+            else Qt.AlignmentFlag.AlignLeft
+        )
+        text_rect = QRect(
+            text_left,
+            0,
+            max(0, text_right - text_left),
+            self.height(),
+        )
         painter.drawText(text_rect, alignment, self.text())
 
         if self.hasFocus():
@@ -327,7 +349,11 @@ class CompactCheckBox(QCheckBox, PaletteMixin):
             focus_pen.setStyle(Qt.PenStyle.DotLine)
             painter.setPen(focus_pen)
             painter.setBrush(Qt.BrushStyle.NoBrush)
-            painter.drawRoundedRect(self.rect().adjusted(0, 0, -1, -1), 5, 5)
+            painter.drawRoundedRect(
+                self.rect().adjusted(0, 0, -1, -1),
+                radius + self._FOCUS_MARGIN,
+                radius + self._FOCUS_MARGIN,
+            )
         painter.end()
 
 

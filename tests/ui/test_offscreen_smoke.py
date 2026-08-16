@@ -152,30 +152,62 @@ class OffscreenSmokeTests(unittest.TestCase):
 
         control = dialog.suspended_only
         control_left = control.mapTo(dialog, control.rect().topLeft()).x()
+        group_left = dialog.search_group.mapTo(
+            dialog, dialog.search_group.rect().topLeft()
+        ).x()
         search_left = dialog.search.mapTo(dialog, dialog.search.rect().topLeft()).x()
         self.assertEqual(control.text(), "Suspended only")
         self.assertEqual(control.accessibleName(), "Show suspended cards only")
         self.assertTrue(control.isVisibleTo(dialog))
-        self.assertGreaterEqual(control_left, search_left - 2)
+        # The pill starts the full-width filter row: flush with the compound
+        # deck/search group, never indented under the search field.
+        self.assertLessEqual(abs(control_left - group_left), 2)
+        self.assertLess(control_left, search_left)
         self.assertLess(control.sizeHint().width(), 160)
+        self.assertGreaterEqual(control.sizeHint().height(), 30)
+        self.assertLessEqual(control.sizeHint().height(), 36)
 
         unchecked = control.grab().toImage()
+        cy = unchecked.height() // 2
+        # Rounded pill: the corner pixels show the row behind, the top edge
+        # carries a border, and the interior is filled.
         self.assertNotEqual(
-            unchecked.pixelColor(2, unchecked.height() // 2),
-            unchecked.pixelColor(8, unchecked.height() // 2),
+            unchecked.pixelColor(0, 0),
+            unchecked.pixelColor(unchecked.width() // 2, 1),
         )
+        # The left padding stays clear of both text and the check mark, so
+        # it samples the pill fill in every state.
+        off_fill = unchecked.pixelColor(5, cy)
+        indicator_colors = {
+            unchecked.pixelColor(x, y).rgba()
+            for x in range(12, 30)
+            for y in range(max(0, cy - 9), min(unchecked.height(), cy + 9))
+        }
+        self.assertGreater(len(indicator_colors), 2)
+
+        hint_off = control.sizeHint().width()
         control.setChecked(True)
         control.update()
         self.app.processEvents()
         checked = control.grab().toImage()
-        self.assertNotEqual(
-            unchecked.pixelColor(8, unchecked.height() // 2),
-            checked.pixelColor(8, checked.height() // 2),
+        # The on state reads active without shifting the chips beside it.
+        self.assertNotEqual(off_fill, checked.pixelColor(5, cy))
+        self.assertEqual(control.sizeHint().width(), hint_off)
+        accent = control.palette().color(QPalette.ColorRole.Highlight)
+        mark_visible = any(
+            checked.pixelColor(x, y) == accent
+            for x in range(6, 26)
+            for y in range(max(0, cy - 8), min(checked.height(), cy + 8))
         )
-        self.assertNotEqual(
-            checked.pixelColor(9, 15),
-            checked.pixelColor(8, checked.height() // 2),
-        )
+        self.assertTrue(mark_visible)
+
+        control.setChecked(False)
+        control.setEnabled(False)
+        control.update()
+        self.app.processEvents()
+        disabled = control.grab().toImage()
+        self.assertNotEqual(off_fill, disabled.pixelColor(5, cy))
+        control.setEnabled(True)
 
         control.clearFocus()
         self.app.processEvents()
@@ -188,6 +220,16 @@ class OffscreenSmokeTests(unittest.TestCase):
             for x in range(focused.width())
         )
         self.assertTrue(border_changed)
+
+        # Space toggles the checkable pill exactly once per key press.
+        QTest.keyClick(control, Qt.Key.Key_Space)
+        self.app.processEvents()
+        self.assertTrue(control.isChecked())
+        self.assertEqual(dialog.query(), "is:suspended")
+        QTest.keyClick(control, Qt.Key.Key_Space)
+        self.app.processEvents()
+        self.assertFalse(control.isChecked())
+        self.assertEqual(dialog.query(), "")
         dialog.deleteLater()
 
     def test_suspended_only_click_submits_once_and_empty_clear_cancels(self) -> None:
