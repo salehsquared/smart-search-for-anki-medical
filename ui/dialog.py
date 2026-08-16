@@ -19,6 +19,7 @@ from .contracts import (
     AboutInfo,
     Correction,
     DeckCatalog,
+    DefaultDeckRef,
     EXACT_SEARCH_DETAILS,
     EXACT_SEARCH_GUIDANCE,
     IndexState,
@@ -512,6 +513,7 @@ class SearchDialog(QDialog):
     tagActionRequested = pyqtSignal(object, bool)  # results, add?
     undoRequested = pyqtSignal()
     deckPickerRequested = pyqtSignal()
+    defaultDeckRequested = pyqtSignal(object)  # DeckEntry | None
     dialogClosed = pyqtSignal()
 
     def __init__(
@@ -588,6 +590,7 @@ class SearchDialog(QDialog):
 
         self.deck_picker = DeckPickerPopup(self)
         self.deck_picker.applied.connect(self._apply_deck_selection)
+        self.deck_picker.defaultRequested.connect(self.defaultDeckRequested)
         self.deck_picker.retryRequested.connect(self._reload_deck_picker)
         self.deck_destination_picker = DeckDestinationPopup(self)
         self.deck_destination_picker.applied.connect(
@@ -1206,6 +1209,31 @@ class SearchDialog(QDialog):
         self._deck_catalog = catalog
         self.deck_picker.set_catalog(catalog)
         self.deck_destination_picker.set_catalog(catalog)
+
+    def set_default_deck(self, default_deck: DefaultDeckRef | None) -> None:
+        """Update the picker preference row without changing this query."""
+
+        self.deck_picker.set_default_deck(default_deck)
+
+    def seed_default_deck(self, name: str) -> str:
+        """Seed one validated deck clause and leave the caret ready to type."""
+
+        query = apply_deck_selection("", (str(name),))
+        self._debounce.stop()
+        # A trailing space makes the next typed character a separate Anki
+        # term. SearchController strips it before dispatch.
+        visible = query + " "
+        self.search.setText(visible)
+        self.deck_scope.set_scope(query)
+        self.search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search.setCursorPosition(len(visible))
+        return query
+
+    def show_default_deck_error(self, message: str) -> None:
+        """Report a preference failure inside the open deck picker."""
+
+        if self.deck_picker.isVisible():
+            self.deck_picker.show_validation_error(message)
 
     def show_deck_picker_error(self, message: str) -> None:
         """Show a local picker error without interrupting normal searching."""
@@ -2556,6 +2584,10 @@ class SearchDialog(QDialog):
             self.results.results_model().clear()
             self.clear_chips()
             self.show_help()
+            # Programmatic clears do not emit textEdited. Tell the controller
+            # explicitly so a held result for the prior query cannot repaint
+            # the Help view after an All-decks apply or Escape.
+            self.searchRequested.emit("")
             return
         self.searchRequested.emit(query)
 

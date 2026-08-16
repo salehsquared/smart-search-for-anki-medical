@@ -18,6 +18,8 @@ from typing import Callable, Optional
 from .contracts import (
     CancelCallback,
     Correction,
+    DeckEntry,
+    DefaultDeckRef,
     IndexState,
     PreviewDefault,
     RelatedCardsRequest,
@@ -105,6 +107,9 @@ class SearchController(QObject):
         ) = None
         self._active = False
         self._disposed = False
+        self._default_session_started = False
+        self._default_apply_armed = False
+        self._default_apply_generation: int | None = None
 
         self._settings: UISettings = backend.load_settings()
 
@@ -142,7 +147,8 @@ class SearchController(QObject):
         dialog.deckChangeRequested.connect(self.deckChangeRequested)
         dialog.tagActionRequested.connect(self.tagActionRequested)
         dialog.undoRequested.connect(self.undoRequested)
-        dialog.deckPickerRequested.connect(self.load_decks)
+        dialog.deckPickerRequested.connect(self._on_deck_picker_requested)
+        dialog.defaultDeckRequested.connect(self._on_default_deck_requested)
         dialog.settingsChanged.connect(self._on_settings_changed)
         dialog.dialogClosed.connect(self._on_dialog_closed)
 
@@ -151,6 +157,7 @@ class SearchController(QObject):
         dialog.set_result_limit(self._settings.result_limit)
         dialog.set_preview_enabled(self._settings.preview_enabled)
         dialog.set_preview_default(self._settings.preview_default)
+        dialog.set_default_deck(self._settings.default_deck)
         dialog.resize(self._settings.width, self._settings.height)
 
         self._status_timer = QTimer(self)
@@ -183,6 +190,9 @@ class SearchController(QObject):
 
         if self._disposed or not self._active:
             return False
+
+        self._default_session_started = True
+        self._disarm_default_deck()
 
         text = str(query)
         search_field = getattr(self._dialog, "search", None)
@@ -220,6 +230,7 @@ class SearchController(QObject):
 
         if self._disposed:
             return
+        self._disarm_default_deck()
         if self._related_origin is not None:
             self._restore_related_origin()
         else:
@@ -240,6 +251,7 @@ class SearchController(QObject):
 
         if self._disposed:
             return
+        self._disarm_default_deck()
         self._active = False
         self._disposed = True
         self._related_origin = None
@@ -259,6 +271,76 @@ class SearchController(QObject):
 
     # ---------------------------------------------------------- deck picker
 
+    def start_default_deck_session(self) -> bool:
+        """Resolve and apply the saved default once on a fresh blank launch."""
+
+        if self._disposed or not self._active or self._default_session_started:
+            return False
+        self._default_session_started = True
+        default = self._settings.default_deck
+        if default is None or self._dialog.query().strip():
+            return False
+        self._default_apply_armed = True
+        self._default_apply_generation = self._request_counter
+        self.load_decks()
+        return True
+
+    def _disarm_default_deck(self) -> None:
+        self._default_apply_armed = False
+        self._default_apply_generation = None
+
+    def _on_deck_picker_requested(self) -> None:
+        # Opening the picker is explicit scope intent. A late startup catalog
+        # must not overwrite choices the user is now staging.
+        self._disarm_default_deck()
+        self.load_decks()
+
+    @staticmethod
+    def _resolve_default_deck(catalog, default: DefaultDeckRef) -> DeckEntry | None:
+        entries = getattr(catalog, "entries", getattr(catalog, "decks", ()))
+        for entry in tuple(entries or ()):
+            try:
+                if int(entry.deck_id) != default.deck_id:
+                    continue
+                if bool(getattr(entry, "filtered", False)):
+                    return None
+                return DeckEntry(default.deck_id, str(entry.name))
+            except (AttributeError, TypeError, ValueError):
+                continue
+        return None
+
+    def _on_default_deck_requested(self, entry) -> None:
+        """Persist one explicit picker preference without changing the query."""
+
+        if self._disposed or not self._active:
+            return
+        default: DefaultDeckRef | None
+        if entry is None:
+            default = None
+        else:
+            try:
+                if bool(getattr(entry, "filtered", False)):
+                    raise ValueError("Filtered decks cannot be the default.")
+                default = DefaultDeckRef(
+                    int(entry.deck_id),
+                    str(entry.name),
+                )
+            except (AttributeError, TypeError, ValueError) as error:
+                self._dialog.show_default_deck_error(str(error))
+                return
+
+        previous = self._settings.default_deck
+        self._settings.default_deck = default
+        try:
+            self._backend.save_settings(self._settings)
+        except Exception:  # noqa: BLE001 - preference failure is local
+            self._settings.default_deck = previous
+            self._dialog.show_default_deck_error(
+                "The default deck could not be saved. Try again."
+            )
+            return
+        self._dialog.set_default_deck(default)
+
     def load_decks(self) -> None:
         """Refresh deck choices without blocking search or the GUI thread."""
 
@@ -271,6 +353,7 @@ class SearchController(QObject):
         loader = getattr(self._backend, "load_decks", None)
         if not callable(loader):
             self._active_deck_request_id = None
+            self._disarm_default_deck()
             self._dialog.show_deck_picker_error(
                 "Deck choices are unavailable in this Anki version."
             )
@@ -287,6 +370,7 @@ class SearchController(QObject):
         except Exception as error:  # noqa: BLE001 - normalize host failures
             if self._active_deck_request_id == request_id:
                 self._active_deck_request_id = None
+                self._disarm_default_deck()
                 self._dialog.show_deck_picker_error(str(error))
             return
         if self._active_deck_request_id == request_id:
@@ -310,6 +394,41 @@ class SearchController(QObject):
         self._active_deck_request_id = None
         self._cancel_deck_load = None
         self._dialog.show_deck_catalog(catalog)
+        default = self._settings.default_deck
+        if default is None:
+            self._disarm_default_deck()
+            return
+        resolved = self._resolve_default_deck(catalog, default)
+        if resolved is None:
+            # Keep the saved identity visible as unavailable. Never guess by
+            # name, and never block ordinary All-decks searching.
+            self._disarm_default_deck()
+            return
+        if resolved.name != default.last_known_name:
+            renamed = DefaultDeckRef(resolved.deck_id, resolved.name)
+            self._settings.default_deck = renamed
+            try:
+                self._backend.save_settings(self._settings)
+            except Exception:  # noqa: BLE001 - name cache is best effort
+                self._settings.default_deck = default
+            else:
+                default = renamed
+                self._dialog.set_default_deck(default)
+        if not self._default_apply_armed:
+            return
+        generation = self._default_apply_generation
+        self._disarm_default_deck()
+        if (
+            generation != self._request_counter
+            or self._dialog.query().strip()
+            or self._related_origin is not None
+        ):
+            return
+        try:
+            query = self._dialog.seed_default_deck(resolved.name)
+        except (RuntimeError, ValueError):
+            return
+        self.submit_search(query)
 
     def _on_decks_error(self, request_id: int, message: str) -> None:
         if self._disposed or not self._active:
@@ -318,6 +437,7 @@ class SearchController(QObject):
             return
         self._active_deck_request_id = None
         self._cancel_deck_load = None
+        self._disarm_default_deck()
         self._dialog.show_deck_picker_error(message)
 
     def capture_search_generation(self) -> SearchGeneration:
@@ -420,6 +540,7 @@ class SearchController(QObject):
     def _on_query_edited(self, _query: str) -> None:
         """Cancel old work immediately; the debounce may dispatch later."""
 
+        self._disarm_default_deck()
         self._abandon_related_view()
         self._invalidate_pending_search()
 
@@ -762,6 +883,7 @@ class SearchController(QObject):
     # ------------------------------------------------------------- settings
 
     def _on_mode_selected(self, mode) -> None:
+        self._disarm_default_deck()
         self._settings.mode = mode
         self._abandon_related_view()
         if self._dialog.query().strip():

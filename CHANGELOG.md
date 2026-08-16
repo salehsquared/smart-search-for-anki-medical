@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.30] — 2026-08-15
+
+### Added
+
+- The main deck picker can save one regular deck as the profile-specific
+  default for new Smart Search windows. The preference follows deck renames by
+  stable Anki deck ID and is easy to clear back to All decks.
+
+### Changed
+
+- A saved default is applied once only to a fresh, blank Smart Search launch.
+  Browser search handoffs, typed queries, filtered decks, custom expressions,
+  multi-deck scopes, and one-off deck choices are never silently rewritten.
+
 ## [1.0.29] — 2026-08-15
 
 ### Changed

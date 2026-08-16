@@ -30,6 +30,9 @@ search field to open that visible query in Smart Search.
 - Card-specific filters return only the sibling cards that actually match.
 - Choose one or several nested decks from the searchable deck picker without
   having to remember or type their full paths.
+- Set one regular deck as the profile-specific default in that picker. A new,
+  blank Smart Search window starts in that deck; explicit Browser handoffs and
+  one-off deck choices remain unchanged.
 - Adaptive relevance cutoffs remove weak trailing results instead of filling
   the list to an arbitrary maximum.
 

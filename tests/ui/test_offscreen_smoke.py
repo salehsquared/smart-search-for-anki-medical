@@ -16,6 +16,7 @@ try:
         Correction,
         DeckCatalog,
         DeckEntry,
+        DefaultDeckRef,
         FilterChip,
         HighlightSpan,
         IndexState,
@@ -61,6 +62,7 @@ class _HeldSearchBackend:
         *,
         submit_error: Exception | None = None,
         synchronous_error: str | None = None,
+        settings: UISettings | None = None,
     ) -> None:
         self.status = IndexStatus(
             IndexState.READY,
@@ -81,9 +83,10 @@ class _HeldSearchBackend:
         self.semantic_abort_count = 0
         self.status_reads = 0
         self.saved_settings = []
+        self.settings = settings or UISettings()
 
     def load_settings(self):
-        return UISettings()
+        return self.settings
 
     def save_settings(self, settings) -> None:
         self.saved_settings.append(settings)
@@ -297,6 +300,200 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(backend.requests[0].query, dialog.query())
         controller.deleteLater()
         dialog.deleteLater()
+
+    def test_fresh_blank_session_applies_one_resolved_default_deck(self) -> None:
+        backend = _HeldSearchBackend(
+            settings=UISettings(
+                default_deck=DefaultDeckRef(2, "Old deck name")
+            )
+        )
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+
+        self.assertTrue(controller.start_default_deck_session())
+        self.assertEqual(len(backend.deck_callbacks), 1)
+        backend.deck_callbacks[-1][0](
+            DeckCatalog(
+                decks=(DeckEntry(2, "Medicine::Cardiology"),),
+                current_deck_id=2,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(dialog.query().strip(), 'deck:"Medicine::Cardiology"')
+        self.assertEqual(dialog.search.cursorPosition(), len(dialog.query()))
+        self.assertEqual(len(backend.requests), 1)
+        self.assertEqual(
+            backend.requests[0].query,
+            'deck:"Medicine::Cardiology"',
+        )
+        self.assertEqual(
+            controller.settings.default_deck,
+            DefaultDeckRef(2, "Medicine::Cardiology"),
+        )
+        self.assertEqual(len(backend.saved_settings), 1)
+        self.assertFalse(controller.start_default_deck_session())
+        self.assertEqual(len(backend.requests), 1)
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_late_default_catalog_never_overwrites_typing_or_browser_handoff(self) -> None:
+        settings = UISettings(default_deck=DefaultDeckRef(2, "Cardiology"))
+        catalog = DeckCatalog((DeckEntry(2, "Cardiology"),), 2)
+
+        typed_backend = _HeldSearchBackend(settings=settings)
+        typed_dialog = SearchDialog()
+        typed_controller = SearchController(typed_backend, typed_dialog)
+        typed_controller.start_default_deck_session()
+        typed_dialog.search.setText("bupropion")
+        typed_dialog.queryEdited.emit("bupropion")
+        typed_backend.deck_callbacks[-1][0](catalog)
+        self.app.processEvents()
+        self.assertEqual(typed_dialog.query(), "bupropion")
+        self.assertEqual(typed_backend.requests, [])
+        typed_controller.dispose()
+        typed_dialog.deleteLater()
+
+        browser_backend = _HeldSearchBackend(settings=settings)
+        browser_dialog = SearchDialog()
+        browser_controller = SearchController(browser_backend, browser_dialog)
+        browser_controller.start_default_deck_session()
+        self.assertTrue(browser_controller.replace_and_submit("tag:marked"))
+        browser_backend.deck_callbacks[-1][0](catalog)
+        self.app.processEvents()
+        self.assertEqual(browser_dialog.query(), "tag:marked")
+        self.assertEqual(
+            [request.query for request in browser_backend.requests],
+            ["tag:marked"],
+        )
+        browser_controller.dispose()
+        browser_dialog.deleteLater()
+
+        empty_backend = _HeldSearchBackend(settings=settings)
+        empty_dialog = SearchDialog()
+        empty_controller = SearchController(empty_backend, empty_dialog)
+        empty_controller.start_default_deck_session()
+        self.assertTrue(empty_controller.replace_and_submit(""))
+        empty_backend.deck_callbacks[-1][0](catalog)
+        self.app.processEvents()
+        self.assertEqual(empty_dialog.query(), "")
+        self.assertEqual(empty_backend.requests, [])
+        empty_controller.dispose()
+        empty_dialog.deleteLater()
+
+    def test_default_picker_intent_persists_without_applying_current_query(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("bupropion")
+        dialog.defaultDeckRequested.emit(DeckEntry(7, "Medicine"))
+
+        self.assertEqual(
+            controller.settings.default_deck,
+            DefaultDeckRef(7, "Medicine"),
+        )
+        self.assertEqual(len(backend.saved_settings), 1)
+        self.assertEqual(backend.requests, [])
+        self.assertEqual(dialog.query(), "bupropion")
+        self.assertIn("Medicine", dialog.deck_picker.default_label.text())
+
+        dialog.defaultDeckRequested.emit(None)
+        self.assertIsNone(controller.settings.default_deck)
+        self.assertEqual(len(backend.saved_settings), 2)
+        self.assertEqual(backend.requests, [])
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_default_picker_save_failure_rolls_back_without_searching(self) -> None:
+        original = DefaultDeckRef(3, "Original")
+        backend = _HeldSearchBackend(
+            settings=UISettings(default_deck=original)
+        )
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.deck_picker.show()
+        self.app.processEvents()
+
+        def fail_save(_settings) -> None:
+            raise OSError("disk full")
+
+        backend.save_settings = fail_save
+        dialog.defaultDeckRequested.emit(DeckEntry(4, "Replacement"))
+
+        self.assertEqual(controller.settings.default_deck, original)
+        self.assertEqual(dialog.deck_picker.default_deck, original)
+        self.assertIn("could not be saved", dialog.deck_picker.message_label.text())
+        self.assertEqual(backend.requests, [])
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_missing_or_filtered_saved_default_fails_closed_to_all_decks(self) -> None:
+        for entry in (None, DeckEntry(9, "Filtered", filtered=True)):
+            with self.subTest(entry=entry):
+                backend = _HeldSearchBackend(
+                    settings=UISettings(
+                        default_deck=DefaultDeckRef(9, "Saved deck")
+                    )
+                )
+                dialog = SearchDialog()
+                controller = SearchController(backend, dialog)
+                controller.start_default_deck_session()
+                backend.deck_callbacks[-1][0](
+                    DeckCatalog(() if entry is None else (entry,), None)
+                )
+                self.app.processEvents()
+
+                self.assertEqual(dialog.query(), "")
+                self.assertEqual(backend.requests, [])
+                self.assertIn(
+                    "unavailable",
+                    dialog.deck_picker.default_hint_label.text().casefold(),
+                )
+                controller.dispose()
+                dialog.deleteLater()
+
+    def test_clearing_seeded_default_cancels_its_held_search(self) -> None:
+        catalog = DeckCatalog((DeckEntry(2, "Cardiology"),), 2)
+
+        for clear_with_escape in (False, True):
+            with self.subTest(clear_with_escape=clear_with_escape):
+                backend = _HeldSearchBackend(
+                    settings=UISettings(
+                        default_deck=DefaultDeckRef(2, "Cardiology")
+                    )
+                )
+                dialog = SearchDialog()
+                controller = SearchController(backend, dialog)
+                controller.start_default_deck_session()
+                backend.deck_callbacks[-1][0](catalog)
+                self.app.processEvents()
+                self.assertEqual(len(backend.requests), 1)
+                stale_success = backend.callbacks[-1][0]
+
+                if clear_with_escape:
+                    dialog.show()
+                    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+                else:
+                    dialog.deck_picker.set_query(dialog.query())
+                    dialog.deck_picker.set_catalog(catalog)
+                    dialog.deck_picker._choose_all()
+                    dialog.deck_picker._apply()
+                self.app.processEvents()
+
+                self.assertEqual(dialog.query(), "")
+                self.assertEqual(backend.cancel_count, 1)
+                stale_success(
+                    SearchResponse(
+                        request_id=backend.requests[0].request_id,
+                        query='deck:"Cardiology"',
+                        results=(SearchResult(note_id=99, title="Stale"),),
+                        total_results=1,
+                    )
+                )
+                self.app.processEvents()
+                self.assertEqual(dialog.results.results_model().count(), 0)
+                controller.dispose()
+                dialog.deleteLater()
 
     def test_controller_forwards_bury_and_change_deck_intents(self) -> None:
         backend = _HeldSearchBackend()
@@ -2044,7 +2241,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.29")
+        self.assertEqual(fallback.version, "1.0.30")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())

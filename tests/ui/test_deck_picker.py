@@ -8,7 +8,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
-    from ui.contracts import DeckCatalog, DeckEntry
+    from ui.contracts import DeckCatalog, DeckEntry, DefaultDeckRef
     from ui.deck_picker import (
         DeckDestinationPopup,
         DeckPickerPopup,
@@ -225,6 +225,115 @@ class DeckPickerTests(unittest.TestCase):
         self.assertEqual(popup.selected_names, ())
         self.assertTrue(popup.all_button.isChecked())
         self.assertEqual(popup.selection_label.text(), "All decks")
+        popup.deleteLater()
+
+    def test_default_row_sets_one_regular_deck_and_clears_separately(self) -> None:
+        popup = DeckPickerPopup()
+        with patch(
+            "ui.deck_picker.analyze_deck_query",
+            return_value=_analysis("all"),
+        ):
+            popup.set_query("")
+        popup.set_catalog(self.catalog())
+        defaults = []
+        applied = []
+        popup.defaultRequested.connect(defaults.append)
+        popup.applied.connect(applied.append)
+
+        popup._items["AnKing::Step 2"].setCheckState(
+            0,
+            Qt.CheckState.Checked,
+        )
+        self.assertTrue(popup.set_default_button.isEnabled())
+        popup.set_default_button.click()
+
+        self.assertEqual(defaults, [DeckEntry(3, "AnKing::Step 2")])
+        self.assertEqual(applied, [])
+        popup.set_default_deck(DefaultDeckRef(3, "AnKing::Step 2"))
+        self.assertIn("Step 2", popup.default_label.text())
+        self.assertEqual(popup.set_default_button.text(), "Default")
+        self.assertFalse(popup.set_default_button.isEnabled())
+        self.assertEqual(
+            popup.set_default_button.accessibleName(),
+            "Selected deck is the default",
+        )
+        self.assertFalse(popup.clear_default_button.isHidden())
+        self.assertEqual(popup.clear_default_button.text(), "Clear default")
+        self.assertIn("All decks", popup.clear_default_button.toolTip())
+
+        popup.clear_default_button.click()
+        self.assertEqual(defaults[-1], None)
+        self.assertEqual(applied, [])
+        popup.deleteLater()
+
+    def test_default_row_rejects_multi_excluded_filtered_and_missing_scopes(self) -> None:
+        popup = DeckPickerPopup()
+        with patch(
+            "ui.deck_picker.analyze_deck_query",
+            return_value=_analysis("all"),
+        ):
+            popup.set_query("")
+        popup.set_catalog(
+            DeckCatalog(
+                decks=(
+                    DeckEntry(1, "Regular"),
+                    DeckEntry(2, "Regular::Child"),
+                    DeckEntry(3, "Filtered", filtered=True),
+                ),
+                current_deck_id=1,
+            )
+        )
+
+        popup._selected = {"Regular", "Filtered"}
+        popup._refresh_checks()
+        self.assertFalse(popup.set_default_button.isEnabled())
+        self.assertIn("one deck", popup.set_default_button.toolTip())
+        self.assertIn("one deck", popup.default_hint_label.text())
+        self.assertIn(
+            "one deck",
+            popup.default_hint_label.accessibleDescription(),
+        )
+
+        popup._selected = {"Regular"}
+        popup._excluded = {"Regular::Child"}
+        popup._refresh_checks()
+        self.assertFalse(popup.set_default_button.isEnabled())
+
+        popup._selected = {"Filtered"}
+        popup._excluded.clear()
+        popup._refresh_checks()
+        self.assertFalse(popup.set_default_button.isEnabled())
+        self.assertIn("Filtered", popup.set_default_button.toolTip())
+        self.assertIn("Filtered", popup.default_hint_label.text())
+
+        popup.set_default_deck(DefaultDeckRef(99, "Deleted::Deck"))
+        self.assertIn("unavailable", popup.default_hint_label.text().casefold())
+        popup.deleteLater()
+
+    def test_long_default_name_is_elided_without_expanding_the_popup(self) -> None:
+        long_leaf = "A very long clinical study deck " * 15
+        long_name = f"Parent::{long_leaf}"
+        popup = DeckPickerPopup()
+        popup.set_query(f'deck:"{long_name}"')
+        popup.set_catalog(DeckCatalog((DeckEntry(91, long_name),), 91))
+        popup.set_default_deck(DefaultDeckRef(91, long_name))
+        popup.resize(390, 540)
+        popup.show()
+        self.app.processEvents()
+
+        self.assertLess(popup.minimumSizeHint().width(), 600)
+        self.assertLess(popup.default_frame.minimumSizeHint().width(), 600)
+        self.assertTrue(popup.default_label.text().endswith("…"))
+        self.assertIn(long_name.strip(), popup.default_label.toolTip())
+        frame_right = popup.default_frame.rect().right()
+        self.assertLessEqual(
+            popup.set_default_button.geometry().right(),
+            frame_right,
+        )
+        self.assertLessEqual(
+            popup.clear_default_button.geometry().right(),
+            frame_right,
+        )
         popup.deleteLater()
 
     def test_custom_expression_is_read_only_and_must_be_edited_directly(self) -> None:

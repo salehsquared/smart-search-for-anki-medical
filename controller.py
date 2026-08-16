@@ -101,6 +101,7 @@ from .ui.contracts import (
     Correction,
     DeckCatalog,
     DeckCatalogCallback,
+    DefaultDeckRef,
     FilterChip,
     HighlightSpan,
     IndexState,
@@ -973,6 +974,21 @@ class AnkiSearchBackend:
     def load_settings(self) -> UISettings:
         config = self._read_config()
         ui = config.get("ui") if isinstance(config.get("ui"), dict) else {}
+        default_deck: DefaultDeckRef | None = None
+        profile_id = self.profile_id
+        defaults = config.get("default_decks_by_profile")
+        if profile_id and isinstance(defaults, dict):
+            raw_default = defaults.get(profile_id)
+            if isinstance(raw_default, dict):
+                try:
+                    default_deck = DefaultDeckRef(
+                        deck_id=int(raw_default.get("deck_id", 0)),
+                        last_known_name=str(
+                            raw_default.get("last_known_name", "") or ""
+                        )[:1024],
+                    )
+                except (TypeError, ValueError):
+                    default_deck = None
         mode_text = str(ui.get("mode", config.get("default_mode", "smart"))).casefold()
         try:
             mode = SearchMode(mode_text)
@@ -1023,6 +1039,8 @@ class AnkiSearchBackend:
             preview_default=preview_default,
             width=_bounded_int(ui.get("width", 1040), 760, 4000, 1040),
             height=_bounded_int(ui.get("height", 700), 520, 3000, 700),
+            default_deck=default_deck,
+            profile_id=str(profile_id or ""),
         )
 
     def save_settings(self, settings: UISettings) -> None:
@@ -1048,6 +1066,25 @@ class AnkiSearchBackend:
                 for item in settings.filters
             ],
         }
+        defaults = config.get("default_decks_by_profile")
+        defaults = dict(defaults) if isinstance(defaults, dict) else {}
+        # The dialog can finish closing after Anki has already activated a
+        # different profile. Pin collection-specific preferences to the
+        # profile that originally loaded this UISettings object.
+        profile_id = str(settings.profile_id or "")
+        if profile_id:
+            default_deck = settings.default_deck
+            if isinstance(default_deck, DefaultDeckRef):
+                defaults[profile_id] = {
+                    "deck_id": int(default_deck.deck_id),
+                    "last_known_name": str(default_deck.last_known_name)[:1024],
+                }
+            else:
+                defaults.pop(profile_id, None)
+        if defaults:
+            config["default_decks_by_profile"] = defaults
+        else:
+            config.pop("default_decks_by_profile", None)
         manager = getattr(self.mw, "addonManager", None)
         if manager is not None:
             manager.writeConfig(self.addon_module, config)
@@ -4864,6 +4901,8 @@ class SmartSearchAddonController:
     def show_search(self) -> None:
         """Open or focus the keyboard-first Smart Search palette."""
 
+        dialog_created = False
+
         if host_backend_quarantined():
             self._pending_browser_search = None
             self._on_host_backend_failure(
@@ -4898,6 +4937,7 @@ class SmartSearchAddonController:
             return
 
         if self._dialog is None:
+            dialog_created = True
             from .ui.controller import SearchController
             from .ui.dialog import SearchDialog
 
@@ -5003,6 +5043,13 @@ class SmartSearchAddonController:
                 self._dialog.focus_query()
             except Exception:
                 pass
+            if dialog_created and self._ui_controller is not None:
+                try:
+                    self._ui_controller.start_default_deck_session()
+                except Exception:
+                    # A preference is optional. Failure must never prevent the
+                    # ordinary All-decks search window from opening.
+                    pass
         warm = getattr(self.backend, "warm_lexical_on_demand", None)
         if callable(warm):
             warm()

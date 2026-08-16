@@ -383,6 +383,10 @@ class ControllerTests(unittest.TestCase):
         settings.preview_enabled = False
         settings.preview_default = contracts.PreviewDefault.ANSWER
         settings.width = 1234
+        settings.default_deck = contracts.DefaultDeckRef(
+            40,
+            "Medicine::Cardiology",
+        )
         self.backend.save_settings(settings)
         saved = self.backend.mw.addonManager.config
         self.assertEqual(saved["shortcut"], "Meta+K")
@@ -392,6 +396,89 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(saved["preview_default"], "answer")
         self.assertEqual(saved["ui"]["preview_default"], "answer")
         self.assertEqual(saved["ui"]["width"], 1234)
+        self.assertEqual(
+            saved["default_decks_by_profile"][expected],
+            {
+                "deck_id": 40,
+                "last_known_name": "Medicine::Cardiology",
+            },
+        )
+        self.assertEqual(
+            self.backend.load_settings().default_deck,
+            contracts.DefaultDeckRef(40, "Medicine::Cardiology"),
+        )
+
+        settings.default_deck = None
+        self.backend.save_settings(settings)
+        self.assertNotIn(
+            "default_decks_by_profile",
+            self.backend.mw.addonManager.config,
+        )
+
+    def test_default_deck_settings_are_profile_scoped_and_malformed_safe(self) -> None:
+        active = self.backend.profile_id
+        self.assertIsNotNone(active)
+        self.backend.mw.addonManager.config = {
+            "shortcut": "Meta+K",
+            "default_decks_by_profile": {
+                str(active): {
+                    "deck_id": 91,
+                    "last_known_name": "Renamed later",
+                },
+                "another-profile": {
+                    "deck_id": 17,
+                    "last_known_name": "Other profile deck",
+                },
+            },
+        }
+
+        settings = self.backend.load_settings()
+        self.assertEqual(
+            settings.default_deck,
+            contracts.DefaultDeckRef(91, "Renamed later"),
+        )
+        settings.default_deck = contracts.DefaultDeckRef(92, "New default")
+        self.backend.save_settings(settings)
+        saved = self.backend.mw.addonManager.config
+        self.assertEqual(
+            saved["default_decks_by_profile"]["another-profile"],
+            {
+                "deck_id": 17,
+                "last_known_name": "Other profile deck",
+            },
+        )
+
+        saved["default_decks_by_profile"][str(active)] = {
+            "deck_id": -1,
+            "last_known_name": "Invalid",
+        }
+        self.backend.mw.addonManager.config = saved
+        self.assertIsNone(self.backend.load_settings().default_deck)
+
+    def test_delayed_old_dialog_save_keeps_its_original_profile_key(self) -> None:
+        old_profile = self.backend.profile_id
+        self.assertIsNotNone(old_profile)
+        old_settings = self.backend.load_settings()
+        old_settings.default_deck = contracts.DefaultDeckRef(41, "Old deck")
+
+        self.backend.deactivate_profile()
+        self.backend.mw.pm.name = "New Profile"
+        self.backend.mw.col.path = "/tmp/controller-tests/new-profile.anki2"
+        self.backend.activate_profile(auto_rebuild=False)
+        new_profile = self.backend.profile_id
+        self.assertIsNotNone(new_profile)
+        self.assertNotEqual(new_profile, old_profile)
+
+        self.backend.save_settings(old_settings)
+
+        defaults = self.backend.mw.addonManager.config[
+            "default_decks_by_profile"
+        ]
+        self.assertEqual(
+            defaults[str(old_profile)],
+            {"deck_id": 41, "last_known_name": "Old deck"},
+        )
+        self.assertNotIn(str(new_profile), defaults)
 
     def test_preview_default_config_is_case_insensitive_and_safely_falls_back(self) -> None:
         self.backend.mw.addonManager.config = {
