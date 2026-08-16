@@ -164,8 +164,9 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertLessEqual(abs(control_left - group_left), 2)
         self.assertLess(control_left, search_left)
         self.assertLess(control.sizeHint().width(), 160)
-        self.assertGreaterEqual(control.sizeHint().height(), 30)
-        self.assertLessEqual(control.sizeHint().height(), 36)
+        self.assertEqual(control.sizeHint().height(), 36)
+        initial_top = control.mapTo(dialog, QPoint(0, 0)).y()
+        initial_size = control.size()
 
         unchecked = control.grab().toImage()
         cy = unchecked.height() // 2
@@ -230,6 +231,30 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.app.processEvents()
         self.assertFalse(control.isChecked())
         self.assertEqual(dialog.query(), "")
+
+        # A chip must not resize or vertically move the quick-filter control.
+        dialog.set_query_text("tag:cardio")
+        dialog.show_response(
+            SearchResponse(
+                request_id=91,
+                query="tag:cardio",
+                results=(),
+                active_filters=(FilterChip("tag", "cardio"),),
+                total_results=0,
+            ),
+            (),
+        )
+        self.app.processEvents()
+        self.assertTrue(dialog.chip_bar.isVisibleTo(dialog))
+        self.assertEqual(control.mapTo(dialog, QPoint(0, 0)).y(), initial_top)
+        self.assertEqual(control.size(), initial_size)
+
+        dialog.resize(1040, 520)
+        self.app.processEvents()
+        wide_group_left = dialog.search_group.mapTo(dialog, QPoint(0, 0)).x()
+        wide_control_left = control.mapTo(dialog, QPoint(0, 0)).x()
+        self.assertLessEqual(abs(wide_control_left - wide_group_left), 2)
+        self.assertEqual(control.size(), initial_size)
         dialog.deleteLater()
 
     def test_suspended_only_click_submits_once_and_empty_clear_cancels(self) -> None:
@@ -2604,7 +2629,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.33")
+        self.assertEqual(fallback.version, "1.0.34")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())
@@ -3493,7 +3518,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller = SearchController(backend, dialog)
         initial_previews: list[SearchResult | None] = []
         controller.initialPreviewRequested.connect(initial_previews.append)
-        dialog.search.setText("heart failure tag:cardio")
+        dialog.set_query_text("heart failure is:suspended tag:cardio")
         roots = (
             SearchResult(
                 note_id=1,
@@ -3547,9 +3572,11 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertTrue(dialog.related_active())
-        self.assertEqual(dialog.query(), "heart failure tag:cardio")
+        self.assertEqual(dialog.query(), "heart failure is:suspended tag:cardio")
         self.assertEqual(model.results(), (related,))
         self.assertFalse(dialog.chip_bar.isVisibleTo(dialog))
+        self.assertTrue(dialog.suspended_only.isVisibleTo(dialog))
+        self.assertTrue(dialog.suspended_only.isChecked())
         self.assertTrue(dialog.related_context_bar.isVisibleTo(dialog))
         self.assertEqual(initial_previews, [related])
 

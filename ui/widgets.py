@@ -228,7 +228,9 @@ class CompactCheckBox(QCheckBox, PaletteMixin):
     _PAD_X = 11
     _CHECK_SIZE = 16
     _CHECK_GAP = 7
-    _MIN_HEIGHT = 32
+    # ChipBar adds 2 px above and below its 32 px chips. Match that total so
+    # the filter row does not change height when the first chip appears.
+    _MIN_HEIGHT = 36
 
     def __init__(
         self,
@@ -304,7 +306,7 @@ class CompactCheckBox(QCheckBox, PaletteMixin):
         mark_border = (
             colors["accent"]
             if enabled and checked
-            else colors["chip_border"]
+            else colors["muted"] if enabled else colors["chip_border"]
         )
         mark_fill = (
             colors["accent"]

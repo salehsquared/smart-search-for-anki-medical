@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.34] — 2026-08-16
+
+### Changed
+
+- **Suspended only** now sits at the natural left edge of the filter row and
+  uses the same compact visual language as the active filter chips.
+- Its checkbox stays visible in both states, keeps a stable width when toggled,
+  and has clear hover, keyboard-focus, disabled, light, and dark appearances.
+
 ## [1.0.33] — 2026-08-15
 
 ### Added
