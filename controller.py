@@ -31,6 +31,7 @@ import re
 import sys
 import threading
 import time
+import weakref
 from typing import Any
 
 from .backend.compat import dataclass, optional_hook
@@ -4316,6 +4317,8 @@ class SmartSearchAddonController:
         self._collection_temporarily_closed = False
         self._update_check_running = False
         self._update_profile_was_active = False
+        self._pending_browser_search: str | None = None
+        self._browser_search_actions: list[Any] = []
         self._hooks: list[tuple[Any, Callable[..., Any]]] = []
 
     def start(self) -> "SmartSearchAddonController":
@@ -4372,6 +4375,16 @@ class SmartSearchAddonController:
             gui_hooks,
             "collection_did_temporarily_close",
             self._on_collection_reopened,
+        )
+        self._append_named_hook(
+            gui_hooks,
+            "browser_will_show",
+            self._install_browser_search_action,
+        )
+        self._append_named_hook(
+            gui_hooks,
+            "theme_did_change",
+            self._refresh_browser_search_actions,
         )
         self._append_named_hook(
             anki_hooks,
@@ -4481,11 +4494,13 @@ class SmartSearchAddonController:
         self._clear_captured_notes()
         self._semantic_autostart_token = None
         self._semantic_autostart_attempted_token = None
+        self._pending_browser_search = None
         self._close_dialog()
         self.backend.deactivate_profile()
         self.backend.set_semantic_activity_callback(None)
         self.backend.set_semantic_cancelled_callback(None)
         self.backend.set_host_backend_failure_callback(None)
+        self._remove_browser_search_actions()
         for hook, callback in reversed(self._hooks):
             try:
                 hook.remove(callback)
@@ -4632,6 +4647,7 @@ class SmartSearchAddonController:
     def _on_host_backend_failure(self, error: Exception) -> None:
         """Quarantine optional work after Anki reports a poisoned backend."""
 
+        self._pending_browser_search = None
         self.backend.quarantine_host_backend(error)
         if self._host_backend_warning_shown:
             return
@@ -4849,16 +4865,19 @@ class SmartSearchAddonController:
         """Open or focus the keyboard-first Smart Search palette."""
 
         if host_backend_quarantined():
+            self._pending_browser_search = None
             self._on_host_backend_failure(
                 HostBackendUnavailable(HOST_BACKEND_RESTART_MESSAGE)
             )
             return
         if self.backend.bundle_update_running:
+            self._pending_browser_search = None
             self._show_message(
                 "Restart Anki to finish the Smart Search update."
             )
             return
         if self._dialog_close_in_progress:
+            self._pending_browser_search = None
             self._show_message(
                 "Smart Search is finishing a save. Try again in a moment."
             )
@@ -4967,10 +4986,97 @@ class SmartSearchAddonController:
             self._ui_controller.resume()
         self._dialog.raise_()
         self._dialog.activateWindow()
-        self._dialog.focus_query()
+        pending_query = self._pending_browser_search
+        if pending_query is not None and self._ui_controller is not None:
+            self._pending_browser_search = None
+            try:
+                replaced = self._ui_controller.replace_and_submit(pending_query)
+            except Exception:
+                replaced = False
+            if not replaced:
+                try:
+                    self._dialog.focus_query()
+                except Exception:
+                    pass
+        else:
+            try:
+                self._dialog.focus_query()
+            except Exception:
+                pass
         warm = getattr(self.backend, "warm_lexical_on_demand", None)
         if callable(warm):
             warm()
+
+    def show_search_for_query(self, query: str) -> None:
+        """Open Smart Search with the latest Anki Browser query."""
+
+        self._pending_browser_search = str(query)
+        self.show_search()
+
+    def _install_browser_search_action(self, browser: Any) -> None:
+        """Add the native leading search-field action to one Browser."""
+
+        try:
+            from .ui.browser_search import install_browser_search_action
+
+            action = install_browser_search_action(
+                browser,
+                self.show_search_for_query,
+            )
+        except Exception:
+            return
+        if action is None:
+            return
+
+        live: list[Any] = []
+        already_tracked = False
+        for action_ref in self._browser_search_actions:
+            current = action_ref()
+            if current is None:
+                continue
+            live.append(action_ref)
+            if current is action:
+                already_tracked = True
+        if not already_tracked:
+            try:
+                live.append(weakref.ref(action))
+            except TypeError:
+                return
+        self._browser_search_actions = live
+
+    def _refresh_browser_search_actions(self) -> None:
+        """Keep Browser search icons correct after a theme change."""
+
+        try:
+            from .ui.browser_search import refresh_browser_search_action
+        except Exception:
+            return
+        live: list[Any] = []
+        for action_ref in self._browser_search_actions:
+            try:
+                action = action_ref()
+                if action is not None and refresh_browser_search_action(action):
+                    live.append(action_ref)
+            except Exception:
+                continue
+        self._browser_search_actions = live
+
+    def _remove_browser_search_actions(self) -> None:
+        """Remove inline Browser actions when this controller shuts down."""
+
+        try:
+            from .ui.browser_search import remove_browser_search_action
+        except Exception:
+            self._browser_search_actions = []
+            return
+        for action_ref in self._browser_search_actions:
+            try:
+                action = action_ref()
+                if action is not None:
+                    remove_browser_search_action(action)
+            except Exception:
+                continue
+        self._browser_search_actions = []
 
     def _addon_version(self) -> str:
         """Canonical add-on version from the bundle manifest."""
@@ -6642,6 +6748,7 @@ class SmartSearchAddonController:
         self._refresh_dialog()
 
     def _on_profile_open(self) -> None:
+        self._pending_browser_search = None
         if self.backend.bundle_update_running:
             return
         self._sync_in_progress = False
@@ -6704,6 +6811,7 @@ class SmartSearchAddonController:
 
     def _profile_activation_ready(self, status: IndexStatus) -> None:
         if self.backend.bundle_update_running:
+            self._pending_browser_search = None
             return
         if status.state is IndexState.READY:
             self._initial_setup_deferred = False
@@ -6728,10 +6836,21 @@ class SmartSearchAddonController:
                 and self._post_review_resume_timer is not None
             ):
                 self._post_review_resume_timer.start(250)
+        pending_can_open = status.state is IndexState.READY or (
+            status.state is IndexState.BUILDING and self.backend.active
+        )
+        if not pending_can_open:
+            self._pending_browser_search = None
         self._schedule_semantic_autostart()
         self._refresh_dialog()
+        if (
+            pending_can_open
+            and self._pending_browser_search is not None
+        ):
+            self._run_on_main(self.show_search)
 
     def _on_profile_will_close(self) -> None:
+        self._pending_browser_search = None
         self._clear_undo_offer()
         if self._reconcile_timer is not None:
             self._reconcile_timer.stop()
@@ -7057,13 +7176,19 @@ class SmartSearchAddonController:
     def _search_profile_activation_ready(self, status: IndexStatus) -> None:
         """Finish an on-demand external-index open and reveal the palette."""
 
+        had_pending_query = self._pending_browser_search is not None
         self._profile_activation_ready(status)
-        if status.state is IndexState.READY and self._dialog is None:
+        if (
+            status.state is IndexState.READY
+            and not had_pending_query
+            and self._dialog is None
+        ):
             self._run_on_main(self.show_search)
 
     def _search_profile_activation_failed(self, message: str) -> None:
         """Make an on-demand index-open failure visible without a dialog."""
 
+        self._pending_browser_search = None
         self._refresh_dialog()
         detail = str(message).strip() or "Search data could not be opened."
         self._show_error(detail)

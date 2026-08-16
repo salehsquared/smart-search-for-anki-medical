@@ -16,6 +16,8 @@ Created by **Saleh Mostafa** with [MedBrevia](https://medbrevia.com/app).
 
 Open the palette with **Command-K** on macOS or **Ctrl-K** on Windows/Linux,
 type naturally, and press **Return** to open the result in Anki's Browser.
+In Anki's Browser, click the small magnifier at the left edge of the main
+search field to open that visible query in Smart Search.
 
 - `buproprion` can find **bupropion**.
 - A supported brand name can find its generic medication.

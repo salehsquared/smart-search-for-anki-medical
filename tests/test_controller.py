@@ -625,11 +625,165 @@ class ControllerTests(unittest.TestCase):
         errors = []
         addon._refresh_dialog = lambda: refreshed.append(True)
         addon._show_error = errors.append
+        addon._pending_browser_search = "deck:Neurology"
 
         addon._search_profile_activation_failed("Search data could not be opened.")
 
         self.assertEqual(refreshed, [True])
         self.assertEqual(errors, ["Search data could not be opened."])
+        self.assertIsNone(addon._pending_browser_search)
+
+    def test_browser_handoff_reuses_dialog_and_normal_open_keeps_query(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        addon.backend.warm_lexical_on_demand = lambda: True
+        addon._register_managed_dialog = lambda _dialog: None
+        events: list[str] = []
+        replacements: list[str] = []
+        dialog = types.SimpleNamespace(
+            show=lambda: events.append("show"),
+            raise_=lambda: events.append("raise"),
+            activateWindow=lambda: events.append("activate"),
+            focus_query=lambda: events.append("focus"),
+        )
+        addon._dialog = dialog
+        addon._ui_controller = types.SimpleNamespace(
+            resume=lambda: events.append("resume"),
+            replace_and_submit=lambda query: (
+                replacements.append(query),
+                True,
+            )[1],
+        )
+
+        query = 'deck:"Step 2" is:due -is:suspended'
+        addon.show_search_for_query(query)
+        addon.show_search()
+
+        self.assertEqual(replacements, [query])
+        self.assertIsNone(addon._pending_browser_search)
+        self.assertEqual(events.count("resume"), 2)
+        self.assertEqual(events.count("focus"), 1)
+
+    def test_latest_browser_handoff_waits_for_profile_activation(self) -> None:
+        status = contracts.IndexStatus(contracts.IndexState.UNAVAILABLE)
+
+        class _DelayedBackend:
+            bundle_update_running = False
+
+            def __init__(self) -> None:
+                self.active = False
+                self.status = status
+                self.activation_callbacks = None
+
+            def get_status(self):
+                return self.status
+
+            def activate_profile_async(self, **callbacks) -> None:
+                self.activation_callbacks = callbacks
+                self.status = contracts.IndexStatus(contracts.IndexState.BUILDING)
+
+            @staticmethod
+            def warm_lexical_on_demand() -> bool:
+                return True
+
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        backend = _DelayedBackend()
+        addon.backend = backend
+        addon._register_managed_dialog = lambda _dialog: None
+        addon._run_on_main = lambda callback: callback()
+        addon._schedule_semantic_autostart = lambda: None
+        addon.schedule_reconcile = lambda **_kwargs: None
+        addon._refresh_dialog = lambda: None
+        addon._show_message = lambda _message: None
+        replacements: list[str] = []
+        addon._dialog = types.SimpleNamespace(
+            show=lambda: None,
+            raise_=lambda: None,
+            activateWindow=lambda: None,
+            focus_query=lambda: None,
+        )
+        addon._ui_controller = types.SimpleNamespace(
+            resume=lambda: True,
+            replace_and_submit=lambda query: (
+                replacements.append(query),
+                True,
+            )[1],
+        )
+
+        addon.show_search_for_query("first")
+        first_callbacks = backend.activation_callbacks
+        addon.show_search_for_query("second")
+        self.assertIs(backend.activation_callbacks, first_callbacks)
+
+        backend.active = True
+        backend.status = contracts.IndexStatus(contracts.IndexState.READY)
+        first_callbacks["on_ready"](backend.status)
+
+        self.assertEqual(replacements, ["second"])
+        self.assertIsNone(addon._pending_browser_search)
+
+    def test_failed_browser_handoff_activation_cannot_replay_later(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        addon._schedule_semantic_autostart = lambda: None
+        addon._refresh_dialog = lambda: None
+        addon._post_review_resume_timer = _FakeTimer()
+        scheduled: list[bool] = []
+        addon._run_on_main = lambda _callback: scheduled.append(True)
+        addon._pending_browser_search = "tag:stale"
+        self.backend.deactivate_profile()
+
+        addon._profile_activation_ready(
+            contracts.IndexStatus(contracts.IndexState.UNAVAILABLE)
+        )
+        addon._profile_activation_ready(
+            contracts.IndexStatus(contracts.IndexState.READY)
+        )
+
+        self.assertIsNone(addon._pending_browser_search)
+        self.assertEqual(scheduled, [])
+
+    def test_stale_dialog_cannot_escape_browser_handoff_callback(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        addon.backend.warm_lexical_on_demand = lambda: True
+        addon._register_managed_dialog = lambda _dialog: None
+        focus_attempts: list[bool] = []
+        addon._dialog = types.SimpleNamespace(
+            show=lambda: None,
+            raise_=lambda: None,
+            activateWindow=lambda: None,
+            focus_query=lambda: focus_attempts.append(True),
+        )
+
+        def deleted_dialog(_query: str) -> bool:
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        addon._ui_controller = types.SimpleNamespace(
+            resume=lambda: True,
+            replace_and_submit=deleted_dialog,
+        )
+
+        addon.show_search_for_query("is:due")
+
+        self.assertEqual(focus_attempts, [True])
+        self.assertIsNone(addon._pending_browser_search)
 
     def test_profile_deactivation_does_not_wait_for_inflight_reader_lock(self) -> None:
         self.backend.deactivate_profile()
@@ -4815,10 +4969,12 @@ class ControllerTests(unittest.TestCase):
         )
 
         addon._semantic_autostart_attempted_token = backend._context.token
+        addon._pending_browser_search = "is:due"
         addon._on_profile_will_close()
         self.assertEqual(semantic_timer.stop_count, 2)
         self.assertIsNone(addon._semantic_autostart_token)
         self.assertIsNone(addon._semantic_autostart_attempted_token)
+        self.assertIsNone(addon._pending_browser_search)
         self.assertTrue(backend.deactivated)
 
     def test_fresh_profile_setup_cancelled_by_review_is_restarted_afterward(self) -> None:

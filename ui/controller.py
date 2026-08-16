@@ -178,6 +178,32 @@ class SearchController(QObject):
     def settings(self) -> UISettings:
         return self._settings
 
+    def replace_and_submit(self, query: str) -> bool:
+        """Atomically replace the visible query and submit it once."""
+
+        if self._disposed or not self._active:
+            return False
+
+        text = str(query)
+        search_field = getattr(self._dialog, "search", None)
+        maximum = getattr(search_field, "maxLength", None)
+        if callable(maximum) and len(text) > int(maximum()):
+            self._invalidate_pending_search()
+            self._dialog.show_error(
+                "This Anki Browser search is too long to open in Smart Search."
+            )
+            return False
+
+        # Do not call SearchDialog.set_query(): it dispatches by itself. This
+        # controller owns cancellation and then submits the exact text that
+        # the field accepted, including the explicit empty-query case.
+        self._dialog.set_query_text(text)
+        self._dismissed.clear()
+        self._force_literal = False
+        self._last_query = ""
+        self.submit_search(self._dialog.query())
+        return True
+
     def resume(self) -> bool:
         """Resume a hidden dialog's lightweight status updates."""
 

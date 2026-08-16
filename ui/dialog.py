@@ -2409,10 +2409,19 @@ class SearchDialog(QDialog):
     def clear_chips(self) -> None:
         self.chip_bar.set_chips([], [])
 
-    def set_query(self, text: str) -> None:
+    def set_query_text(self, text: str) -> None:
+        """Replace the visible query without dispatching a search."""
+
+        # A programmatic handoff must supersede any user-edit debounce. If the
+        # old timer is left armed, it can submit a stale query after the new
+        # one has already started.
+        self._debounce.stop()
         self.search.setText(text)
         self.deck_scope.set_scope(text)
         self.focus_query()
+
+    def set_query(self, text: str) -> None:
+        self.set_query_text(text)
         self._emit_search()
 
     # ------------------------------------------------------------- behavior

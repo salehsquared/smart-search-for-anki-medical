@@ -180,6 +180,88 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(opened[0][0].note_id, 42)
         dialog.deleteLater()
 
+    def test_browser_handoff_replaces_query_once_in_current_mode(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        query = 'deck:"Step 2" is:due -is:suspended'
+        try:
+            dialog.set_mode(SearchMode.EXACT)
+            self.assertTrue(controller.replace_and_submit(query))
+
+            self.assertEqual(dialog.query(), query)
+            self.assertEqual(len(backend.requests), 1)
+            self.assertEqual(backend.requests[0].query, dialog.query())
+            self.assertIs(backend.requests[0].mode, SearchMode.EXACT)
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_browser_handoff_empty_query_cancels_late_result(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            controller.replace_and_submit("bupropion")
+            request = backend.requests[0]
+            on_success, _on_error = backend.callbacks[0]
+
+            self.assertTrue(controller.replace_and_submit(""))
+            self.assertEqual(dialog.query(), "")
+            self.assertEqual(backend.cancel_count, 1)
+            self.assertEqual(dialog.results.results_model().count(), 0)
+
+            on_success(
+                SearchResponse(
+                    request_id=request.request_id,
+                    query=request.query,
+                    results=(SearchResult(note_id=42, title="Late result"),),
+                    total_results=1,
+                )
+            )
+            self.app.processEvents()
+
+            self.assertEqual(dialog.results.results_model().count(), 0)
+            self.assertEqual(dialog.query(), "")
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_browser_handoff_resets_literal_and_correction_state(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        correction = Correction("buproprion", "bupropion")
+        try:
+            controller._last_query = "bupropion"
+            controller._force_literal = True
+            controller._dismissed.add(correction)
+
+            self.assertTrue(controller.replace_and_submit("bupropion"))
+
+            self.assertFalse(controller._force_literal)
+            self.assertEqual(controller._dismissed, set())
+            self.assertFalse(backend.requests[-1].literal)
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_browser_handoff_rejects_a_query_too_long_for_the_field(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            query = "x" * (dialog.search.maxLength() + 1)
+
+            self.assertFalse(controller.replace_and_submit(query))
+
+            self.assertEqual(backend.requests, [])
+            self.assertNotEqual(dialog.query(), query)
+            self.assertIn("too long", dialog.message_label.text())
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
     def test_deck_picker_applies_one_visible_query_and_search(self) -> None:
         backend = _HeldSearchBackend()
         dialog = SearchDialog()
@@ -1962,7 +2044,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.27")
+        self.assertEqual(fallback.version, "1.0.28")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())

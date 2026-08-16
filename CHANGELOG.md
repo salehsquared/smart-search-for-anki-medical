@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.28] — 2026-08-15
+
+### Added
+
+- Anki's Browser search field now has a compact leading magnifier that opens
+  the visible Browser query directly in Smart Search.
+
+### Changed
+
+- Browser handoffs keep the user's current Smart, Exact, or Semantic mode and
+  submit the transferred query exactly once. The latest click is retained
+  while a cold profile index opens.
+- An empty Browser query now clears Smart Search and cancels an older request,
+  so a late result cannot replace the Help view.
+
 ## [1.0.27] — 2026-08-10
 
 ### Fixed
