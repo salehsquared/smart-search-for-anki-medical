@@ -18,6 +18,7 @@ from .widgets import (
     QApplication,
     QAbstractItemView,
     QBrush,
+    QCheckBox,
     QColor,
     QDialog,
     QEvent,
@@ -407,32 +408,18 @@ class DeckPickerPopup(QDialog):
         self.no_matches_label.hide()
         layout.addWidget(self.no_matches_label)
 
-        self.default_frame = QFrame(self.surface)
-        self.default_frame.setObjectName("deckPickerDefault")
-        default_layout = QVBoxLayout(self.default_frame)
-        default_layout.setContentsMargins(10, 7, 8, 7)
-        default_layout.setSpacing(3)
         default_row = QHBoxLayout()
-        default_row.setContentsMargins(0, 0, 0, 0)
-        default_row.setSpacing(8)
-        self.default_label = QLabel("Default deck  ·  All decks", self.default_frame)
-        self.default_label.setObjectName("deckPickerDefaultLabel")
-        self.default_label.setAccessibleName("Default search deck")
-        self.default_label.setSizePolicy(
-            QSizePolicy.Policy.Ignored,
-            QSizePolicy.Policy.Preferred,
-        )
-        default_row.addWidget(self.default_label, 1)
-        self.set_default_button = QPushButton("Use selection", self.default_frame)
-        self.set_default_button.setObjectName("deckPickerDefaultAction")
-        self.set_default_button.setAccessibleName(
-            "Use the selected deck as the default"
-        )
-        self.set_default_button.clicked.connect(self._request_default)
-        default_row.addWidget(self.set_default_button)
-        self.clear_default_button = QToolButton(self.default_frame)
+        default_row.setContentsMargins(2, 0, 2, 0)
+        default_row.setSpacing(6)
+        self.default_checkbox = QCheckBox("Set as default deck", self.surface)
+        self.default_checkbox.setObjectName("deckPickerDefaultAction")
+        self.default_checkbox.setAccessibleName("Set as default deck")
+        self.default_checkbox.toggled.connect(self._toggle_default)
+        default_row.addWidget(self.default_checkbox)
+        default_row.addStretch(1)
+        self.clear_default_button = QToolButton(self.surface)
         self.clear_default_button.setObjectName("deckPickerDefaultClear")
-        self.clear_default_button.setText("Clear default")
+        self.clear_default_button.setText("Clear")
         self.clear_default_button.setAccessibleName("Clear the default deck")
         self.clear_default_button.setToolTip(
             "Make All decks the default for new Smart Search windows."
@@ -440,16 +427,7 @@ class DeckPickerPopup(QDialog):
         self.clear_default_button.clicked.connect(self._clear_default)
         self.clear_default_button.hide()
         default_row.addWidget(self.clear_default_button)
-        default_layout.addLayout(default_row)
-        self.default_hint_label = QLabel(
-            "Choose one deck to use as the default.",
-            self.default_frame,
-        )
-        self.default_hint_label.setObjectName("deckPickerDefaultHint")
-        self.default_hint_label.setWordWrap(True)
-        self.default_hint_label.setAccessibleName("Default deck selection status")
-        default_layout.addWidget(self.default_hint_label)
-        layout.addWidget(self.default_frame)
+        layout.addLayout(default_row)
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
@@ -479,8 +457,8 @@ class DeckPickerPopup(QDialog):
         QWidget.setTabOrder(self.clear_button, self.all_button)
         QWidget.setTabOrder(self.all_button, self.current_button)
         QWidget.setTabOrder(self.current_button, self.tree)
-        QWidget.setTabOrder(self.tree, self.set_default_button)
-        QWidget.setTabOrder(self.set_default_button, self.clear_default_button)
+        QWidget.setTabOrder(self.tree, self.default_checkbox)
+        QWidget.setTabOrder(self.default_checkbox, self.clear_default_button)
         QWidget.setTabOrder(self.clear_default_button, self.retry_button)
         QWidget.setTabOrder(self.retry_button, self.cancel_button)
         QWidget.setTabOrder(self.cancel_button, self.apply_button)
@@ -532,6 +510,7 @@ class DeckPickerPopup(QDialog):
         self.message_label.hide()
         self.message_label.setToolTip("")
         self.message_label.setProperty("validationError", False)
+        self.message_label.setProperty("defaultDeckSaveError", False)
         self.retry_button.hide()
         self.tree.show()
         self._rebuild_tree()
@@ -548,6 +527,7 @@ class DeckPickerPopup(QDialog):
         self.message_label.setText("Loading decks…")
         self.message_label.setToolTip("")
         self.message_label.setProperty("validationError", False)
+        self.message_label.setProperty("defaultDeckSaveError", False)
         self.message_label.show()
         self.no_matches_label.hide()
         self.retry_button.hide()
@@ -561,6 +541,7 @@ class DeckPickerPopup(QDialog):
         self.message_label.setText(str(message or "Decks could not be loaded."))
         self.message_label.setToolTip("")
         self.message_label.setProperty("validationError", True)
+        self.message_label.setProperty("defaultDeckSaveError", False)
         self.message_label.show()
         self.no_matches_label.hide()
         self.retry_button.show()
@@ -583,6 +564,7 @@ class DeckPickerPopup(QDialog):
         )
         self.message_label.setToolTip(str(message or ""))
         self.message_label.setProperty("validationError", True)
+        self.message_label.setProperty("defaultDeckSaveError", False)
         self.message_label.show()
         self.no_matches_label.hide()
         self.retry_button.show()
@@ -599,8 +581,27 @@ class DeckPickerPopup(QDialog):
         )
         self.message_label.setToolTip("")
         self.message_label.setProperty("validationError", True)
+        self.message_label.setProperty("defaultDeckSaveError", False)
         self.message_label.show()
         self.retry_button.hide()
+        self._apply_theme()
+
+    def show_default_save_error(self, message: str) -> None:
+        """Show a preference-save failure separately from catalog warnings."""
+
+        self.show_validation_error(message)
+        self.message_label.setProperty("defaultDeckSaveError", True)
+
+    def clear_default_save_error(self) -> None:
+        """Remove only a resolved preference-save failure."""
+
+        if not bool(self.message_label.property("defaultDeckSaveError")):
+            return
+        self.message_label.clear()
+        self.message_label.setToolTip("")
+        self.message_label.setProperty("validationError", False)
+        self.message_label.setProperty("defaultDeckSaveError", False)
+        self.message_label.hide()
         self._apply_theme()
 
     def open_anchored(self, button: QToolButton) -> None:
@@ -1058,82 +1059,70 @@ class DeckPickerPopup(QDialog):
     def _update_default_controls(self) -> None:
         default = self._default_deck
         resolved = self._default_entry()
-        if default is None:
-            label = "Default deck  ·  All decks"
-            detail = "New Smart Search windows start in all decks."
-        elif resolved is not None:
-            leaf = resolved.name.rsplit("::", 1)[-1]
-            label = f"Default deck  ·  {leaf}"
-            detail = f"New Smart Search windows start in {resolved.name}."
-        elif self._ready:
-            label = "Default deck  ·  Unavailable"
-            detail = (
-                f"{default.last_known_name} is no longer available as a "
-                "regular deck in this profile."
-            )
-        else:
-            leaf = default.last_known_name.rsplit("::", 1)[-1]
-            label = f"Default deck  ·  {leaf}"
-            detail = f"Saved default deck: {default.last_known_name}."
-        visible_label = self.default_label.fontMetrics().elidedText(
-            label,
-            Qt.TextElideMode.ElideRight,
-            150,
-        )
-        self.default_label.setText(visible_label)
-        self.default_label.setToolTip(detail)
-        self.default_label.setAccessibleDescription(detail)
-        self.clear_default_button.setVisible(default is not None)
-        self.clear_default_button.setEnabled(default is not None)
-
         selected = self._selected_default_entry()
         same = bool(
             selected is not None
             and default is not None
             and selected.deck_id == default.deck_id
         )
-        self.set_default_button.setText("Default" if same else "Use selection")
-        self.set_default_button.setEnabled(selected is not None and not same)
+        previous = self.default_checkbox.blockSignals(True)
+        try:
+            self.default_checkbox.setChecked(same)
+        finally:
+            self.default_checkbox.blockSignals(previous)
+        self.default_checkbox.setEnabled(selected is not None)
+
         if selected is not None:
             tooltip = (
-                f"{selected.name} is already the default deck."
+                f"{selected.name} is the default deck. Uncheck to make All "
+                "decks the default for new Smart Search windows."
                 if same
                 else f"Use {selected.name} for new Smart Search windows."
             )
-            hint = (
-                "This deck is already the default."
-                if same
-                else "Ready to use this deck as the default."
-            )
         elif _is_custom(self._analysis):
             tooltip = "Custom deck expressions cannot be saved as one default deck."
-            hint = "Custom deck expressions cannot be saved as one default deck."
         elif self._excluded or len(self._selected) > 1:
-            tooltip = "Choose one deck with no exclusions to set a default."
-            hint = tooltip
+            tooltip = "Select one deck with no exclusions to set a default."
         elif not self._selected:
-            tooltip = "Choose one deck to set a default."
-            hint = tooltip
+            tooltip = "Select one regular deck to set a default."
         else:
             tooltip = "Filtered or unavailable decks cannot be the default."
-            hint = tooltip
         if default is not None and resolved is None and self._ready:
-            hint = "Saved default is unavailable. " + hint
-        self.set_default_button.setAccessibleName(
-            "Selected deck is the default"
-            if same
-            else "Use the selected deck as the default"
-        )
-        self.set_default_button.setToolTip(tooltip)
-        self.set_default_button.setAccessibleDescription(tooltip)
-        self.default_hint_label.setText(hint)
-        self.default_hint_label.setToolTip(tooltip)
-        self.default_hint_label.setAccessibleDescription(tooltip)
+            tooltip = (
+                f"Saved default {default.last_known_name} is unavailable. "
+                + tooltip
+            )
+        self.default_checkbox.setToolTip(tooltip)
+        self.default_checkbox.setAccessibleDescription(tooltip)
 
-    def _request_default(self, _checked: bool = False) -> None:
+        show_clear = default is not None and not same
+        self.clear_default_button.setVisible(show_clear)
+        self.clear_default_button.setEnabled(show_clear)
+        if default is not None:
+            current_name = (
+                resolved.name if resolved is not None else default.last_known_name
+            )
+            clear_detail = (
+                f"Clear {current_name} as the default deck. "
+                "New Smart Search windows will use All decks."
+            )
+            self.clear_default_button.setToolTip(clear_detail)
+            self.clear_default_button.setAccessibleDescription(clear_detail)
+
+    def _toggle_default(self, checked: bool) -> None:
         entry = self._selected_default_entry()
-        if entry is not None:
-            self.defaultRequested.emit(entry)
+        if checked:
+            if entry is not None:
+                self.defaultRequested.emit(entry)
+                return
+        elif (
+            entry is not None
+            and self._default_deck is not None
+            and entry.deck_id == self._default_deck.deck_id
+        ):
+            self.defaultRequested.emit(None)
+            return
+        self._update_default_controls()
 
     def _clear_default(self, _checked: bool = False) -> None:
         if self._default_deck is not None:
@@ -1295,18 +1284,6 @@ class DeckPickerPopup(QDialog):
             f" background: {c['callout_bg']}; border: 1px solid {c['callout_border']};"
             " border-radius: 9px;"
             "}"
-            "QFrame#deckPickerDefault {"
-            f" background: {c['surface_high']}; border: 1px solid {c['border']};"
-            " border-radius: 8px;"
-            "}"
-            "QLabel#deckPickerDefaultLabel {"
-            f" color: {c['text']}; background: transparent; border: none;"
-            " font-weight: 600;"
-            "}"
-            "QLabel#deckPickerDefaultHint {"
-            f" color: {c['muted']}; background: transparent; border: none;"
-            " font-size: 11px;"
-            "}"
             "QLabel#deckPickerTitle {"
             f" color: {c['text']}; font-size: 16px; font-weight: 700;"
             " background: transparent; border: none;"
@@ -1326,18 +1303,17 @@ class DeckPickerPopup(QDialog):
             "QToolButton#deckPickerClear:disabled {"
             f" color: {c['muted']};"
             "}"
-            "QPushButton#deckPickerDefaultAction {"
-            f" background: {c['base']}; color: {c['text']};"
-            f" border: 1px solid {c['border']}; border-radius: 7px;"
-            " min-height: 28px; padding: 0 9px; font-weight: 600;"
+            "QCheckBox#deckPickerDefaultAction {"
+            f" color: {c['text']}; background: transparent; border: none;"
+            " min-height: 26px; spacing: 7px;"
             "}"
-            "QPushButton#deckPickerDefaultAction:disabled {"
+            "QCheckBox#deckPickerDefaultAction:disabled {"
             f" color: {c['muted']};"
             "}"
             "QToolButton#deckPickerDefaultClear {"
             f" color: {c['accent']}; background: transparent;"
             " border: 1px solid transparent; border-radius: 6px;"
-            " min-height: 28px; padding: 0 5px; font-weight: 600;"
+            " min-height: 24px; padding: 0 5px; font-weight: 600;"
             "}"
             "QTreeWidget#deckPickerTree {"
             f" background: {c['base']}; color: {c['text']};"
@@ -1379,7 +1355,6 @@ class DeckPickerPopup(QDialog):
             "}"
             "QToolButton#deckPickerQuick:focus,"
             "QPushButton#deckPickerSecondary:focus,"
-            "QPushButton#deckPickerDefaultAction:focus,"
             "QToolButton#deckPickerDefaultClear:focus {"
             f" border-color: {c['accent']};"
             "}"

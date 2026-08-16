@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.31] — 2026-08-15
+
+### Changed
+
+- The deck picker now uses one compact **Set as default deck** checkbox instead
+  of a large default-deck settings panel. The saved-deck behavior and
+  profile-specific safety rules are unchanged.
+
 ## [1.0.30] — 2026-08-15
 
 ### Added

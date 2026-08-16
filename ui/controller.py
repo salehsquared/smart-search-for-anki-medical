@@ -335,10 +335,12 @@ class SearchController(QObject):
             self._backend.save_settings(self._settings)
         except Exception:  # noqa: BLE001 - preference failure is local
             self._settings.default_deck = previous
+            self._dialog.set_default_deck(previous)
             self._dialog.show_default_deck_error(
                 "The default deck could not be saved. Try again."
             )
             return
+        self._dialog.clear_default_deck_error()
         self._dialog.set_default_deck(default)
 
     def load_decks(self) -> None:

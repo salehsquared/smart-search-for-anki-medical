@@ -1233,7 +1233,12 @@ class SearchDialog(QDialog):
         """Report a preference failure inside the open deck picker."""
 
         if self.deck_picker.isVisible():
-            self.deck_picker.show_validation_error(message)
+            self.deck_picker.show_default_save_error(message)
+
+    def clear_default_deck_error(self) -> None:
+        """Remove a resolved preference error from the deck picker."""
+
+        self.deck_picker.clear_default_save_error()
 
     def show_deck_picker_error(self, message: str) -> None:
         """Show a local picker error without interrupting normal searching."""

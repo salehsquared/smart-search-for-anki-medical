@@ -227,7 +227,7 @@ class DeckPickerTests(unittest.TestCase):
         self.assertEqual(popup.selection_label.text(), "All decks")
         popup.deleteLater()
 
-    def test_default_row_sets_one_regular_deck_and_clears_separately(self) -> None:
+    def test_default_checkbox_sets_and_clears_one_regular_deck(self) -> None:
         popup = DeckPickerPopup()
         with patch(
             "ui.deck_picker.analyze_deck_query",
@@ -244,24 +244,26 @@ class DeckPickerTests(unittest.TestCase):
             0,
             Qt.CheckState.Checked,
         )
-        self.assertTrue(popup.set_default_button.isEnabled())
-        popup.set_default_button.click()
+        self.assertEqual(popup.default_checkbox.text(), "Set as default deck")
+        self.assertTrue(popup.default_checkbox.isEnabled())
+        self.assertFalse(popup.default_checkbox.isChecked())
+        popup.default_checkbox.setFocus()
+        QTest.keyClick(popup.default_checkbox, Qt.Key.Key_Space)
 
         self.assertEqual(defaults, [DeckEntry(3, "AnKing::Step 2")])
         self.assertEqual(applied, [])
         popup.set_default_deck(DefaultDeckRef(3, "AnKing::Step 2"))
-        self.assertIn("Step 2", popup.default_label.text())
-        self.assertEqual(popup.set_default_button.text(), "Default")
-        self.assertFalse(popup.set_default_button.isEnabled())
+        self.assertEqual(defaults, [DeckEntry(3, "AnKing::Step 2")])
+        self.assertTrue(popup.default_checkbox.isChecked())
+        self.assertTrue(popup.default_checkbox.isEnabled())
         self.assertEqual(
-            popup.set_default_button.accessibleName(),
-            "Selected deck is the default",
+            popup.default_checkbox.accessibleName(),
+            "Set as default deck",
         )
-        self.assertFalse(popup.clear_default_button.isHidden())
-        self.assertEqual(popup.clear_default_button.text(), "Clear default")
-        self.assertIn("All decks", popup.clear_default_button.toolTip())
+        self.assertIn("Step 2", popup.default_checkbox.toolTip())
+        self.assertTrue(popup.clear_default_button.isHidden())
 
-        popup.clear_default_button.click()
+        popup.default_checkbox.click()
         self.assertEqual(defaults[-1], None)
         self.assertEqual(applied, [])
         popup.deleteLater()
@@ -286,31 +288,31 @@ class DeckPickerTests(unittest.TestCase):
 
         popup._selected = {"Regular", "Filtered"}
         popup._refresh_checks()
-        self.assertFalse(popup.set_default_button.isEnabled())
-        self.assertIn("one deck", popup.set_default_button.toolTip())
-        self.assertIn("one deck", popup.default_hint_label.text())
+        self.assertFalse(popup.default_checkbox.isEnabled())
+        self.assertIn("one deck", popup.default_checkbox.toolTip())
         self.assertIn(
             "one deck",
-            popup.default_hint_label.accessibleDescription(),
+            popup.default_checkbox.accessibleDescription(),
         )
 
         popup._selected = {"Regular"}
         popup._excluded = {"Regular::Child"}
         popup._refresh_checks()
-        self.assertFalse(popup.set_default_button.isEnabled())
+        self.assertFalse(popup.default_checkbox.isEnabled())
 
         popup._selected = {"Filtered"}
         popup._excluded.clear()
         popup._refresh_checks()
-        self.assertFalse(popup.set_default_button.isEnabled())
-        self.assertIn("Filtered", popup.set_default_button.toolTip())
-        self.assertIn("Filtered", popup.default_hint_label.text())
+        self.assertFalse(popup.default_checkbox.isEnabled())
+        self.assertIn("Filtered", popup.default_checkbox.toolTip())
 
         popup.set_default_deck(DefaultDeckRef(99, "Deleted::Deck"))
-        self.assertIn("unavailable", popup.default_hint_label.text().casefold())
+        self.assertIn("unavailable", popup.default_checkbox.toolTip().casefold())
+        self.assertFalse(popup.clear_default_button.isHidden())
+        self.assertIn("Deleted::Deck", popup.clear_default_button.toolTip())
         popup.deleteLater()
 
-    def test_long_default_name_is_elided_without_expanding_the_popup(self) -> None:
+    def test_long_default_name_stays_in_metadata_without_expanding_popup(self) -> None:
         long_leaf = "A very long clinical study deck " * 15
         long_name = f"Parent::{long_leaf}"
         popup = DeckPickerPopup()
@@ -322,17 +324,13 @@ class DeckPickerTests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertLess(popup.minimumSizeHint().width(), 600)
-        self.assertLess(popup.default_frame.minimumSizeHint().width(), 600)
-        self.assertTrue(popup.default_label.text().endswith("…"))
-        self.assertIn(long_name.strip(), popup.default_label.toolTip())
-        frame_right = popup.default_frame.rect().right()
+        self.assertEqual(popup.default_checkbox.text(), "Set as default deck")
+        self.assertTrue(popup.default_checkbox.isChecked())
+        self.assertIn(long_name.strip(), popup.default_checkbox.toolTip())
+        surface_right = popup.surface.rect().right()
         self.assertLessEqual(
-            popup.set_default_button.geometry().right(),
-            frame_right,
-        )
-        self.assertLessEqual(
-            popup.clear_default_button.geometry().right(),
-            frame_right,
+            popup.default_checkbox.geometry().right(),
+            surface_right,
         )
         popup.deleteLater()
 

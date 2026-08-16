@@ -395,7 +395,10 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(len(backend.saved_settings), 1)
         self.assertEqual(backend.requests, [])
         self.assertEqual(dialog.query(), "bupropion")
-        self.assertIn("Medicine", dialog.deck_picker.default_label.text())
+        self.assertEqual(
+            dialog.deck_picker.default_deck,
+            DefaultDeckRef(7, "Medicine"),
+        )
 
         dialog.defaultDeckRequested.emit(None)
         self.assertIsNone(controller.settings.default_deck)
@@ -411,6 +414,16 @@ class OffscreenSmokeTests(unittest.TestCase):
         )
         dialog = SearchDialog()
         controller = SearchController(backend, dialog)
+        dialog.deck_picker.set_query('deck:"Original"')
+        dialog.deck_picker.set_catalog(
+            DeckCatalog(
+                (
+                    DeckEntry(3, "Original"),
+                    DeckEntry(4, "Replacement"),
+                ),
+                3,
+            )
+        )
         dialog.deck_picker.show()
         self.app.processEvents()
 
@@ -418,11 +431,75 @@ class OffscreenSmokeTests(unittest.TestCase):
             raise OSError("disk full")
 
         backend.save_settings = fail_save
-        dialog.defaultDeckRequested.emit(DeckEntry(4, "Replacement"))
+        self.assertTrue(dialog.deck_picker.default_checkbox.isChecked())
+        dialog.deck_picker.default_checkbox.click()
 
         self.assertEqual(controller.settings.default_deck, original)
         self.assertEqual(dialog.deck_picker.default_deck, original)
+        self.assertTrue(dialog.deck_picker.default_checkbox.isChecked())
         self.assertIn("could not be saved", dialog.deck_picker.message_label.text())
+        self.assertEqual(backend.requests, [])
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_failed_new_default_restores_unchecked_checkbox(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.deck_picker.set_query('deck:"Replacement"')
+        dialog.deck_picker.set_catalog(
+            DeckCatalog((DeckEntry(4, "Replacement"),), 4)
+        )
+        dialog.deck_picker.show()
+        self.app.processEvents()
+        save_settings = backend.save_settings
+
+        def fail_save(_settings) -> None:
+            raise OSError("disk full")
+
+        backend.save_settings = fail_save
+
+        self.assertFalse(dialog.deck_picker.default_checkbox.isChecked())
+        dialog.deck_picker.default_checkbox.click()
+
+        self.assertIsNone(controller.settings.default_deck)
+        self.assertFalse(dialog.deck_picker.default_checkbox.isChecked())
+        self.assertIn("could not be saved", dialog.deck_picker.message_label.text())
+        self.assertEqual(backend.requests, [])
+
+        backend.save_settings = save_settings
+        dialog.deck_picker.default_checkbox.click()
+        self.assertEqual(
+            controller.settings.default_deck,
+            DefaultDeckRef(4, "Replacement"),
+        )
+        self.assertTrue(dialog.deck_picker.default_checkbox.isChecked())
+        self.assertTrue(dialog.deck_picker.message_label.isHidden())
+        self.assertEqual(backend.requests, [])
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_default_save_preserves_unrelated_catalog_refresh_warning(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.deck_picker.set_query('deck:"Medicine"')
+        dialog.deck_picker.set_catalog(
+            DeckCatalog((DeckEntry(7, "Medicine"),), 7)
+        )
+        dialog.deck_picker.set_refresh_error("offline")
+        dialog.deck_picker.show()
+        self.app.processEvents()
+
+        dialog.deck_picker.default_checkbox.click()
+
+        self.assertEqual(
+            controller.settings.default_deck,
+            DefaultDeckRef(7, "Medicine"),
+        )
+        self.assertTrue(dialog.deck_picker.default_checkbox.isChecked())
+        self.assertIn("could not be refreshed", dialog.deck_picker.message_label.text())
+        self.assertFalse(dialog.deck_picker.retry_button.isHidden())
         self.assertEqual(backend.requests, [])
         controller.dispose()
         dialog.deleteLater()
@@ -447,7 +524,7 @@ class OffscreenSmokeTests(unittest.TestCase):
                 self.assertEqual(backend.requests, [])
                 self.assertIn(
                     "unavailable",
-                    dialog.deck_picker.default_hint_label.text().casefold(),
+                    dialog.deck_picker.default_checkbox.toolTip().casefold(),
                 )
                 controller.dispose()
                 dialog.deleteLater()
@@ -2241,7 +2318,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.30")
+        self.assertEqual(fallback.version, "1.0.31")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())
