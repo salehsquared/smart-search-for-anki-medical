@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.29] — 2026-08-15
+
+### Changed
+
+- The Anki Browser handoff now uses an original emerald magnifier-plus mark.
+  It remains compact inside the search field, but is easier to identify than
+  the plain native magnifier in both light and dark themes.
+
 ## [1.0.28] — 2026-08-15
 
 ### Added

@@ -6,24 +6,74 @@ from collections.abc import Callable
 from typing import Any
 import weakref
 
-from .widgets import QIcon, QLineEdit
+from .widgets import QColor, QIcon, QLineEdit, QPainter, QPen, QPixmap, QRect, Qt
 
 
 ACTION_OBJECT_NAME = "smartSearchMedicalBrowserHandoff"
 ACTION_TEXT = "Open in Smart Search"
 ACTION_TOOLTIP = "Open this search in Smart Search"
+SMART_SEARCH_GREEN = "#187A57"
+_SMART_SEARCH_GREEN_DARK = "#0C5E43"
+_SMART_SEARCH_MINT = "#F1FAF6"
 _CALLBACK_ATTRIBUTE = "_smart_search_medical_handoff_callback"
 
 
-def _native_search_icon() -> Any:
-    """Return Anki's palette-aware search icon, with a safe Qt fallback."""
+def _smart_search_logo_pixmap(size: int = 64) -> Any:
+    """Draw the compact Smart Search magnifier-plus mark."""
 
-    try:
-        from aqt.theme import theme_manager
+    side = max(16, int(size))
+    scale = side / 64.0
 
-        return theme_manager.icon_from_resources("mdi:magnify")
-    except Exception:
-        return QIcon.fromTheme("edit-find")
+    def px(value: float) -> int:
+        return int(round(value * scale))
+
+    pixmap = QPixmap(side, side)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+
+    tile_pen = QPen(QColor(_SMART_SEARCH_GREEN_DARK), max(1.0, 2.0 * scale))
+    tile_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(tile_pen)
+    painter.setBrush(QColor(SMART_SEARCH_GREEN))
+    painter.drawRoundedRect(
+        QRect(px(3), px(3), px(58), px(58)),
+        px(14),
+        px(14),
+    )
+
+    lens_pen = QPen(QColor("#FFFFFF"), max(1.5, 5.0 * scale))
+    lens_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    lens_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    painter.setPen(lens_pen)
+    painter.drawEllipse(px(14), px(15), px(27), px(27))
+    painter.drawLine(px(37), px(39), px(49), px(51))
+
+    badge_pen = QPen(
+        QColor(_SMART_SEARCH_GREEN_DARK),
+        max(1.0, 2.25 * scale),
+    )
+    painter.setPen(badge_pen)
+    painter.setBrush(QColor(_SMART_SEARCH_MINT))
+    painter.drawEllipse(px(37), px(6), px(21), px(21))
+
+    plus_pen = QPen(QColor(SMART_SEARCH_GREEN), max(1.25, 3.25 * scale))
+    plus_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    painter.setPen(plus_pen)
+    painter.drawLine(px(42), px(16.5), px(53), px(16.5))
+    painter.drawLine(px(47.5), px(11), px(47.5), px(22))
+    painter.end()
+    return pixmap
+
+
+def _smart_search_icon() -> Any:
+    """Return the original green Smart Search mark at useful Qt sizes."""
+
+    icon = QIcon()
+    for size in (16, 20, 24, 32, 48, 64, 96):
+        icon.addPixmap(_smart_search_logo_pixmap(size))
+    return icon
 
 
 def install_browser_search_action(
@@ -46,7 +96,7 @@ def install_browser_search_action(
                 break
 
         if action is None:
-            make_icon = icon_factory or _native_search_icon
+            make_icon = icon_factory or _smart_search_icon
             action = line_edit.addAction(
                 make_icon(),
                 QLineEdit.ActionPosition.LeadingPosition,
@@ -79,9 +129,9 @@ def install_browser_search_action(
         action.triggered.connect(open_current_query)
         setattr(action, _CALLBACK_ATTRIBUTE, open_current_query)
         return action
-    except (AttributeError, RuntimeError, TypeError):
+    except Exception:
         # Older wrappers, deleted Qt objects, and non-editable combo boxes all
-        # fail closed without changing the Browser.
+        # fail closed without changing or disrupting the Browser.
         return None
 
 
@@ -89,9 +139,9 @@ def refresh_browser_search_action(action: Any) -> bool:
     """Refresh one live action after Anki changes light/dark theme."""
 
     try:
-        action.setIcon(_native_search_icon())
+        action.setIcon(_smart_search_icon())
         return True
-    except (AttributeError, RuntimeError):
+    except Exception:
         return False
 
 
@@ -103,5 +153,5 @@ def remove_browser_search_action(action: Any) -> None:
         if parent is not None:
             parent.removeAction(action)
         action.deleteLater()
-    except (AttributeError, RuntimeError):
+    except Exception:
         return

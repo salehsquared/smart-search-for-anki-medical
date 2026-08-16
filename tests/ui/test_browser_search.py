@@ -8,6 +8,7 @@ from unittest.mock import patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from ui import browser_search as browser_search_module
     from ui.browser_search import (
         ACTION_OBJECT_NAME,
         ACTION_TEXT,
@@ -23,6 +24,7 @@ try:
         QIcon,
         QLineEdit,
         QPixmap,
+        QSize,
         QToolButton,
         Qt,
     )
@@ -48,6 +50,19 @@ def _icon(color: str) -> QIcon:
     pixmap = QPixmap(8, 8)
     pixmap.fill(QColor(color))
     return QIcon(pixmap)
+
+
+def _visible_colors(icon: QIcon, size: int) -> list[QColor]:
+    pixmap = icon.pixmap(size, size)
+    if pixmap.isNull():
+        return []
+    image = pixmap.toImage()
+    return [
+        image.pixelColor(x, y)
+        for y in range(image.height())
+        for x in range(image.width())
+        if image.pixelColor(x, y).alpha() >= 32
+    ]
 
 
 @unittest.skipIf(IMPORT_ERROR is not None, f"Qt runtime unavailable: {IMPORT_ERROR}")
@@ -98,6 +113,55 @@ class BrowserSearchActionTests(unittest.TestCase):
         remove_browser_search_action(action)
         browser.search_edit.deleteLater()
 
+    def test_default_icon_is_a_visible_distinctive_green_glyph(self) -> None:
+        browser = _Browser()
+
+        action = install_browser_search_action(browser, lambda _query: None)
+
+        self.assertIsNotNone(action)
+        self.assertFalse(action.icon().isNull())
+        available_sizes = {
+            (available.width(), available.height())
+            for available in action.icon().availableSizes()
+        }
+        self.assertTrue({(16, 16), (20, 20), (24, 24)} <= available_sizes)
+        retina = action.icon().pixmap(QSize(16, 16), 2.0)
+        self.assertEqual((retina.width(), retina.height()), (32, 32))
+        self.assertEqual(retina.devicePixelRatio(), 2.0)
+        for size in (16, 24):
+            with self.subTest(size=size):
+                visible = _visible_colors(action.icon(), size)
+                self.assertGreater(len(visible), size)
+                self.assertLess(len(visible), size * size)
+                green = [
+                    color
+                    for color in visible
+                    if color.green() >= color.red() + 20
+                    and color.green() >= color.blue() + 10
+                ]
+                self.assertGreater(len(green), max(3, len(visible) // 5))
+                light_detail = [
+                    color
+                    for color in visible
+                    if min(color.red(), color.green(), color.blue()) >= 210
+                ]
+                self.assertGreater(len(light_detail), 1)
+        browser.search_edit.deleteLater()
+
+    def test_icon_construction_failure_does_not_change_the_browser(self) -> None:
+        browser = _Browser()
+        line_edit = browser.search_edit.lineEdit()
+
+        action = install_browser_search_action(
+            browser,
+            lambda _query: None,
+            icon_factory=lambda: (_ for _ in ()).throw(ValueError("paint failed")),
+        )
+
+        self.assertIsNone(action)
+        self.assertEqual(line_edit.actions(), [])
+        browser.search_edit.deleteLater()
+
     def test_click_reads_the_exact_current_search_at_trigger_time(self) -> None:
         browser = _Browser("first query")
         opened: list[str] = []
@@ -141,15 +205,17 @@ class BrowserSearchActionTests(unittest.TestCase):
         first_action = install_browser_search_action(
             browser,
             first_opened.append,
-            icon_factory=lambda: QIcon(),
         )
+        self.assertIsNotNone(first_action)
+        first_icon_key = first_action.icon().cacheKey()
         second_action = install_browser_search_action(
             browser,
             second_opened.append,
-            icon_factory=lambda: QIcon(),
         )
 
         self.assertIs(first_action, second_action)
+        self.assertFalse(second_action.icon().isNull())
+        self.assertEqual(second_action.icon().cacheKey(), first_icon_key)
         matching = [
             action
             for action in browser.search_edit.lineEdit().actions()
@@ -188,21 +254,22 @@ class BrowserSearchActionTests(unittest.TestCase):
 
         self.assertIsNone(action)
 
-    def test_refresh_replaces_icon_and_remove_detaches_action(self) -> None:
+    def test_theme_refresh_rebuilds_icon_and_remove_detaches_action(self) -> None:
         browser = _Browser()
-        initial_icon = _icon("red")
-        replacement_icon = _icon("green")
-        action = install_browser_search_action(
-            browser,
-            lambda _query: None,
-            icon_factory=lambda: initial_icon,
-        )
+        action = install_browser_search_action(browser, lambda _query: None)
         self.assertIsNotNone(action)
-        self.assertEqual(action.icon().cacheKey(), initial_icon.cacheKey())
+        initial_key = action.icon().cacheKey()
+        real_icon_factory = browser_search_module._smart_search_icon
 
-        with patch("ui.browser_search._native_search_icon", return_value=replacement_icon):
+        with patch.object(
+            browser_search_module,
+            "_smart_search_icon",
+            side_effect=real_icon_factory,
+        ) as icon_factory:
             self.assertTrue(refresh_browser_search_action(action))
-        self.assertEqual(action.icon().cacheKey(), replacement_icon.cacheKey())
+        icon_factory.assert_called_once_with()
+        self.assertNotEqual(action.icon().cacheKey(), initial_key)
+        self.assertGreater(len(_visible_colors(action.icon(), 16)), 16)
 
         line_edit = browser.search_edit.lineEdit()
         self.assertIn(action, line_edit.actions())
