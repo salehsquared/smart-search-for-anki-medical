@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.0.35] — 2026-08-16
+
+### Added
+
+- Right-clicking the Smart Search query field now keeps Anki's standard text
+  menu and adds **Search in Anki Browser** as the final action.
+
+### Changed
+
+- The Browser handoff saves and detaches an active inline editor, rechecks
+  collection safety after the save, and opens the query through Anki's managed
+  Browser. Smart Search remains unchanged.
+
 ## [1.0.34] — 2026-08-16
 
 ### Changed
