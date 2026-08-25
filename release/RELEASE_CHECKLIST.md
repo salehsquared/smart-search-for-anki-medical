@@ -79,63 +79,73 @@ not part of the public package.
 
 - [x] Proofread `ANKIWEB_LISTING.md` against the exact release.
 - [x] Replace all placeholders and remove publication notes before pasting.
-- [x] Render screenshots from `render_screenshots.py`.
-- [x] Inspect every screenshot at full resolution for clipping, inaccurate UI,
-      patient information, profile names, decks, tags, or card text from a real
-      collection.
-- [x] Replace mockups with clean-install captures if the shipped interface
-      differs materially.
+- [ ] Regenerate all publication screenshots for v1.0.35. The listing reuses
+      the privacy-safe v1.0.15 core-search capture as a generic illustration;
+      `release/render_screenshots.py` still contains older About-page copy.
+- [x] Inspect the tagged hero at full resolution for clipping, patient
+      information, profile names, decks, tags, filesystem paths, or card text
+      from a real collection.
+- [x] Replace materially inaccurate mockups or record an explicit
+      illustration-only waiver. The v1.0.35 listing reuses the privacy-safe
+      v1.0.15 core-search capture as a generic illustration, not as current UI
+      or compatibility evidence; the waiver is in `RELEASE_RECORD_1.0.35.md`.
 - [x] Publish Support, Privacy, Known Limitations, and third-party notices where
       users can reach them without installing the add-on.
 - [x] Enable the prepared bug and feature-request issue forms.
 - [x] Ensure the public repository does not contain generated profile indexes or
       expanded runtimes.
 
-## 6. Distribution-path validation — v1.0.26 public release
+## 6. Distribution-path validation — v1.0.35 public release
 
-Complete local and public v1.0.26 evidence is in
-`RELEASE_RECORD_1.0.26.md`. Historical releases remain in their versioned
+Complete local and public v1.0.35 evidence is in
+`RELEASE_RECORD_1.0.35.md`. Historical releases remain in their versioned
 release records.
 
 ### A. Isolated clean-install matrix
 
-- [x] Create a new local OS user or disposable test environment.
+- [x] Create disposable test environments with isolated add-on roots.
 - [x] Install the exact supported Anki release with no existing add-ons.
-- [x] Create a synthetic profile containing only generated, non-personal notes.
-- [x] Install the release through the same route users will use: first as a
-      local `.ankiaddon`, then from the public AnkiWeb numeric code. The frozen
-      archive and the live code passed disposable clean installs at the Anki
-      24.11 and 26.08 support boundaries; the full automated suite passed under
-      all seven supported Anki runtimes.
-- [x] Restart Anki and confirm no duplicate add-on folders or startup warnings.
-- [x] Verify Smart and Exact before enabling Semantic.
+- [ ] Create and open a synthetic Anki profile. The v1.0.35 public harness did
+      not instantiate a profile or collection.
+- [x] Install the release through the public AnkiWeb numeric code. The live
+      code passed disposable clean installs at the Anki 24.11 and 26.08 support
+      boundaries; the full automated suite passed under all seven supported
+      Anki runtimes.
+- [ ] Launch/restart the public package in disposable Anki and confirm no
+      startup warnings. Installer-level duplicate-folder checks passed.
+- [ ] Verify Smart and Exact live from the exact public package. Their source
+      and Anki-runtime automated tests passed.
 - [ ] Enable Semantic explicitly; verify download progress, digest validation,
-      cancellation, retry, preparation progress, and search. Download, digest,
-      preparation, and live search passed; cancellation/repair are covered by
-      automated tests rather than a second destructive live setup.
-- [x] While Semantic indexes, switch modes repeatedly and confirm Smart and Exact
-      stay responsive.
-- [x] Submit live Semantic searches during review and confirm normal completion
-      and rapid replacement-query supersession. Automated tests confirm
-      reviewer-paused background work plus timeout, error, supersession, and
-      result-refresh paths leave `Searching…` deterministically.
+      cancellation, retry, preparation progress, and search. These paths are
+      covered by automated tests; the opt-in real-model integration test was
+      skipped in CI.
+- [ ] While Semantic indexes, switch modes repeatedly and confirm Smart and
+      Exact stay responsive in a disposable live profile. Automated coverage
+      passed.
+- [ ] Submit live Semantic searches during review from the exact public
+      package. Automated tests cover reviewer-paused work, timeout, error,
+      supersession, and result refresh.
 - [ ] Exercise selection, Browser opening, flags, suspend/unsuspend, tags, Undo,
-      profile switching, sync, import, and Anki shutdown during idle work.
-      Selection, Browser invocation, inline editing, and shutdown passed live;
-      mutation and lifecycle combinations are covered by the offscreen suite.
+      profile switching, sync, import, and Anki shutdown during idle work in a
+      disposable live profile. Mutation and lifecycle combinations are covered
+      by the offscreen suite.
 - [ ] Confirm uninstall removes the add-on but does not damage the collection.
 
 ### B. Upgrade and rollback
 
 - [x] Install the oldest version users could reasonably have.
-- [x] Create synthetic indexes and non-default settings.
+- [x] Create a synthetic SQLite persistence probe and non-default settings.
 - [x] Upgrade through Anki's native `AddonManager.install()` mechanism to the
-      release candidate on every supported version. v1.0.25-to-v1.0.26 passed
-      on all seven supported environments.
-- [x] Confirm intended `user_files` survive, stale generated assets are migrated
-      or safely rebuilt, and no duplicate menu item appears.
+      release through the public numeric-code path at the 24.11 and 26.08
+      support boundaries. Exact v1.0.26-to-v1.0.35 upgrades passed; the
+      supported Anki API contracts passed in CI on all seven runtimes.
+- [x] Confirm the synthetic `user_files`, non-default configuration, disabled
+      state, and custom metadata survive byte-for-byte and no duplicate add-on
+      folder appears.
+- [ ] Confirm stale generated assets migrate or rebuild and no duplicate menu
+      item appears in a launched disposable profile.
 - [ ] Confirm a failed/cancelled Semantic upgrade leaves Smart and Exact usable.
-- [x] Confirm the prior release can be restored without touching
+- [ ] Confirm the prior release can be restored after upgrading without touching
       `collection.anki2`.
 
 ### C. Compatibility matrix
@@ -150,7 +160,7 @@ waiver. At minimum:
 | 25.07.5 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
 | 25.09.4 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
 | 25.09.5 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
-| 26.05 | macOS / Apple silicon | Pass | Pass | Pass | Automated + selection smoke | Pass |
+| 26.05 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
 | 26.08 | macOS / Apple silicon | Pass | Pass | Pass | Automated | Pass |
 | 26.08 | Windows 11 / x86-64 | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
 | 26.08 | Linux / x86-64 | Not claimed | Not claimed | Unsupported | Not claimed | Out of beta scope |
@@ -158,22 +168,26 @@ waiver. At minimum:
 
 Semantic is expected to be unsupported on Windows, Linux, and Intel Mac for this
 release; the required pass is that this state is graceful and Smart/Exact remain
-fully usable.
+fully usable. In the seven supported-runtime rows, **Pass** records automated
+behavior and Anki-API coverage. It is not a live-model end-to-end claim; the
+opt-in real-model worker integration test was skipped because
+`SMART_SEARCH_REAL_MODEL_DIR` was not set.
 
 ### D. AnkiWeb staging and final publication
 
 - [x] Update the existing public item in place with the frozen archive; no
       duplicate staging item or compatibility branch was created.
 - [x] Record the assigned numeric add-on code: `677438639`.
-- [x] Repeat clean install and v1.0.25 → v1.0.26 upgrade tests using that
-      numeric code through Anki's official updater.
+- [x] Repeat clean installations and v1.0.26 → v1.0.35 upgrades at the 24.11
+      and 26.08 boundaries using that numeric code through Anki's official
+      updater.
 - [x] Verify the listing formatting and version range, the tagged image, the
       **Contact Author** target, and the privacy text in AnkiWeb's rendered
       page. Bare project/mobile/email strings remain text and the privacy URL is
       not linked; both presentation details are recorded in the release record.
 - [x] Obtain explicit approval for the public listing.
 - [x] Make the listing public.
-- [x] Install once more from the public code and compare all 67 installed
+- [x] Install once more from the public code and compare all 68 installed
       archive members byte-for-byte with the approved release candidate.
 - [ ] Monitor the support channel for installation or compatibility failures
       during the first release window.
@@ -185,6 +199,6 @@ release record and are not part of the public beta support claim.
 
 ## 7. Release record
 
-The v1.0.26 artifact, hashes, compatibility evidence, GitHub release, live
+The v1.0.35 artifact, hashes, compatibility evidence, GitHub release, live
 AnkiWeb boundaries, and numeric-code installation evidence are recorded in
-`RELEASE_RECORD_1.0.26.md`. Earlier releases remain in their versioned records.
+`RELEASE_RECORD_1.0.35.md`. Earlier releases remain in their versioned records.
