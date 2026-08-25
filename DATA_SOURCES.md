@@ -132,13 +132,13 @@ a 256 MiB process-memory ceiling. The 384-dimensional output is sent back over
 a local operating-system pipe; the worker is then eligible to exit so the
 operating system can reclaim the model and native-library memory.
 
-Vector-index arithmetic in Anki uses a separate NumPy-only runtime. It does
-not expose the worker's ONNX Runtime, Tokenizers, or FlatBuffers packages to
-Anki. Vector scans use bounded 512-row chunks to avoid retaining a large native
-allocator high-water mark. These implementation boundaries do not change the model, tokenizer,
-pooling, normalization, index format, or similarity calculation described
-here. Exact runtime artifacts, checksums, and licenses are recorded in
-`THIRD_PARTY_NOTICES.md`.
+Vector-index arithmetic runs in the same disposable worker process. Anki does
+not import NumPy, ONNX Runtime, Tokenizers, or FlatBuffers for Semantic work.
+Vector scans use bounded 512-row chunks to avoid retaining a large native
+allocator high-water mark. These implementation boundaries do not change the
+model, tokenizer, pooling, normalization, index format, or similarity
+calculation described here. Exact runtime artifacts, checksums, and licenses
+are recorded in `THIRD_PARTY_NOTICES.md`.
 
 ### Reproducible conversion record
 

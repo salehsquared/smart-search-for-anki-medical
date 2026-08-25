@@ -63,9 +63,9 @@ Smart Search stores add-on-owned files below its Anki `user_files` directory:
   text copy of the notes, but embeddings are still derived from private
   content and should be protected accordingly.
 - `model/` contains the optional semantic model and tokenizer.
-- `runtime/` contains the expanded standalone Python worker, its optional local
-  inference libraries, and a separate NumPy-only directory used for local
-  vector-index arithmetic.
+- `runtime/` contains the expanded standalone Python worker and its optional
+  local inference and vector-index libraries. These native libraries run in
+  the disposable worker process, not inside Anki.
 
 The profile key is a one-way hash of the Anki profile name and collection path.
 It is used to keep indexes separate; it is not sent anywhere.
