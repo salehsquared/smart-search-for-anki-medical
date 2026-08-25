@@ -4,10 +4,9 @@ from pathlib import Path
 import tempfile
 import unittest
 
+from semantic import manifest as semantic_manifest
 from semantic.manifest import (
-    DARWIN_ARM64_PY39_NUMPY,
     DARWIN_ARM64_PY313,
-    HOST_VECTOR_WHEELS,
     MODEL_ARTIFACTS,
     MODEL_BASE_URL,
     MODEL_NAME,
@@ -74,9 +73,13 @@ EXPECTED_ARTIFACTS = (
 
 
 class PublishedModelManifestTests(unittest.TestCase):
-    def test_standalone_worker_and_host_vector_runtimes_are_pinned(self) -> None:
+    def test_standalone_worker_runtime_is_pinned(self) -> None:
         self.assertIs(RUNTIME_WHEELS[WORKER_RUNTIME_TAG], WORKER_RUNTIME_WHEELS)
         self.assertIs(WORKER_RUNTIME_WHEELS, DARWIN_ARM64_PY313)
+        self.assertEqual(
+            RUNTIME_WHEELS,
+            {WORKER_RUNTIME_TAG: WORKER_RUNTIME_WHEELS},
+        )
         self.assertEqual(
             WORKER_PYTHON_FILENAME,
             "cpython-3.13.14+20260728-aarch64-apple-darwin-"
@@ -93,17 +96,10 @@ class PublishedModelManifestTests(unittest.TestCase):
             "download/20260728/cpython-3.13.14%2B20260728-aarch64-"
             "apple-darwin-install_only_stripped.tar.gz",
         )
-        self.assertEqual(
-            HOST_VECTOR_WHEELS["darwin-arm64-py39"],
-            (DARWIN_ARM64_PY39_NUMPY,),
-        )
-        self.assertEqual(HOST_VECTOR_WHEELS["darwin-arm64-py313"], (DARWIN_ARM64_PY313[1],))
-        self.assertEqual(
-            (DARWIN_ARM64_PY39_NUMPY.filename, DARWIN_ARM64_PY39_NUMPY.sha256),
-            (
-                "numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl",
-                "2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b",
-            ),
+        self.assertFalse(hasattr(semantic_manifest, "HOST_VECTOR_WHEELS"))
+        self.assertFalse(hasattr(semantic_manifest, "DARWIN_ARM64_PY39_NUMPY"))
+        self.assertFalse(
+            any("cp39" in wheel.filename for wheel in WORKER_RUNTIME_WHEELS)
         )
 
     def test_manifest_is_pinned_to_the_published_immutable_revision(self) -> None:

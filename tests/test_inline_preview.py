@@ -7,6 +7,8 @@ import types
 import unittest
 from unittest.mock import patch
 
+from backend import host_safety
+
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -398,6 +400,41 @@ class InlinePreviewEditorCompatibilityTests(unittest.TestCase):
         self.assertEqual(inspector._attached_editor_note_id, 30)
         self.assertEqual(editor.set_calls[-1].id, 30)
 
+    def test_switch_callback_during_sync_resumes_latest_editor_target(self) -> None:
+        current = [_EditorCard(20)]
+        editor = _ModernEditor(nid=10)
+        inspector = self._inspector(editor, current[0])
+        inspector._attached_editor_note_id = 10
+        inspector._current_card = lambda: current[0]
+
+        class _Widget:
+            def setEnabled(self, _enabled) -> None:  # noqa: N802
+                pass
+
+        inspector._render_timer = types.SimpleNamespace(stop=lambda: None)
+        inspector._stop_audio = lambda: None
+        inspector._update_controls = lambda: None
+        inspector._schedule_render = lambda **_kwargs: None
+        inspector.previous_button = _Widget()
+        inspector.next_button = _Widget()
+        inspector.replay_button = _Widget()
+        inspector.flip_button = _Widget()
+        inspector._editor_container = _Widget()
+
+        inspector._sync_editor_to_target()
+        self.assertTrue(inspector._editor_switching)
+        inspector.set_collection_access_paused(True)
+        current[0] = _EditorCard(30)
+        editor.finish_save()
+
+        self.assertFalse(inspector._editor_switching)
+        self.assertEqual(inspector._attached_editor_note_id, 0)
+
+        inspector.set_collection_access_paused(False)
+
+        self.assertEqual(inspector._attached_editor_note_id, 30)
+        self.assertEqual(editor.set_calls[-1].id, 30)
+
     def test_flush_and_detach_work_when_modern_nid_remains_stale(self) -> None:
         editor = _ModernEditor(nid=20)
         inspector = self._inspector(editor, _EditorCard(20))
@@ -430,6 +467,99 @@ class InlinePreviewEditorCompatibilityTests(unittest.TestCase):
 
         self.assertEqual(editor.reload_calls, 0)
         self.assertEqual(editor.set_calls, [])
+
+
+class InlinePreviewHostPanicTests(unittest.TestCase):
+    def setUp(self) -> None:
+        host_safety._reset_host_backend_quarantine_for_tests()
+
+    def tearDown(self) -> None:
+        host_safety._reset_host_backend_quarantine_for_tests()
+
+    @staticmethod
+    def _panic_type():
+        return type(
+            "PanicException",
+            (BaseException,),
+            {"__module__": "pyo3_runtime"},
+        )
+
+    def _inspector(self):
+        inspector = inline_preview.InlineResultInspector.__new__(
+            inline_preview.InlineResultInspector
+        )
+        failures = []
+        inspector._collection_access_paused = False
+        inspector._handle_host_backend_failure = failures.append
+        return inspector, failures
+
+    def test_async_editor_target_panic_is_contained(self) -> None:
+        inspector, failures = self._inspector()
+        PanicException = self._panic_type()
+        inspector._editor = types.SimpleNamespace()
+        inspector._editor_switching = False
+        inspector._disposed = False
+        inspector._hidden = False
+        inspector._attached_editor_note_id = 0
+        inspector._current_card = lambda: types.SimpleNamespace(
+            note=lambda: (_ for _ in ()).throw(PanicException())
+        )
+        inspector.pane = types.SimpleNamespace(mode=lambda: "edit")
+
+        inspector._sync_editor_to_target()
+
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], host_safety.HostBackendUnavailable)
+
+    def test_editor_set_note_panic_is_contained(self) -> None:
+        inspector, failures = self._inspector()
+        PanicException = self._panic_type()
+        inspector._editor = types.SimpleNamespace(
+            card=None,
+            set_note=lambda _note: (_ for _ in ()).throw(PanicException()),
+        )
+        inspector._editor_target_force = False
+        inspector._attached_editor_note_id = 0
+        card = types.SimpleNamespace(
+            note=lambda: types.SimpleNamespace(id=20)
+        )
+
+        inspector._apply_editor_target(card)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], host_safety.HostBackendUnavailable)
+
+    def test_editor_save_panic_completes_callback_normally(self) -> None:
+        inspector, failures = self._inspector()
+        PanicException = self._panic_type()
+        inspector._attached_editor_note_id = 20
+        inspector._editor = types.SimpleNamespace(
+            call_after_note_saved=lambda _callback: (
+                _ for _ in ()
+            ).throw(PanicException())
+        )
+        completed = []
+
+        inspector.flush(lambda: completed.append(True))
+
+        self.assertEqual(completed, [True])
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], host_safety.HostBackendUnavailable)
+
+    def test_editor_detach_panic_is_contained(self) -> None:
+        inspector, failures = self._inspector()
+        PanicException = self._panic_type()
+        inspector._attached_editor_note_id = 20
+        inspector._editor = types.SimpleNamespace(
+            card=object(),
+            set_note=lambda _note: (_ for _ in ()).throw(PanicException()),
+        )
+
+        inspector._detach_editor()
+
+        self.assertEqual(inspector._attached_editor_note_id, 0)
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], host_safety.HostBackendUnavailable)
 
 
 if __name__ == "__main__":

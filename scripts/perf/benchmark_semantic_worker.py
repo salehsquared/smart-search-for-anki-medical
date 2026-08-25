@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import argparse
 import gc
-import importlib
+import hashlib
 import json
 import math
 import os
@@ -43,7 +43,7 @@ from semantic.vector_index import VectorIndex  # noqa: E402
 
 
 MIB = 1024 * 1024
-_NATIVE_INFERENCE_MODULES = ("onnxruntime", "tokenizers")
+_NATIVE_SEMANTIC_MODULES = ("onnxruntime", "tokenizers", "numpy")
 
 
 def _copy_verified_model(source: Path, manager: ModelManager) -> None:
@@ -66,33 +66,6 @@ def _copy_verified_model(source: Path, manager: ModelManager) -> None:
 
 def _module_loaded(name: str) -> bool:
     return any(module == name or module.startswith(name + ".") for module in sys.modules)
-
-
-def _vector_runtime_is_numpy_only(manager: ModelManager) -> bool:
-    root = manager.host_vector_runtime_dir
-    forbidden = ("onnxruntime", "tokenizers", "flatbuffers")
-    return (
-        (root / "numpy" / "__init__.py").is_file()
-        and all(not (root / package).exists() for package in forbidden)
-        and manager.worker_site_packages != root
-    )
-
-
-def _load_host_numpy(
-    manager: ModelManager,
-) -> tuple[Any, str, bool]:
-    """Load host NumPy and prove it came from the isolated vector runtime."""
-
-    manager.activate_vector_runtime()
-    numpy = importlib.import_module("numpy")
-    module_path = Path(numpy.__file__).resolve()
-    try:
-        module_path.relative_to(manager.host_vector_runtime_dir.resolve())
-        isolated_numpy = True
-    except ValueError:
-        isolated_numpy = False
-
-    return numpy, str(module_path), isolated_numpy
 
 
 def _copy_vector_index(source: Path, destination: Path) -> None:
@@ -118,28 +91,16 @@ def _copy_vector_index(source: Path, destination: Path) -> None:
 def _prepare_vector_index(
     *,
     data_root: Path,
-    numpy: Any,
     source: Path | None,
-) -> tuple[VectorIndex, int]:
+) -> tuple[Path, int]:
     root = data_root / "performance-vector-index"
     if source is not None:
         _copy_vector_index(source, root)
         index = VectorIndex(root)
-        return index, index.count()
+        return root, index.count()
 
-    index = VectorIndex(root, dimension=3)
-    index.upsert_many(
-        [101, 202],
-        ["first", "second"],
-        numpy.asarray(
-            [
-                [1.0, 0.0, 0.0],
-                [0.0, 1.0, 0.0],
-            ],
-            dtype=numpy.float32,
-        ),
-    )
-    return index, index.count()
+    index = VectorIndex(root)
+    return root, index.count()
 
 
 def _cosine(left: list[float], right: list[float]) -> float:
@@ -285,7 +246,7 @@ def run_benchmark(
     cycles: int = 5,
     idle_seconds: float = 1.0,
     host_reference_mib: float = 300.0,
-    max_worker_mib: float = 192.0,
+    max_worker_mib: float = 224.0,
     max_host_overhead_percent: float = 15.0,
     vector_index_dir: Path | None = None,
     worker_memory_limit_mib: int | None = None,
@@ -304,26 +265,18 @@ def run_benchmark(
     manager = ModelManager(data_root, REPOSITORY_ROOT)
     _copy_verified_model(Path(model_dir), manager)
     manager.install_runtime()
-    if not manager.runtime_ready():
+    if not manager.worker_runtime_ready():
         raise RuntimeError("the isolated runtime did not verify after installation")
 
-    vector_numpy_only = _vector_runtime_is_numpy_only(manager)
     native_before = {
-        name: _module_loaded(name) for name in _NATIVE_INFERENCE_MODULES
+        name: _module_loaded(name) for name in _NATIVE_SEMANTIC_MODULES
     }
     parent_before_samples = _footprint_samples(os.getpid())
     parent_before = summarize(parent_before_samples)
-    numpy, host_numpy_path, isolated_numpy = _load_host_numpy(manager)
-    gc.collect()
-    parent_numpy_ready_samples = _footprint_samples(os.getpid(), duration=0.4)
-    parent_numpy_ready = summarize(parent_numpy_ready_samples)
-    vector_index, vector_index_count = _prepare_vector_index(
+    vector_index_root, vector_index_count = _prepare_vector_index(
         data_root=data_root,
-        numpy=numpy,
         source=Path(vector_index_dir) if vector_index_dir is not None else None,
     )
-    query_vector = numpy.zeros((vector_index.dimension,), dtype=numpy.float32)
-    query_vector[0] = 1.0
     gc.collect()
     parent_vector_pre_search_samples = _footprint_samples(
         os.getpid(),
@@ -331,37 +284,14 @@ def run_benchmark(
     )
     parent_vector_pre_search = summarize(parent_vector_pre_search_samples)
 
-    def real_vector_search() -> Any:
-        # Repeat enough times for the kernel sampler to observe the active
-        # mmap/matrix high-water mark even on fast Apple-silicon machines.
-        hits = None
-        for _ in range(3):
-            hits = vector_index.search(query_vector, limit=50)
-        return hits
-
-    vector_hits, vector_search_samples = _sample_process_while(
-        os.getpid(),
-        real_vector_search,
-    )
-    if not vector_search_samples:
-        raise RuntimeError("host vector-search sampling produced no data")
-    parent_vector_search = summarize(vector_search_samples)
-    vector_round_trip = bool(
-        vector_hits
-        and len(vector_hits) == min(50, vector_index_count)
-        and all(math.isfinite(hit.score) for hit in vector_hits)
-    )
-    del vector_hits
-    gc.collect()
-    parent_vector_released_samples = _footprint_samples(os.getpid(), duration=0.6)
-    parent_vector_released = summarize(parent_vector_released_samples)
-
     cycle_results: list[dict[str, Any]] = []
     all_worker_samples: list[ProcessMetrics] = []
+    all_host_vector_samples: list[ProcessMetrics] = []
     all_exit_seconds: list[float] = []
     deterministic_max_abs_difference = 0.0
     semantic_similarity: dict[str, float] = {}
     all_workers_gone = True
+    vector_round_trip = True
 
     phrases = [
         "treatment of essential hypertension",
@@ -413,6 +343,46 @@ def run_benchmark(
                     "unrelated": _cosine(list(first[0]), list(first[2])),
                 }
 
+            upsert_samples: list[ProcessMetrics] = []
+            if vector_index_count == 0:
+                indexed, upsert_samples = _sample_while(
+                    client,
+                    lambda: client.upsert_vectors(
+                        vector_index_root,
+                        [101, 202, 303],
+                        [
+                            hashlib.sha256(phrase.encode("utf-8")).hexdigest()
+                            for phrase in phrases
+                        ],
+                        first,
+                    ),
+                )
+                if indexed != len(phrases):
+                    raise RuntimeError("worker indexed the wrong vector count")
+                vector_index_count = indexed
+
+            def measured_vector_search() -> tuple[Any, list[ProcessMetrics]]:
+                return _sample_while(
+                    client,
+                    lambda: client.search_vector(
+                        vector_index_root,
+                        first[0],
+                        limit=min(50, vector_index_count),
+                        allowed_note_ids=None,
+                    ),
+                )
+
+            (vector_hits, vector_worker_samples), host_vector_samples = (
+                _sample_process_while(os.getpid(), measured_vector_search)
+            )
+            all_host_vector_samples.extend(host_vector_samples)
+            expected_hits = min(50, vector_index_count)
+            vector_round_trip = vector_round_trip and bool(
+                vector_hits
+                and len(vector_hits) == expected_hits
+                and all(math.isfinite(score) for _note_id, score in vector_hits)
+            )
+
             _, active_samples = _sample_while(
                 client,
                 lambda: client.embed(stress_texts, background=False),
@@ -423,7 +393,13 @@ def run_benchmark(
                 duration_seconds=max(0.1, idle_seconds),
                 interval_seconds=0.05,
             )
-            worker_samples = startup_samples + active_samples + resident_samples
+            worker_samples = (
+                startup_samples
+                + upsert_samples
+                + vector_worker_samples
+                + active_samples
+                + resident_samples
+            )
             if not worker_samples:
                 raise RuntimeError("worker footprint sampling produced no data")
             all_worker_samples.extend(worker_samples)
@@ -452,6 +428,11 @@ def run_benchmark(
             client.terminate_and_wait()
 
     gc.collect()
+    if not all_host_vector_samples:
+        raise RuntimeError("host worker-request sampling produced no data")
+    parent_vector_search = summarize(all_host_vector_samples)
+    parent_vector_released_samples = _footprint_samples(os.getpid(), duration=0.6)
+    parent_vector_released = summarize(parent_vector_released_samples)
     parent_after_samples = _footprint_samples(os.getpid(), duration=0.4)
     parent_after = summarize(parent_after_samples)
     parent_idle_samples = sample_for(
@@ -461,7 +442,7 @@ def run_benchmark(
     )
     parent_idle = summarize(parent_idle_samples)
     native_after = {
-        name: _module_loaded(name) for name in _NATIVE_INFERENCE_MODULES
+        name: _module_loaded(name) for name in _NATIVE_SEMANTIC_MODULES
     }
 
     before_median = int(parent_before["physical_footprint_median_bytes"])
@@ -497,14 +478,12 @@ def run_benchmark(
     host_cycle_footprint_slope = _linear_slope(host_cycle_footprints)
 
     checks = {
-        "runtime_verified": manager.runtime_ready(),
-        "host_vector_runtime_is_numpy_only": vector_numpy_only,
-        "host_numpy_loaded_from_isolated_runtime": isolated_numpy,
-        "host_vector_search_round_trip": vector_round_trip,
-        "native_inference_modules_not_loaded_in_host": all(
-            not native_after[name] for name in _NATIVE_INFERENCE_MODULES
+        "runtime_verified": manager.worker_runtime_ready(),
+        "worker_vector_round_trip": vector_round_trip,
+        "native_semantic_modules_not_loaded_in_host": all(
+            not native_after[name] for name in _NATIVE_SEMANTIC_MODULES
         ),
-        "native_inference_module_state_unchanged": native_before == native_after,
+        "native_semantic_module_state_unchanged": native_before == native_after,
         "real_embeddings_are_deterministic": deterministic_max_abs_difference <= 1e-6,
         "all_workers_reaped": all_workers_gone,
         "worker_peak_within_budget": worker_max_bytes <= max_worker_mib * MIB,
@@ -519,10 +498,10 @@ def run_benchmark(
         "projected_host_overhead_within_budget": (
             projected_host_overhead_percent <= max_host_overhead_percent
         ),
-        "host_vector_peak_within_budget": (
+        "host_worker_request_peak_within_budget": (
             vector_peak_overhead_percent <= max_host_overhead_percent
         ),
-        "host_vector_released_within_budget": (
+        "host_worker_request_released_within_budget": (
             vector_released_overhead_percent <= max_host_overhead_percent
         ),
     }
@@ -539,7 +518,6 @@ def run_benchmark(
             "stress_text_bytes": stress_length,
         },
         "parent_before": parent_before,
-        "parent_numpy_ready": parent_numpy_ready,
         "parent_vector_pre_search": parent_vector_pre_search,
         "parent_vector_search": parent_vector_search,
         "parent_vector_released": parent_vector_released,
@@ -547,10 +525,10 @@ def run_benchmark(
         "parent_idle": parent_idle,
         "host_retained_growth_bytes": host_retained_growth,
         "projected_host_overhead_percent": projected_host_overhead_percent,
-        "host_vector_peak_growth_bytes": vector_peak_growth,
-        "host_vector_peak_overhead_percent": vector_peak_overhead_percent,
-        "host_vector_released_growth_bytes": vector_released_growth,
-        "host_vector_released_overhead_percent": vector_released_overhead_percent,
+        "host_worker_request_peak_growth_bytes": vector_peak_growth,
+        "host_worker_request_peak_overhead_percent": vector_peak_overhead_percent,
+        "host_worker_request_released_growth_bytes": vector_released_growth,
+        "host_worker_request_released_overhead_percent": vector_released_overhead_percent,
         "vector_index_count": vector_index_count,
         "worker_peak_bytes": worker_max_bytes,
         "worker_steady_peak_slope_bytes_per_cycle": worker_steady_peak_slope,
@@ -560,7 +538,6 @@ def run_benchmark(
         "semantic_similarity": semantic_similarity,
         "native_modules_before": native_before,
         "native_modules_after": native_after,
-        "host_numpy_path": host_numpy_path,
         "cycle_results": cycle_results,
         "checks": checks,
         "passed": all(checks.values()),
@@ -581,7 +558,7 @@ def _arguments() -> argparse.Namespace:
     parser.add_argument("--cycles", type=int, default=5)
     parser.add_argument("--idle-seconds", type=float, default=1.0)
     parser.add_argument("--host-reference-mib", type=float, default=300.0)
-    parser.add_argument("--max-worker-mib", type=float, default=192.0)
+    parser.add_argument("--max-worker-mib", type=float, default=224.0)
     parser.add_argument("--worker-memory-limit-mib", type=int)
     parser.add_argument("--stress-text-bytes", type=int, default=16 * 1024)
     parser.add_argument("--max-host-overhead-percent", type=float, default=15.0)

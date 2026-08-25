@@ -47,7 +47,6 @@ PUBLIC_RESOURCE_FILES = {
 PUBLIC_LICENSE_FILES = {
     "licenses/Apache-2.0.txt",
     "licenses/bge-small-en-v1.5-MIT.txt",
-    "licenses/numpy-2.0.2-LICENSE.txt",
     "licenses/numpy-LICENSE.txt",
     "licenses/onnxruntime-LICENSE.txt",
     "licenses/onnxruntime-ThirdPartyNotices.txt",
@@ -59,10 +58,6 @@ PUBLIC_USER_FILES = {
     "user_files/README.txt",
 }
 BUNDLED_WHEEL_SHA256 = {
-    (
-        "vendor_wheels/darwin-arm64-py39/"
-        "numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl"
-    ): "2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b",
     (
         "vendor_wheels/darwin-arm64-py313/"
         "flatbuffers-25.12.19-py2.py3-none-any.whl"
@@ -459,11 +454,6 @@ def validate_semantic_manifest_parity(root: Path) -> None:
         expected_wheels[
             f"vendor_wheels/darwin-arm64-py313/{wheel.filename}"
         ] = wheel.sha256
-    for host_tag, wheels in manifest["HOST_VECTOR_WHEELS"].items():
-        for wheel in wheels:
-            expected_wheels[
-                f"vendor_wheels/{host_tag}/{wheel.filename}"
-            ] = wheel.sha256
     if BUNDLED_WHEEL_SHA256 != expected_wheels:
         raise SystemExit("Bundled wheels do not match semantic manifest")
 

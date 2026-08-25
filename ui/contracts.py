@@ -32,6 +32,7 @@ __all__ = [
     "FilterChip",
     "DeckEntry",
     "DeckCatalog",
+    "DefaultDeckRef",
     "Correction",
     "CardState",
     "SearchResult",
@@ -438,6 +439,31 @@ class UISettings:
     preview_default: PreviewDefault = PreviewDefault.QUESTION
     width: int = 1040
     height: int = 700
+    default_deck: Optional["DefaultDeckRef"] = None
+    profile_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class DefaultDeckRef:
+    """Profile-scoped identity for a deck used on fresh searches.
+
+    Anki deck names can change, so the durable deck ID is authoritative.  The
+    last known name is only a human-readable cache used before the next
+    catalog refresh resolves the current name.
+    """
+
+    deck_id: int
+    last_known_name: str
+
+    def __post_init__(self) -> None:
+        deck_id = int(self.deck_id)
+        name = str(self.last_known_name or "").strip()
+        if deck_id <= 0:
+            raise ValueError("Default deck ID must be positive.")
+        if not name:
+            raise ValueError("Default deck name must not be empty.")
+        object.__setattr__(self, "deck_id", deck_id)
+        object.__setattr__(self, "last_known_name", name)
 
 
 @dataclass(frozen=True, slots=True)

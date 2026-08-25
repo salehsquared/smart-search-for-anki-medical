@@ -11,13 +11,14 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any, Optional
 
-from .contracts import DeckCatalog, DeckEntry
+from .contracts import DeckCatalog, DeckEntry, DefaultDeckRef
 from .deck_query import DeckScopeSelection, analyze_deck_query
 from .theme import chrome_colors
 from .widgets import (
     QApplication,
     QAbstractItemView,
     QBrush,
+    QCheckBox,
     QColor,
     QDialog,
     QEvent,
@@ -43,6 +44,7 @@ _ROLE_REAL = _ROLE_NAME + 1
 _ROLE_INHERITED = _ROLE_NAME + 2
 _ROLE_MISSING = _ROLE_NAME + 3
 _ROLE_DECK_ID = _ROLE_NAME + 4
+_ROLE_FILTERED = _ROLE_NAME + 5
 
 
 def _read(value: object, *names: str, default: Any = None) -> Any:
@@ -254,6 +256,7 @@ class DeckPickerPopup(QDialog):
     """Modeless searchable hierarchical deck selector anchored to a button."""
 
     applied = pyqtSignal(object)  # DeckScopeSelection
+    defaultRequested = pyqtSignal(object)  # DeckEntry | None
     retryRequested = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
@@ -282,6 +285,7 @@ class DeckPickerPopup(QDialog):
         self._anchor: QToolButton | None = None
         self._filter_active = False
         self._expanded_before_filter: set[str] = set()
+        self._default_deck: DefaultDeckRef | None = None
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -380,6 +384,10 @@ class DeckPickerPopup(QDialog):
         self.tree.setIndentation(16)
         self.tree.setRootIsDecorated(True)
         self.tree.setUniformRowHeights(True)
+        self.tree.setSizePolicy(
+            QSizePolicy.Policy.Ignored,
+            QSizePolicy.Policy.Expanding,
+        )
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.tree.setAccessibleName("Decks")
@@ -399,6 +407,27 @@ class DeckPickerPopup(QDialog):
         self.no_matches_label.setAccessibleName("Deck filter results")
         self.no_matches_label.hide()
         layout.addWidget(self.no_matches_label)
+
+        default_row = QHBoxLayout()
+        default_row.setContentsMargins(2, 0, 2, 0)
+        default_row.setSpacing(6)
+        self.default_checkbox = QCheckBox("Set as default deck", self.surface)
+        self.default_checkbox.setObjectName("deckPickerDefaultAction")
+        self.default_checkbox.setAccessibleName("Set as default deck")
+        self.default_checkbox.toggled.connect(self._toggle_default)
+        default_row.addWidget(self.default_checkbox)
+        default_row.addStretch(1)
+        self.clear_default_button = QToolButton(self.surface)
+        self.clear_default_button.setObjectName("deckPickerDefaultClear")
+        self.clear_default_button.setText("Clear default")
+        self.clear_default_button.setAccessibleName("Clear default deck")
+        self.clear_default_button.setToolTip(
+            "Make All decks the default for new Smart Search windows."
+        )
+        self.clear_default_button.clicked.connect(self._clear_default)
+        self.clear_default_button.hide()
+        default_row.addWidget(self.clear_default_button)
+        layout.addLayout(default_row)
 
         footer = QHBoxLayout()
         footer.setContentsMargins(0, 0, 0, 0)
@@ -428,7 +457,9 @@ class DeckPickerPopup(QDialog):
         QWidget.setTabOrder(self.clear_button, self.all_button)
         QWidget.setTabOrder(self.all_button, self.current_button)
         QWidget.setTabOrder(self.current_button, self.tree)
-        QWidget.setTabOrder(self.tree, self.retry_button)
+        QWidget.setTabOrder(self.tree, self.default_checkbox)
+        QWidget.setTabOrder(self.default_checkbox, self.clear_default_button)
+        QWidget.setTabOrder(self.clear_default_button, self.retry_button)
         QWidget.setTabOrder(self.retry_button, self.cancel_button)
         QWidget.setTabOrder(self.cancel_button, self.apply_button)
         self._apply_theme()
@@ -448,6 +479,14 @@ class DeckPickerPopup(QDialog):
             self._ordered_selection(),
             self._ordered_exclusions(),
         )
+
+    @property
+    def default_deck(self) -> DefaultDeckRef | None:
+        return self._default_deck
+
+    def set_default_deck(self, default_deck: DefaultDeckRef | None) -> None:
+        self._default_deck = default_deck
+        self._update_default_controls()
 
     def set_query(self, query: str) -> None:
         self._query = str(query or "")
@@ -471,6 +510,7 @@ class DeckPickerPopup(QDialog):
         self.message_label.hide()
         self.message_label.setToolTip("")
         self.message_label.setProperty("validationError", False)
+        self.message_label.setProperty("defaultDeckSaveError", False)
         self.retry_button.hide()
         self.tree.show()
         self._rebuild_tree()
@@ -487,6 +527,7 @@ class DeckPickerPopup(QDialog):
         self.message_label.setText("Loading decks…")
         self.message_label.setToolTip("")
         self.message_label.setProperty("validationError", False)
+        self.message_label.setProperty("defaultDeckSaveError", False)
         self.message_label.show()
         self.no_matches_label.hide()
         self.retry_button.hide()
@@ -500,6 +541,7 @@ class DeckPickerPopup(QDialog):
         self.message_label.setText(str(message or "Decks could not be loaded."))
         self.message_label.setToolTip("")
         self.message_label.setProperty("validationError", True)
+        self.message_label.setProperty("defaultDeckSaveError", False)
         self.message_label.show()
         self.no_matches_label.hide()
         self.retry_button.show()
@@ -522,6 +564,7 @@ class DeckPickerPopup(QDialog):
         )
         self.message_label.setToolTip(str(message or ""))
         self.message_label.setProperty("validationError", True)
+        self.message_label.setProperty("defaultDeckSaveError", False)
         self.message_label.show()
         self.no_matches_label.hide()
         self.retry_button.show()
@@ -538,8 +581,27 @@ class DeckPickerPopup(QDialog):
         )
         self.message_label.setToolTip("")
         self.message_label.setProperty("validationError", True)
+        self.message_label.setProperty("defaultDeckSaveError", False)
         self.message_label.show()
         self.retry_button.hide()
+        self._apply_theme()
+
+    def show_default_save_error(self, message: str) -> None:
+        """Show a preference-save failure separately from catalog warnings."""
+
+        self.show_validation_error(message)
+        self.message_label.setProperty("defaultDeckSaveError", True)
+
+    def clear_default_save_error(self) -> None:
+        """Remove only a resolved preference-save failure."""
+
+        if not bool(self.message_label.property("defaultDeckSaveError")):
+            return
+        self.message_label.clear()
+        self.message_label.setToolTip("")
+        self.message_label.setProperty("validationError", False)
+        self.message_label.setProperty("defaultDeckSaveError", False)
+        self.message_label.hide()
         self._apply_theme()
 
     def open_anchored(self, button: QToolButton) -> None:
@@ -590,11 +652,12 @@ class DeckPickerPopup(QDialog):
             self.tree.clear()
             self._items.clear()
             paths: dict[str, QTreeWidgetItem] = {}
-            real_names = {
-                _entry_name(entry)
+            entries_by_name = {
+                _entry_name(entry): entry
                 for entry in _catalog_entries(self._catalog)
                 if _entry_name(entry)
             }
+            real_names = set(entries_by_name)
             for full_name in sorted(real_names, key=str.casefold):
                 parent: QTreeWidgetItem | None = None
                 segments = full_name.split("::")
@@ -609,8 +672,15 @@ class DeckPickerPopup(QDialog):
                     parent = item
             self._items = paths
             for name, item in self._items.items():
-                real = name in real_names
+                entry = entries_by_name.get(name)
+                real = entry is not None
                 item.setData(0, _ROLE_REAL, real)
+                item.setData(0, _ROLE_DECK_ID, _entry_id(entry) if entry else 0)
+                item.setData(
+                    0,
+                    _ROLE_FILTERED,
+                    _entry_filtered(entry) if entry else False,
+                )
                 item.setToolTip(0, name)
                 flags = Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
                 if real:
@@ -664,6 +734,7 @@ class DeckPickerPopup(QDialog):
             self._updating = False
         self._refresh_checks()
         self._filter_tree(self.filter_edit.text())
+        self._update_default_controls()
 
     def _expand_relevant_paths(self) -> None:
         targets = set(self._selected) | set(self._excluded)
@@ -878,8 +949,13 @@ class DeckPickerPopup(QDialog):
     def _update_current_button(self) -> None:
         current = _catalog_current_name(self._catalog)
         leaf = current.rsplit("::", 1)[-1] if current else ""
+        visible_leaf = self.current_button.fontMetrics().elidedText(
+            leaf,
+            Qt.TextElideMode.ElideRight,
+            220,
+        )
         self.current_button.setText(
-            f"Current deck  ·  {leaf}" if leaf else "Current deck"
+            f"Current deck  ·  {visible_leaf}" if leaf else "Current deck"
         )
         self.current_button.setEnabled(
             self._selection_controls_enabled() and bool(current)
@@ -922,6 +998,7 @@ class DeckPickerPopup(QDialog):
         self.apply_button.setEnabled(
             self._ready and not _is_custom(self._analysis)
         )
+        self._update_default_controls()
 
     def _ordered_selection(self) -> tuple[str, ...]:
         order = {
@@ -946,6 +1023,113 @@ class DeckPickerPopup(QDialog):
                 key=lambda name: (order.get(_name_key(name), 10**9), name.casefold()),
             )
         )
+
+    def _default_entry(self) -> DeckEntry | None:
+        default = self._default_deck
+        if default is None:
+            return None
+        for raw_entry in _catalog_entries(self._catalog):
+            if _entry_id(raw_entry) != default.deck_id:
+                continue
+            name = _entry_name(raw_entry)
+            if not name or _entry_filtered(raw_entry):
+                return None
+            return DeckEntry(default.deck_id, name)
+        return None
+
+    def _selected_default_entry(self) -> DeckEntry | None:
+        if (
+            not self._selection_controls_enabled()
+            or self._excluded
+            or len(self._selected) != 1
+        ):
+            return None
+        selected = _name_key(next(iter(self._selected)))
+        for raw_entry in _catalog_entries(self._catalog):
+            name = _entry_name(raw_entry)
+            if (
+                name
+                and _name_key(name) == selected
+                and _entry_id(raw_entry) > 0
+                and not _entry_filtered(raw_entry)
+            ):
+                return DeckEntry(_entry_id(raw_entry), name)
+        return None
+
+    def _update_default_controls(self) -> None:
+        default = self._default_deck
+        resolved = self._default_entry()
+        selected = self._selected_default_entry()
+        same = bool(
+            selected is not None
+            and default is not None
+            and selected.deck_id == default.deck_id
+        )
+        previous = self.default_checkbox.blockSignals(True)
+        try:
+            self.default_checkbox.setChecked(same)
+        finally:
+            self.default_checkbox.blockSignals(previous)
+        self.default_checkbox.setEnabled(selected is not None)
+
+        if selected is not None:
+            tooltip = (
+                f"{selected.name} is the default deck. Uncheck to make All "
+                "decks the default for new Smart Search windows."
+                if same
+                else f"Use {selected.name} for new Smart Search windows."
+            )
+        elif _is_custom(self._analysis):
+            tooltip = "Custom deck expressions cannot be saved as one default deck."
+        elif self._excluded or len(self._selected) > 1:
+            tooltip = "Select one deck with no exclusions to set a default."
+        elif not self._selected:
+            tooltip = "Select one regular deck to set a default."
+        else:
+            tooltip = "Filtered or unavailable decks cannot be the default."
+        if default is not None and resolved is None and self._ready:
+            tooltip = (
+                f"Saved default {default.last_known_name} is unavailable. "
+                + tooltip
+            )
+        self.default_checkbox.setToolTip(tooltip)
+        self.default_checkbox.setAccessibleDescription(tooltip)
+
+        show_clear = default is not None
+        self.clear_default_button.setVisible(show_clear)
+        self.clear_default_button.setEnabled(show_clear)
+        if default is not None:
+            current_name = (
+                resolved.name if resolved is not None else default.last_known_name
+            )
+            clear_detail = (
+                f"Clear {current_name} as the default deck. "
+                "New Smart Search windows will use All decks."
+            )
+            self.clear_default_button.setToolTip(clear_detail)
+            self.clear_default_button.setAccessibleName(
+                f"Clear default deck {current_name}"
+            )
+            self.clear_default_button.setAccessibleDescription(clear_detail)
+
+    def _toggle_default(self, checked: bool) -> None:
+        entry = self._selected_default_entry()
+        if checked:
+            if entry is not None:
+                self.defaultRequested.emit(entry)
+                return
+        elif (
+            entry is not None
+            and self._default_deck is not None
+            and entry.deck_id == self._default_deck.deck_id
+        ):
+            self.defaultRequested.emit(None)
+            return
+        self._update_default_controls()
+
+    def _clear_default(self, _checked: bool = False) -> None:
+        if self._default_deck is not None:
+            self.defaultRequested.emit(None)
 
     # ------------------------------------------------------------ interaction
 
@@ -1122,6 +1306,18 @@ class DeckPickerPopup(QDialog):
             "QToolButton#deckPickerClear:disabled {"
             f" color: {c['muted']};"
             "}"
+            "QCheckBox#deckPickerDefaultAction {"
+            f" color: {c['text']}; background: transparent; border: none;"
+            " min-height: 26px; spacing: 7px;"
+            "}"
+            "QCheckBox#deckPickerDefaultAction:disabled {"
+            f" color: {c['muted']};"
+            "}"
+            "QToolButton#deckPickerDefaultClear {"
+            f" color: {c['accent']}; background: transparent;"
+            " border: 1px solid transparent; border-radius: 6px;"
+            " min-height: 24px; padding: 0 5px; font-weight: 600;"
+            "}"
             "QTreeWidget#deckPickerTree {"
             f" background: {c['base']}; color: {c['text']};"
             f" border: 1px solid {c['border']}; border-radius: 9px;"
@@ -1161,7 +1357,8 @@ class DeckPickerPopup(QDialog):
             f" border-color: {c['border']};"
             "}"
             "QToolButton#deckPickerQuick:focus,"
-            "QPushButton#deckPickerSecondary:focus {"
+            "QPushButton#deckPickerSecondary:focus,"
+            "QToolButton#deckPickerDefaultClear:focus {"
             f" border-color: {c['accent']};"
             "}"
             "QToolButton#deckPickerQuick:checked:focus {"
@@ -1546,8 +1743,13 @@ class DeckDestinationPopup(QDialog):
             and current.deck_id in self._entries
         )
         leaf = current.name.rsplit("::", 1)[-1] if available else ""
+        visible_leaf = self.current_button.fontMetrics().elidedText(
+            leaf,
+            Qt.TextElideMode.ElideRight,
+            220,
+        )
         self.current_button.setText(
-            f"Current deck  ·  {leaf}" if leaf else "Current deck"
+            f"Current deck  ·  {visible_leaf}" if leaf else "Current deck"
         )
         self.current_button.setEnabled(self._ready and available)
         self.current_button.setToolTip(

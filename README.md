@@ -16,6 +16,10 @@ Created by **Saleh Mostafa** with [MedBrevia](https://medbrevia.com/app).
 
 Open the palette with **Command-K** on macOS or **Ctrl-K** on Windows/Linux,
 type naturally, and press **Return** to open the result in Anki's Browser.
+In Anki's Browser, click the green magnifier-plus at the left edge of the main
+search field to open that visible query in Smart Search.
+In Smart Search, right-click the query field and choose **Search in Anki
+Browser** to send the current query back to Anki's native Browser.
 
 - `buproprion` can find **bupropion**.
 - A supported brand name can find its generic medication.
@@ -28,6 +32,9 @@ type naturally, and press **Return** to open the result in Anki's Browser.
 - Card-specific filters return only the sibling cards that actually match.
 - Choose one or several nested decks from the searchable deck picker without
   having to remember or type their full paths.
+- Set one regular deck as the profile-specific default in that picker. A new,
+  blank Smart Search window starts in that deck; explicit Browser handoffs and
+  one-off deck choices remain unchanged.
 - Adaptive relevance cutoffs remove weak trailing results instead of filling
   the list to an arbitrary maximum.
 
@@ -105,9 +112,10 @@ model/tokenizer files over HTTPS and verifies their SHA-256 digests. Ordinary
 request metadata such as an IP address and user-agent can be visible to the
 download host; no Anki content or query is included.
 
-Semantic inference runs in a local, short-lived worker process. Card text and
-embeddings travel only through local operating-system pipes; the worker does
-not open a network service. Exiting it lets macOS reclaim the model and native
+Semantic inference and vector-index arithmetic run in a local, short-lived
+worker process. Card text, embeddings, and validated result records travel only
+through local operating-system pipes; the worker does not open a network
+service. Exiting it lets macOS reclaim NumPy, the model, and the native
 inference libraries instead of retaining them inside Anki.
 
 The local full-text index contains searchable copies of note/card content and
@@ -204,8 +212,16 @@ The builder:
 
 The add-on reads exact changed notes and compact metadata manifests through
 Anki while Anki owns the collection connection. External SQLite work, text
-processing, spelling vocabulary construction, model inference, profile
-initialization, and cleanup run outside Anki's graphical interface thread.
+processing, spelling vocabulary construction, model and vector operations,
+profile initialization, and cleanup run outside Anki's graphical interface
+thread.
+
+Collection and media sync establish a synchronous embargo before Anki queues
+host work. Every queued Smart Search collection operation checks that embargo
+again before it runs, and the gate opens only after all nested sync activity
+and Anki's deferred reset finish. If Anki reports a PyO3-wrapped Rust backend
+panic, Smart Search converts it to one normal restart message, cancels its
+optional work, and makes no more collection calls in that Anki process.
 
 Reviewing has an explicit background-work embargo: card answers schedule no
 search maintenance, and pending edit/sync/index work resumes only after the
@@ -213,15 +229,15 @@ reviewer closes and the interface has settled. An explicitly submitted
 Semantic query remains available in the foreground; it is bounded by an
 end-to-end timeout and cannot silently leave the interface in `Searching…`.
 
-Model inference is isolated in a pinned standalone Python 3.13 worker with one
-ONNX thread, single-sequence inference, bounded input messages, and a 256 MiB
-macOS process-memory ceiling. The worker starts only for Semantic work and
-exits afterward, allowing the operating system to reclaim its model, ONNX
-Runtime, and Tokenizers memory. While the visible palette remains in Semantic
-mode, a 90-second idle lease avoids reloading the helper between adjacent
-searches. Closing the palette reaps it immediately; switching modes leaves the
-existing idle timer to unload it. The Anki process receives only a bounded,
-NumPy-based vector-index layer; it never imports those inference libraries.
+All native Semantic work is isolated in a pinned standalone Python 3.13 worker
+with one ONNX thread, single-sequence inference, bounded authenticated messages,
+and a 256 MiB macOS process-memory ceiling. The worker starts only for Semantic
+work and exits afterward, allowing the operating system to reclaim NumPy, the
+model, ONNX Runtime, and Tokenizers memory. While the visible palette remains
+in Semantic mode, a 90-second idle lease avoids reloading the helper between
+adjacent searches. Closing the palette reaps it immediately; switching modes
+leaves the existing idle timer to unload it. Anki receives only validated plain
+vectors and result records and imports none of those native packages.
 
 Adds, edits, and deletes normally refresh only affected notes. Operations for
 which Anki does not expose stable affected IDs—such as sync, imports, native

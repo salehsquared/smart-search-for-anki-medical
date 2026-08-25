@@ -164,7 +164,16 @@ class VectorIndex:
                 )
             self.vector_path.touch()
         actual_bytes = self.vector_path.stat().st_size
-        if actual_bytes != expected_bytes:
+        if actual_bytes > expected_bytes:
+            # File growth happens before the matching SQLite capacity update.
+            # SIGTERM/SIGKILL can therefore leave only an unused tail behind.
+            # SQLite is the committed authority: no vector row can reference
+            # bytes beyond its capacity, so trimming that tail is lossless and
+            # lets the next disposable worker retry immediately.
+            with self.vector_path.open("r+b") as handle:
+                handle.truncate(expected_bytes)
+            actual_bytes = expected_bytes
+        if actual_bytes < expected_bytes:
             raise RuntimeError(
                 "The semantic vector file size does not match its capacity "
                 "and should be rebuilt."

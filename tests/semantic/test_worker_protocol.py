@@ -7,11 +7,15 @@ import unittest
 
 from semantic.worker_protocol import (
     MAX_FRAME_BYTES,
+    MAX_NOTE_ID,
+    MAX_NOTE_IDS_PER_REQUEST,
     MAX_REQUEST_FRAME_BYTES,
     MAX_RESPONSE_FRAME_BYTES,
+    MAX_SEARCH_HITS_PER_RESPONSE,
     MAX_TEXTS_PER_REQUEST,
     MAX_TEXT_UTF8_BYTES,
     MAX_TOTAL_TEXT_UTF8_BYTES,
+    MAX_VECTORS_PER_REQUEST,
     WorkerProtocolError,
     decode_from_buffer,
     encode_frame,
@@ -30,6 +34,10 @@ class WorkerProtocolTests(unittest.TestCase):
         )
         self.assertLessEqual(MAX_REQUEST_FRAME_BYTES, 4 * 1024 * 1024)
         self.assertLessEqual(MAX_RESPONSE_FRAME_BYTES, 1024 * 1024)
+        self.assertEqual(MAX_VECTORS_PER_REQUEST, MAX_TEXTS_PER_REQUEST)
+        self.assertEqual(MAX_NOTE_ID, (1 << 63) - 1)
+        self.assertLessEqual(MAX_NOTE_IDS_PER_REQUEST, 50_000)
+        self.assertLessEqual(MAX_SEARCH_HITS_PER_RESPONSE, 10_000)
 
     def test_round_trip_preserves_unicode_and_multiple_buffered_frames(self) -> None:
         first = {"query": "β-blocker — ضغط", "value": 1}

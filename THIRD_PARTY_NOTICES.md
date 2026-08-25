@@ -138,11 +138,9 @@ libedit, libffi, liblzma, libuuid, libxcb, mpdecimal, ncurses, OpenSSL 1.1 and
 
 ### Bundled Python wheels
 
-The Python 3.13 wheels below are installed only inside the isolated worker,
-except NumPy, which is also installed in a separate NumPy-only host directory
-for vector-index arithmetic. Anki versions that embed Python 3.9 receive only
-the compatible NumPy 2.0.2 wheel; the old Python 3.9 ONNX Runtime, Tokenizers,
-and FlatBuffers wheels are no longer distributed.
+The Python 3.13 wheels below are installed only inside the isolated worker.
+Anki's process does not import these native Semantic packages; inference and
+vector-index arithmetic both run in the disposable worker.
 
 | Bundled wheel | SHA-256 |
 | --- | --- |
@@ -150,7 +148,6 @@ and FlatBuffers wheels are no longer distributed.
 | `numpy-2.5.1-cp313-cp313-macosx_14_0_arm64.whl` | `6165343f81b56ef8f514f396989e529b61d9dc709b99421b07e9f3e698e2287d` |
 | `tokenizers-0.23.1-cp310-abi3-macosx_11_0_arm64.whl` | `e0948bbb1ac1d7cdfc9fb6d62c596e3b7550036ad60ecd654a66ad273326324e` |
 | `flatbuffers-25.12.19-py2.py3-none-any.whl` | `7634f50c427838bb021c2d66a3d1168e9d199b0607e6329399f04846d42e20b4` |
-| `numpy-2.0.2-cp39-cp39-macosx_14_0_arm64.whl` | `2b2955fa6f11907cf7a70dab0d0755159bca87755e831e47932367fc8f2f2d0b` |
 
 ### ONNX Runtime 1.28.0
 
@@ -175,18 +172,6 @@ localization or abridgment.
 
 The installed wheel also retains its component-level license files under
 `numpy-2.5.1.dist-info/licenses/`.
-
-### NumPy 2.0.2
-
-- Project: NumPy
-- Project license: BSD-3-Clause
-- Source: <https://github.com/numpy/numpy/tree/v2.0.2>
-- NumPy license and the notices supplied with the exact binary wheel:
-  `licenses/numpy-2.0.2-LICENSE.txt`
-
-This wheel provides vector-index arithmetic to supported Anki releases that
-embed Python 3.9. It is not an inference runtime and does not load ONNX
-Runtime or Tokenizers into Anki.
 
 ### Hugging Face tokenizers 0.23.1
 

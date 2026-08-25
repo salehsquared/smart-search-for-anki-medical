@@ -21,8 +21,12 @@ from .errors import SemanticRuntimeError, SemanticWorkerError
 from .manifest import MODEL_DIMENSION, MODEL_REVISION
 from .model_manager import ModelManager
 from .worker_protocol import (
+    MAX_NOTE_ID,
+    MAX_NOTE_IDS_PER_REQUEST,
+    MAX_SEARCH_HITS_PER_RESPONSE,
     MAX_TEXTS_PER_REQUEST,
     MAX_TEXT_UTF8_BYTES,
+    MAX_VECTORS_PER_REQUEST,
     PROTOCOL_VERSION,
     WorkerProtocolError,
     decode_from_buffer,
@@ -38,12 +42,16 @@ _CLOSE_WAIT_SECONDS = 35.0
 _WORKER_MEMORY_LIMIT_MIB = 256
 
 
-class SemanticWorkerClient:
-    """Serialize embedding requests through a killable helper process.
+class SemanticIndexWorkerError(SemanticRuntimeError):
+    """A deterministic vector-index operation failed inside the worker."""
 
-    The host Anki interpreter never imports ONNX Runtime or tokenizers. Native
-    inference memory belongs exclusively to the helper and is reclaimed by the
-    operating system when :meth:`terminate_now` ends it.
+
+class SemanticWorkerClient:
+    """Serialize native Semantic work through a killable helper process.
+
+    The host Anki interpreter never imports ONNX Runtime, tokenizers, or NumPy.
+    Native inference and vector memory belongs exclusively to the helper and is
+    reclaimed by the operating system when :meth:`terminate_now` ends it.
     """
 
     def __init__(self, manager: ModelManager, bundle_root: Path) -> None:
@@ -100,6 +108,114 @@ class SemanticWorkerClient:
                 self.terminate_now()
                 raise
         return output
+
+    def upsert_vectors(
+        self,
+        index_root: Path,
+        note_ids: Sequence[int],
+        content_hashes: Sequence[str],
+        vectors: Sequence[Sequence[float]],
+        *,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> int:
+        """Persist vectors in the helper so Anki never loads NumPy."""
+
+        if len(note_ids) != len(content_hashes) or len(note_ids) != len(vectors):
+            raise SemanticWorkerError(
+                "Semantic vector IDs, hashes, and values must have equal lengths."
+            )
+        if not note_ids:
+            return 0
+        root = self._normalized_index_root(index_root)
+        normalized_ids = tuple(_note_id(value) for value in note_ids)
+        if len(set(normalized_ids)) != len(normalized_ids):
+            raise SemanticWorkerError("Semantic vector note IDs must be unique.")
+        normalized_hashes = tuple(_content_hash(value) for value in content_hashes)
+        encoded_vectors = tuple(self._encode_vector(vector) for vector in vectors)
+        indexed = 0
+        for start in range(0, len(normalized_ids), MAX_VECTORS_PER_REQUEST):
+            end = start + MAX_VECTORS_PER_REQUEST
+            response = self._request(
+                {
+                    "op": "upsert_vectors",
+                    "index_root": str(root),
+                    "note_ids": normalized_ids[start:end],
+                    "content_hashes": normalized_hashes[start:end],
+                    "vectors": encoded_vectors[start:end],
+                },
+                background=True,
+                cancel_check=cancel_check,
+            )
+            expected = len(normalized_ids[start:end])
+            if not _is_plain_int(response.get("indexed"), expected):
+                self.terminate_now()
+                raise SemanticWorkerError(
+                    "Semantic worker returned the wrong indexed count."
+                )
+            indexed += expected
+        return indexed
+
+    def search_vector(
+        self,
+        index_root: Path,
+        query_vector: Sequence[float],
+        *,
+        limit: int,
+        allowed_note_ids: set[int] | None,
+        cancel_check: Callable[[], None] | None = None,
+    ) -> list[tuple[int, float]]:
+        """Search vectors in the helper and return validated plain records."""
+
+        count = max(0, int(limit))
+        if count == 0 or allowed_note_ids is not None and not allowed_note_ids:
+            return []
+        if count > MAX_SEARCH_HITS_PER_RESPONSE:
+            raise SemanticWorkerError("Semantic search requested too many results.")
+        root = self._normalized_index_root(index_root)
+        encoded_vector = self._encode_vector(query_vector)
+        normalized_allowed = (
+            None
+            if allowed_note_ids is None
+            else tuple(sorted(_note_id(value) for value in allowed_note_ids))
+        )
+        chunks: Sequence[Sequence[int] | None]
+        if normalized_allowed is None:
+            chunks = (None,)
+        else:
+            chunks = tuple(
+                normalized_allowed[start : start + MAX_NOTE_IDS_PER_REQUEST]
+                for start in range(0, len(normalized_allowed), MAX_NOTE_IDS_PER_REQUEST)
+            )
+
+        candidates: list[tuple[int, float]] = []
+        for chunk in chunks:
+            response = self._request(
+                {
+                    "op": "search_vector",
+                    "index_root": str(root),
+                    "query_vector": encoded_vector,
+                    "limit": count,
+                    "allowed_note_ids": chunk,
+                },
+                background=False,
+                cancel_check=cancel_check,
+            )
+            try:
+                hits = self._decode_hits(
+                    response,
+                    limit=count,
+                    allowed_note_ids=None if chunk is None else set(chunk),
+                )
+            except BaseException:
+                self.terminate_now()
+                raise
+            # Filter chunks are disjoint and every hit was checked against its
+            # source chunk above. Retain only global top-K candidates so a very
+            # large profile filter cannot make host memory grow with chunks.
+            candidates.extend(hits)
+            candidates.sort(key=lambda hit: (-hit[1], hit[0]))
+            del candidates[count:]
+        return candidates
 
     def warmup(
         self,
@@ -256,8 +372,11 @@ class SemanticWorkerClient:
                 self._validate_response(response, request_id=request_id)
                 if response.get("ok") is not True:
                     message = str(response.get("error") or "Semantic worker failed.")
-                    if response.get("error_kind") == "runtime":
+                    error_kind = response.get("error_kind")
+                    if error_kind == "runtime":
                         raise SemanticRuntimeError(message)
+                    if error_kind == "index":
+                        raise SemanticIndexWorkerError(message)
                     raise SemanticWorkerError(message)
             except BaseException:
                 self.terminate_now()
@@ -294,7 +413,10 @@ class SemanticWorkerClient:
                 and self._worker_policy == desired_policy
             ):
                 return
-        if not self.manager.runtime_ready():
+        runtime_ready = getattr(self.manager, "worker_runtime_ready", None)
+        if runtime_ready is None:
+            runtime_ready = self.manager.runtime_ready
+        if not runtime_ready():
             raise SemanticWorkerError("The local semantic runtime is not installed.")
         worker_script = self.bundle_root / "semantic" / "worker_main.py"
         if not worker_script.is_file():
@@ -528,6 +650,84 @@ class SemanticWorkerClient:
         ):
             raise SemanticWorkerError("Semantic worker returned a stale response.")
 
+    def _normalized_index_root(self, value: Path) -> Path:
+        root = Path(value).resolve()
+        data_root = Path(self.manager.data_root).resolve()
+        try:
+            relative = root.relative_to(data_root)
+        except ValueError as error:
+            raise SemanticWorkerError(
+                "Semantic worker index path is outside its data directory."
+            ) from error
+        if not relative.parts:
+            raise SemanticWorkerError("Semantic worker index path is invalid.")
+        return root
+
+    @staticmethod
+    def _encode_vector(values: Sequence[float]) -> str:
+        try:
+            vector = array("f", values)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise SemanticWorkerError(
+                "Semantic vector contains invalid values."
+            ) from error
+        if len(vector) != MODEL_DIMENSION:
+            raise SemanticWorkerError("Semantic vector has the wrong size.")
+        norm_squared = 0.0
+        for value in vector:
+            if not math.isfinite(value):
+                raise SemanticWorkerError("Semantic vector contains non-finite values.")
+            norm_squared += float(value) * float(value)
+        if norm_squared <= 1e-12:
+            raise SemanticWorkerError("Semantic vector has zero norm.")
+        if sys.byteorder != "little":
+            vector.byteswap()
+        return base64.b64encode(vector.tobytes()).decode("ascii")
+
+    @staticmethod
+    def _decode_hits(
+        response: dict[str, Any],
+        *,
+        limit: int,
+        allowed_note_ids: set[int] | None,
+    ) -> list[tuple[int, float]]:
+        payload = response.get("hits")
+        if not isinstance(payload, list) or len(payload) > limit:
+            raise SemanticWorkerError(
+                "Semantic worker returned invalid search results."
+            )
+        output: list[tuple[int, float]] = []
+        seen: set[int] = set()
+        for item in payload:
+            if not isinstance(item, dict):
+                raise SemanticWorkerError(
+                    "Semantic worker returned an invalid search result."
+                )
+            note_id = item.get("note_id")
+            score = item.get("score")
+            if (
+                not isinstance(note_id, int)
+                or isinstance(note_id, bool)
+                or note_id < 0
+                or note_id > MAX_NOTE_ID
+                or not isinstance(score, (int, float))
+                or isinstance(score, bool)
+                or not math.isfinite(float(score))
+                or not -1.01 <= float(score) <= 1.01
+                or note_id in seen
+                or allowed_note_ids is not None and note_id not in allowed_note_ids
+            ):
+                raise SemanticWorkerError(
+                    "Semantic worker returned an invalid search result."
+                )
+            seen.add(note_id)
+            output.append((note_id, float(score)))
+        if output != sorted(output, key=lambda hit: (-hit[1], hit[0])):
+            raise SemanticWorkerError(
+                "Semantic worker returned unsorted search results."
+            )
+        return output
+
     @staticmethod
     def _decode_vectors(
         response: dict[str, Any],
@@ -590,6 +790,27 @@ class SemanticWorkerClient:
 
 def _is_plain_int(value: Any, expected: int) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value == expected
+
+
+def _note_id(value: object) -> int:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or value < 0
+        or value > MAX_NOTE_ID
+    ):
+        raise SemanticWorkerError("Semantic note ID is invalid.")
+    return value
+
+
+def _content_hash(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise SemanticWorkerError("Semantic content hash is invalid.")
+    return value
 
 
 def _bounded_text(value: object) -> str:

@@ -19,6 +19,7 @@ from .contracts import (
     AboutInfo,
     Correction,
     DeckCatalog,
+    DefaultDeckRef,
     EXACT_SEARCH_DETAILS,
     EXACT_SEARCH_GUIDANCE,
     IndexState,
@@ -34,12 +35,18 @@ from .contracts import (
 )
 from .deck_picker import DeckDestinationPopup, DeckPickerPopup, DeckScopeButton
 from .deck_query import apply_deck_selection
+from .suspension_query import (
+    SuspensionQueryState,
+    analyze_suspension_query,
+    apply_suspension_filter,
+)
 from .results import ResultsView
 from .theme import chrome_colors, semantic_icon_pixmap
 from .preview_pane import InlineResultPane
 from .widgets import (  # Qt shim + custom widgets
     AboutPanel,
     ChipBar,
+    CompactCheckBox,
     IndexStatusWidget,
     SearchField,
     SegmentedModeControl,
@@ -512,6 +519,8 @@ class SearchDialog(QDialog):
     tagActionRequested = pyqtSignal(object, bool)  # results, add?
     undoRequested = pyqtSignal()
     deckPickerRequested = pyqtSignal()
+    defaultDeckRequested = pyqtSignal(object)  # DeckEntry | None
+    nativeSearchRequested = pyqtSignal(str)  # exact visible query text
     dialogClosed = pyqtSignal()
 
     def __init__(
@@ -583,11 +592,15 @@ class SearchDialog(QDialog):
         self.search.set_compound(True)
         self.search.textEdited.connect(self._on_text_edited)
         self.search.returnPressed.connect(self._on_search_return)
+        self.search.nativeSearchRequested.connect(
+            self.nativeSearchRequested.emit
+        )
         search_group_layout.addWidget(self.search, 1)
         top.addWidget(self.search_group, 1)
 
         self.deck_picker = DeckPickerPopup(self)
         self.deck_picker.applied.connect(self._apply_deck_selection)
+        self.deck_picker.defaultRequested.connect(self.defaultDeckRequested)
         self.deck_picker.retryRequested.connect(self._reload_deck_picker)
         self.deck_destination_picker = DeckDestinationPopup(self)
         self.deck_destination_picker.applied.connect(
@@ -613,11 +626,32 @@ class SearchDialog(QDialog):
         self.mode_guidance.setVisible(False)
         root.addWidget(self.mode_guidance)
 
+        # Full-width filter row: the suspension toggle leads as a checkable
+        # pill and the active filter/correction chips follow, all sharing one
+        # visual language. No artificial indent under the search field.
+        self.filter_row = QWidget(self)
+        self.filter_row.setObjectName("quickFilterRow")
+        filter_layout = QHBoxLayout(self.filter_row)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        filter_layout.setSpacing(8)
+
+        self.suspended_only = CompactCheckBox("Suspended only", self.filter_row)
+        self.suspended_only.setObjectName("suspendedOnly")
+        self.suspended_only.setAccessibleName("Show suspended cards only")
+        self.suspended_only.clicked.connect(self._toggle_suspended_only)
+        filter_layout.addWidget(
+            self.suspended_only,
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+
         self.chip_bar = ChipBar(self)
         self.chip_bar.filterRemoveRequested.connect(self.filterRemoveRequested)
         self.chip_bar.correctionDismissRequested.connect(self.correctionDismissRequested)
         self.chip_bar.correctionLiteralRequested.connect(self.correctionLiteralRequested)
-        root.addWidget(self.chip_bar)
+        filter_layout.addWidget(self.chip_bar, 1)
+        root.addWidget(self.filter_row)
+        self._sync_suspension_control("")
 
         self.related_context_bar = QFrame(self)
         self.related_context_bar.setObjectName("relatedContextBar")
@@ -1207,6 +1241,37 @@ class SearchDialog(QDialog):
         self.deck_picker.set_catalog(catalog)
         self.deck_destination_picker.set_catalog(catalog)
 
+    def set_default_deck(self, default_deck: DefaultDeckRef | None) -> None:
+        """Update the picker preference row without changing this query."""
+
+        self.deck_picker.set_default_deck(default_deck)
+
+    def seed_default_deck(self, name: str) -> str:
+        """Seed one validated deck clause and leave the caret ready to type."""
+
+        query = apply_deck_selection("", (str(name),))
+        self._debounce.stop()
+        # A trailing space makes the next typed character a separate Anki
+        # term. SearchController strips it before dispatch.
+        visible = query + " "
+        self.search.setText(visible)
+        self.deck_scope.set_scope(query)
+        self._sync_suspension_control(visible)
+        self.search.setFocus(Qt.FocusReason.ShortcutFocusReason)
+        self.search.setCursorPosition(len(visible))
+        return query
+
+    def show_default_deck_error(self, message: str) -> None:
+        """Report a preference failure inside the open deck picker."""
+
+        if self.deck_picker.isVisible():
+            self.deck_picker.show_default_save_error(message)
+
+    def clear_default_deck_error(self) -> None:
+        """Remove a resolved preference error from the deck picker."""
+
+        self.deck_picker.clear_default_save_error()
+
     def show_deck_picker_error(self, message: str) -> None:
         """Show a local picker error without interrupting normal searching."""
 
@@ -1688,6 +1753,7 @@ class SearchDialog(QDialog):
                 self.search,
                 self.deck_scope,
                 self.segmented,
+                self.suspended_only,
                 self.results,
                 self.related_back_button,
                 self.settings_button,
@@ -1706,6 +1772,7 @@ class SearchDialog(QDialog):
                 control.setEnabled(enabled)
             self._batch_control_states.clear()
         self._batch_busy = busy
+        self._sync_suspension_control()
         if message:
             self.set_summary(message)
         self._update_batch_bar()
@@ -1859,7 +1926,20 @@ class SearchDialog(QDialog):
         self._set_message_presentation(semantic=False)
         self.results.setEnabled(True)
         self.message_action.setVisible(False)
-        self.chip_bar.set_chips(response.active_filters, corrections)
+        suspension_is_managed = (
+            analyze_suspension_query(response.query).state
+            is SuspensionQueryState.ON
+        )
+        visible_filters = tuple(
+            chip
+            for chip in response.active_filters
+            if not (
+                suspension_is_managed
+                and str(chip.key).lower() == "is"
+                and str(chip.value) == "suspended"
+            )
+        )
+        self.chip_bar.set_chips(visible_filters, corrections)
         model = self.results.results_model()
         model.set_results(response.results)
         self._batch_results_available = bool(response.results)
@@ -2100,6 +2180,7 @@ class SearchDialog(QDialog):
         interactive = text_ready and not self._batch_busy
         self.search.setEnabled(interactive)
         self.segmented.setEnabled(interactive)
+        self._sync_suspension_control()
         if text_ready:
             self.search.setPlaceholderText("Search notes, tags, decks…")
         else:
@@ -2409,16 +2490,27 @@ class SearchDialog(QDialog):
     def clear_chips(self) -> None:
         self.chip_bar.set_chips([], [])
 
-    def set_query(self, text: str) -> None:
+    def set_query_text(self, text: str) -> None:
+        """Replace the visible query without dispatching a search."""
+
+        # A programmatic handoff must supersede any user-edit debounce. If the
+        # old timer is left armed, it can submit a stale query after the new
+        # one has already started.
+        self._debounce.stop()
         self.search.setText(text)
         self.deck_scope.set_scope(text)
+        self._sync_suspension_control(text)
         self.focus_query()
+
+    def set_query(self, text: str) -> None:
+        self.set_query_text(text)
         self._emit_search()
 
     # ------------------------------------------------------------- behavior
 
     def _on_text_edited(self, text: str) -> None:
         self.deck_scope.set_scope(text)
+        self._sync_suspension_control(text)
         query = str(text).strip()
         self.queryEdited.emit(query)
         if not query:
@@ -2447,6 +2539,65 @@ class SearchDialog(QDialog):
             # model while a user pauses briefly in the middle of a term.
             delay = max(delay, SEMANTIC_DEBOUNCE_MIN_MS)
         self._debounce.start(delay)
+
+    def _sync_suspension_control(self, text: str | None = None) -> None:
+        """Reflect the visible query without emitting another search intent."""
+
+        query = self.query() if text is None else str(text)
+        analysis = analyze_suspension_query(query)
+        previous = self.suspended_only.blockSignals(True)
+        try:
+            self.suspended_only.setChecked(
+                analysis.state is SuspensionQueryState.ON
+            )
+        finally:
+            self.suspended_only.blockSignals(previous)
+
+        if analysis.state is SuspensionQueryState.CUSTOM:
+            description = analysis.reason
+        else:
+            description = (
+                "Show only suspended cards. This adds is:suspended to the "
+                "Anki query."
+            )
+        self.suspended_only.setToolTip(description)
+        self.suspended_only.setAccessibleDescription(description)
+        self.suspended_only.setEnabled(
+            self.search.isEnabled()
+            and not self._batch_busy
+            and analysis.state is not SuspensionQueryState.CUSTOM
+        )
+
+    def _toggle_suspended_only(self, checked: bool) -> None:
+        """Apply the quick filter once without taking focus from the control."""
+
+        current = self.query()
+        replacement = apply_suspension_filter(current, bool(checked))
+        if replacement == current:
+            self._sync_suspension_control(current)
+            return
+        qt_units = len(
+            replacement.encode("utf-16-le", errors="surrogatepass")
+        ) // 2
+        if qt_units > self.search.maxLength():
+            self._sync_suspension_control(current)
+            self.set_summary(
+                "The query is too long to add the suspended filter."
+            )
+            return
+        self._debounce.stop()
+        self.search.setText(replacement)
+        if self.search.text() != replacement:
+            self.search.setText(current)
+            self._sync_suspension_control(current)
+            self.set_summary(
+                "The query is too long to add the suspended filter."
+            )
+            return
+        self.deck_scope.set_scope(replacement)
+        self._sync_suspension_control(replacement)
+        self.queryEdited.emit(replacement.strip())
+        self._emit_search()
 
     def _open_deck_picker(self) -> None:
         """Open immediately, then refresh choices asynchronously."""
@@ -2547,6 +2698,10 @@ class SearchDialog(QDialog):
             self.results.results_model().clear()
             self.clear_chips()
             self.show_help()
+            # Programmatic clears do not emit textEdited. Tell the controller
+            # explicitly so a held result for the prior query cannot repaint
+            # the Help view after an All-decks apply or Escape.
+            self.searchRequested.emit("")
             return
         self.searchRequested.emit(query)
 
@@ -2679,6 +2834,7 @@ class SearchDialog(QDialog):
             return
         if event.key() == Qt.Key.Key_Escape and self.query():
             self.search.clear()
+            self._sync_suspension_control("")
             self._emit_search()
             self.focus_query()
             event.accept()

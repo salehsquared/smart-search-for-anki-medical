@@ -14,8 +14,10 @@ from typing import Any, Callable, Iterable, Sequence
 
 try:  # installed add-on package
     from .backend.compat import dataclass
+    from .backend.host_safety import contain_host_backend_panic
 except ImportError:  # direct module loading in the plain-Python test suite
     from backend.compat import dataclass
+    from backend.host_safety import contain_host_backend_panic
 
 
 class ActionKind(enum.Enum):
@@ -537,7 +539,9 @@ def start_collection_action(
 
     operation = collection_op_factory(
         parent=parent,
-        op=lambda collection: execute_collection_action(collection, action),
+        op=lambda collection: contain_host_backend_panic(
+            lambda: execute_collection_action(collection, action)
+        ),
     )
     operation.success(on_success)
     operation.failure(on_failure)
@@ -562,7 +566,9 @@ def start_guarded_undo(
 
     operation = collection_op_factory(
         parent=parent,
-        op=lambda collection: execute_guarded_undo(collection, token),
+        op=lambda collection: contain_host_backend_panic(
+            lambda: execute_guarded_undo(collection, token)
+        ),
     )
     operation.success(on_success)
     operation.failure(on_failure)

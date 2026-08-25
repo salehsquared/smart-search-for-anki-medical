@@ -9,13 +9,14 @@ Layout:
 - :mod:`ui.results` — result list model, delegate, and view.
 - :mod:`ui.dialog` — the dialog: layout, states, keyboard behavior.
 - :mod:`ui.controller` — backend marshalling, request IDs, Browser opening.
+- :mod:`ui.browser_search` — native Browser search-field handoff action.
 Importing this package does not import Qt, so contracts stay testable
 outside Anki; import the submodules you need directly.
 """
 
 from __future__ import annotations
 
-__version__ = "1.0.26"
+__version__ = "1.0.35"
 
 __all__ = [
     "SearchDialog",

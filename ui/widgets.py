@@ -211,8 +211,165 @@ class PaletteMixin:
         }
 
 
+class CompactCheckBox(QCheckBox, PaletteMixin):
+    """A native checkable control painted as a compact filter pill.
+
+    The pill shares its height, radius, border, and palette family with the
+    filter chips, so the quick filter reads as part of the active-filter row
+    instead of a separate control hanging under the search field.  Its square
+    indicator stays visible in both states, and the filled check plus soft
+    accent background makes the active state clear without competing with the
+    mode buttons.  Painting it ourselves keeps both states, hover, and keyboard
+    focus clear on every style, while the QCheckBox retains its normal input
+    and accessibility semantics.
+    """
+
+    _FOCUS_MARGIN = 2
+    _PAD_X = 11
+    _CHECK_SIZE = 16
+    _CHECK_GAP = 7
+    # ChipBar adds 2 px above and below its 32 px chips. Match that total so
+    # the filter row does not change height when the first chip appears.
+    _MIN_HEIGHT = 36
+
+    def __init__(
+        self,
+        text: str = "",
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(text, parent)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+
+    def sizeHint(self) -> QSize:
+        metrics = QFontMetrics(self.font())
+        width = (
+            self._FOCUS_MARGIN * 2
+            + self._PAD_X * 2
+            + self._CHECK_SIZE
+            + self._CHECK_GAP
+            + metrics.horizontalAdvance(self.text())
+            + 2
+        )
+        height = max(
+            self._MIN_HEIGHT,
+            metrics.height() + self._FOCUS_MARGIN * 2 + 6,
+        )
+        return QSize(width, height)
+
+    def minimumSizeHint(self) -> QSize:
+        return self.sizeHint()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        colors = self._palette_colors()
+        enabled = self.isEnabled()
+        checked = self.isChecked()
+        rtl = self.layoutDirection() is Qt.LayoutDirection.RightToLeft
+
+        pill = self.rect().adjusted(
+            self._FOCUS_MARGIN,
+            self._FOCUS_MARGIN,
+            -self._FOCUS_MARGIN,
+            -self._FOCUS_MARGIN,
+        )
+        radius = pill.height() / 2.0
+
+        if not enabled:
+            fill = colors["surface"]
+            border = colors["chip_border"]
+        elif checked:
+            fill = colors["accent_soft"]
+            border = colors["accent_mid"]
+        elif self.underMouse():
+            fill = colors["surface_high"]
+            border = colors["accent_mid"]
+        else:
+            fill = colors["chip_bg"]
+            border = colors["chip_border"]
+        pen = QPen(QColor(border), 1.0)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        painter.setBrush(QColor(fill))
+        painter.drawRoundedRect(pill, radius, radius)
+
+        text_left = pill.left() + self._PAD_X
+        text_right = pill.right() - self._PAD_X
+        mark_x = (
+            text_right - self._CHECK_SIZE
+            if rtl
+            else text_left
+        )
+        mark_y = (self.height() - self._CHECK_SIZE) // 2
+        mark = QRect(mark_x, mark_y, self._CHECK_SIZE, self._CHECK_SIZE)
+        mark_border = (
+            colors["accent"]
+            if enabled and checked
+            else colors["muted"] if enabled else colors["chip_border"]
+        )
+        mark_fill = (
+            colors["accent"]
+            if enabled and checked
+            else colors["surface_high"]
+        )
+        painter.setPen(QPen(QColor(mark_border), 1.0))
+        painter.setBrush(QColor(mark_fill))
+        painter.drawRoundedRect(mark, 4, 4)
+        if checked:
+            check_color = colors["accent_text"] if enabled else colors["muted"]
+            check_pen = QPen(QColor(check_color), 2.0)
+            check_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            check_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(check_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(mark_x + 3, mark_y + 8, mark_x + 7, mark_y + 12)
+            painter.drawLine(mark_x + 7, mark_y + 12, mark_x + 13, mark_y + 4)
+        if rtl:
+            text_right = mark_x - self._CHECK_GAP
+        else:
+            text_left = mark_x + self._CHECK_SIZE + self._CHECK_GAP
+
+        text_color = colors["text"] if enabled else colors["muted"]
+        painter.setPen(QColor(text_color))
+        painter.setFont(self.font())
+        alignment = Qt.AlignmentFlag.AlignVCenter | (
+            Qt.AlignmentFlag.AlignRight
+            if rtl
+            else Qt.AlignmentFlag.AlignLeft
+        )
+        text_rect = QRect(
+            text_left,
+            0,
+            max(0, text_right - text_left),
+            self.height(),
+        )
+        painter.drawText(text_rect, alignment, self.text())
+
+        if self.hasFocus():
+            focus_pen = QPen(QColor(colors["accent"]), 1.0)
+            focus_pen.setStyle(Qt.PenStyle.DotLine)
+            painter.setPen(focus_pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(
+                self.rect().adjusted(0, 0, -1, -1),
+                radius + self._FOCUS_MARGIN,
+                radius + self._FOCUS_MARGIN,
+            )
+        painter.end()
+
+
+_NATIVE_BROWSER_ACTION_TIP = (
+    "Search the current query with Anki's native Browser."
+)
+
+
 class SearchField(QLineEdit, PaletteMixin):
     """The dominant query input with a quiet leading search glyph."""
+
+    # Emitted with the exact visible query when the context-menu Browser
+    # handoff command is triggered.
+    nativeSearchRequested = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -231,7 +388,8 @@ class SearchField(QLineEdit, PaletteMixin):
         self.setAccessibleDescription(
             "Type to search notes. Press Return to search now, "
             "Down to move to results, "
-            f"{_PRIMARY_KEY}+1, 2 or 3 switches search mode."
+            f"{_PRIMARY_KEY}+1, 2 or 3 switches search mode. "
+            "Open the context menu to search this query in Anki's Browser."
         )
         self.refresh_palette()
 
@@ -240,6 +398,61 @@ class SearchField(QLineEdit, PaletteMixin):
 
         self._compound = bool(compound)
         self.refresh_palette()
+
+    def build_context_menu(self) -> QMenu:
+        """Standard edit menu plus the Anki Browser handoff command.
+
+        Kept separate from :meth:`contextMenuEvent` so tests can inspect the
+        menu without a modal ``exec()``. An empty query remains valid: Anki's
+        native Browser interprets it as the whole collection.
+        """
+
+        menu = self.createStandardContextMenu()
+        menu.addSeparator()
+        action = menu.addAction("Search in Anki Browser")
+        action.setObjectName("searchFieldNativeBrowserAction")
+        action.setEnabled(self.isEnabled())
+        action.setStatusTip(_NATIVE_BROWSER_ACTION_TIP)
+        action.setToolTip(_NATIVE_BROWSER_ACTION_TIP)
+        return menu
+
+    def contextMenuEvent(self, event) -> None:
+        try:
+            menu = self.build_context_menu()
+        except Exception:
+            # This optional command must never remove the native text menu or
+            # let an API/style mismatch escape through Qt.
+            try:
+                super().contextMenuEvent(event)
+            except Exception:
+                event.accept()
+            return
+        query: str | None = None
+        try:
+            chosen = self._execute_context_menu(menu, event.globalPos())
+            if (
+                chosen is not None
+                and chosen.objectName() == "searchFieldNativeBrowserAction"
+            ):
+                # Snapshot at activation time, after the native menu has
+                # finished, so opening Browser cannot disrupt its event loop.
+                query = self.text()
+        except Exception:
+            query = None
+        finally:
+            try:
+                menu.deleteLater()
+            except Exception:
+                pass
+            event.accept()
+        if query is not None:
+            self.nativeSearchRequested.emit(query)
+
+    @staticmethod
+    def _execute_context_menu(menu: QMenu, global_position):
+        """Run the native menu; isolated as a deterministic test seam."""
+
+        return menu.exec(global_position)
 
     def _search_icon(self, color: str) -> QIcon:
         pixmap = QPixmap(22, 22)

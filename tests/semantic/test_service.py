@@ -12,12 +12,16 @@ from semantic.service import (
     SemanticService,
     semantic_text_hash,
 )
+from semantic.worker_client import SemanticIndexWorkerError
 
 
 class _FakeWorker:
     def __init__(self) -> None:
         self.running = False
         self.embedded: list[tuple[tuple[str, ...], bool]] = []
+        self.upserts = []
+        self.searches = []
+        self.search_hits: list[tuple[int, float]] = []
         self.terminated = 0
         self.waited = 0
 
@@ -30,6 +34,43 @@ class _FakeWorker:
 
     def warmup(self) -> None:
         self.running = True
+
+    def upsert_vectors(
+        self,
+        index_root,
+        note_ids,
+        content_hashes,
+        vectors,
+        *,
+        cancel_check=None,
+    ):
+        if cancel_check is not None:
+            cancel_check()
+        self.upserts.append(
+            (
+                index_root,
+                tuple(note_ids),
+                tuple(content_hashes),
+                tuple(tuple(vector) for vector in vectors),
+            )
+        )
+        return len(note_ids)
+
+    def search_vector(
+        self,
+        index_root,
+        query_vector,
+        *,
+        limit,
+        allowed_note_ids,
+        cancel_check=None,
+    ):
+        if cancel_check is not None:
+            cancel_check()
+        self.searches.append(
+            (index_root, tuple(query_vector), limit, allowed_note_ids)
+        )
+        return self.search_hits[:limit]
 
     def terminate_now(self) -> bool:
         existed = self.running
@@ -147,8 +188,8 @@ class SemanticServiceTests(unittest.TestCase):
 
             class TrackingIndex:
                 def __init__(self) -> None:
+                    self.root = Path(directory) / "vectors"
                     self.hashes = {1: documents[0].content_hash}
-                    self.upserts = []
 
                 def known_hashes(self, note_ids=None, **_kwargs):
                     return {
@@ -156,10 +197,6 @@ class SemanticServiceTests(unittest.TestCase):
                         for note_id in (note_ids or ())
                         if note_id in self.hashes
                     }
-
-                def upsert_many(self, note_ids, content_hashes, _vectors):
-                    self.upserts.append(tuple(note_ids))
-                    self.hashes.update(zip(note_ids, content_hashes))
 
             tracking_index = TrackingIndex()
             service.index = tracking_index
@@ -178,11 +215,10 @@ class SemanticServiceTests(unittest.TestCase):
             )
             self.assertTrue(all(background for _batch, background in service._worker.embedded))
             self.assertEqual(
-                [len(batch) for batch in tracking_index.upserts],
+                [len(upsert[1]) for upsert in service._worker.upserts],
                 [16, 16, 2],
             )
             self.assertEqual(progress, [(16, 34), (32, 34), (34, 34)])
-            self.assertEqual(manager.activate_vector_runtime.call_count, 3)
 
     def test_cancellation_after_inference_prevents_vector_upsert_and_error_state(
         self,
@@ -194,11 +230,8 @@ class SemanticServiceTests(unittest.TestCase):
             service, _manager = self._service(Path(directory))
             document = SemanticDocument.from_text(9, "pulmonary embolism")
             cancelled = threading.Event()
-            upserts = []
-
             service.index = MagicMock()
             service.index.known_hashes.return_value = {}
-            service.index.upsert_many.side_effect = lambda *args: upserts.append(args)
 
             class CancelAfterInference(_FakeWorker):
                 def embed(self, texts, *, background, cancel_check=None):
@@ -218,18 +251,16 @@ class SemanticServiceTests(unittest.TestCase):
                     cancel_check=checkpoint,
                 )
 
-            self.assertEqual(upserts, [])
+            self.assertEqual(service._worker.upserts, [])
             self.assertIsNone(service._last_error)
             self.assertIsNone(service._last_error_kind)
 
-    def test_search_uses_interactive_worker_then_existing_vector_index(self) -> None:
+    def test_search_uses_worker_for_inference_and_vector_index(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             service, manager = self._service(Path(directory))
             service.index = MagicMock()
             service.index.count.return_value = 1
-            service.index.search.return_value = [
-                MagicMock(note_id=42, score=0.75)
-            ]
+            service._worker.search_hits = [(42, 0.75)]
 
             hits = service.search("heart failure", limit=7, allowed_note_ids={42})
 
@@ -238,8 +269,9 @@ class SemanticServiceTests(unittest.TestCase):
                 service._worker.embedded,
                 [(('heart failure',), False)],
             )
-            manager.activate_vector_runtime.assert_called_once_with()
-            service.index.search.assert_called_once()
+            service.index.search.assert_not_called()
+            self.assertEqual(len(service._worker.searches), 1)
+            self.assertEqual(service._worker.searches[0][2:], (7, {42}))
 
     def test_superseded_search_keeps_completed_interactive_worker_warm(self) -> None:
         class Cancelled(RuntimeError):
@@ -278,8 +310,8 @@ class SemanticServiceTests(unittest.TestCase):
 
             self.assertEqual(worker.worker_cancel_checks, [None])
             self.assertTrue(worker.running)
-            manager.activate_vector_runtime.assert_not_called()
             service.index.search.assert_not_called()
+            self.assertEqual(worker.searches, [])
 
     def test_repair_install_reaps_worker_before_runtime_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -406,8 +438,9 @@ class SemanticServiceTests(unittest.TestCase):
             service, _manager = self._service(Path(directory))
             service.index = MagicMock()
             service.index.count.return_value = 1
-            service._worker.embed = MagicMock(return_value=[[0.1, 0.2]])
-            service.index.search.side_effect = RuntimeError("index read failed")
+            service._worker.search_vector = MagicMock(
+                side_effect=SemanticIndexWorkerError("index read failed")
+            )
 
             with self.assertRaisesRegex(
                 SemanticRuntimeError,

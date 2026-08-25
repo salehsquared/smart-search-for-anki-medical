@@ -7,7 +7,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
-from unittest.mock import PropertyMock, patch
+from unittest.mock import patch
 import zipfile
 
 from semantic.manifest import RuntimeWheel, WORKER_RUNTIME_TAG
@@ -33,11 +33,6 @@ class ModelManagerTests(unittest.TestCase):
             with patch(
                 "semantic.model_manager.platform.mac_ver",
                 return_value=("14.0", ("", "", ""), ""),
-            ), patch.object(
-                ModelManager,
-                "host_vector_tag",
-                new_callable=PropertyMock,
-                return_value="darwin-arm64-py313",
             ):
                 self.assertTrue(manager.runtime_supported())
 
@@ -66,15 +61,12 @@ class ModelManagerTests(unittest.TestCase):
                 self.assertTrue(
                     (manager.worker_site_packages / "numpy" / "__init__.py").is_file()
                 )
-                self.assertNotEqual(
-                    manager.host_vector_runtime_dir,
-                    manager.worker_site_packages,
-                )
                 self.assertFalse(
-                    (manager.host_vector_runtime_dir / "onnxruntime").exists()
-                )
-                self.assertFalse(
-                    (manager.host_vector_runtime_dir / "tokenizers").exists()
+                    (
+                        manager.data_root
+                        / "runtime"
+                        / "vector-darwin-arm64-py313"
+                    ).exists()
                 )
                 marker = json.loads(
                     (manager.runtime_dir / ".smart-search-runtime.json").read_text()
@@ -97,24 +89,21 @@ class ModelManagerTests(unittest.TestCase):
                     "READY = True\n",
                 )
 
-    def test_python39_host_gets_only_a_small_vector_numpy_runtime(self) -> None:
+    def test_runtime_install_does_not_require_host_python_wheels(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            manager, patches = self._fake_runtime(
-                root,
-                host_tag="darwin-arm64-py39",
-            )
+            manager, patches = self._fake_runtime(root)
             with patches:
                 manager.install_runtime()
 
-                vector_root = manager.host_vector_runtime_dir
-                self.assertTrue((vector_root / "numpy" / "__init__.py").is_file())
-                marker = json.loads(
-                    (vector_root / ".smart-search-vector-runtime.json").read_text()
+                self.assertTrue(manager.runtime_ready())
+                self.assertEqual(
+                    sorted(
+                        path.relative_to(root / "bundle" / "vendor_wheels").as_posix()
+                        for path in (root / "bundle" / "vendor_wheels").rglob("*.whl")
+                    ),
+                    ["darwin-arm64-py313/worker-test.whl"],
                 )
-                self.assertEqual(marker["runtime_tag"], "darwin-arm64-py39")
-                self.assertFalse((vector_root / "onnxruntime").exists())
-                self.assertFalse((vector_root / "tokenizers").exists())
 
     def test_python_archive_checksum_failure_is_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -166,8 +155,22 @@ class ModelManagerTests(unittest.TestCase):
             manager, patches = self._fake_runtime(root)
             legacy39 = manager.data_root / "runtime" / "darwin-arm64-py39"
             legacy313 = manager.data_root / "runtime" / "darwin-arm64-py313"
+            vector39 = manager.data_root / "runtime" / "vector-darwin-arm64-py39"
+            vector313 = manager.data_root / "runtime" / "vector-darwin-arm64-py313"
+            vector_staging = vector313.with_name(vector313.name + ".staging")
+            vector_previous = vector313.with_name(vector313.name + ".previous")
             unrelated = manager.data_root / "runtime" / "keep-me"
-            for path in (legacy39, legacy313, unrelated):
+            unrelated_vector = manager.data_root / "runtime" / "vector-keep-me"
+            for path in (
+                legacy39,
+                legacy313,
+                vector39,
+                vector313,
+                vector_staging,
+                vector_previous,
+                unrelated,
+                unrelated_vector,
+            ):
                 path.mkdir(parents=True, exist_ok=True)
                 (path / "marker").write_text("derived", encoding="utf-8")
 
@@ -176,13 +179,40 @@ class ModelManagerTests(unittest.TestCase):
 
             self.assertFalse(legacy39.exists())
             self.assertFalse(legacy313.exists())
+            self.assertFalse(vector39.exists())
+            self.assertFalse(vector313.exists())
+            self.assertFalse(vector_staging.exists())
+            self.assertFalse(vector_previous.exists())
             self.assertTrue(unrelated.exists())
+            self.assertTrue(unrelated_vector.exists())
+
+    def test_ready_worker_install_cleans_stale_host_runtime_without_reinstall(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manager, patches = self._fake_runtime(root)
+            with patches:
+                manager.install_runtime()
+                marker = manager.runtime_dir / ".smart-search-runtime.json"
+                installed_marker = marker.read_bytes()
+                stale = (
+                    manager.data_root
+                    / "runtime"
+                    / "vector-darwin-arm64-py313"
+                )
+                stale.mkdir(parents=True)
+                (stale / "numpy.so").write_bytes(b"obsolete")
+
+                manager.install_runtime()
+
+                self.assertFalse(stale.exists())
+                self.assertEqual(marker.read_bytes(), installed_marker)
+                self.assertTrue(manager.runtime_ready())
 
     def _fake_runtime(
         self,
         root: Path,
-        *,
-        host_tag: str = "darwin-arm64-py313",
     ):
         bundle = root / "bundle"
         data = root / "data"
@@ -211,23 +241,8 @@ class ModelManagerTests(unittest.TestCase):
             sha256=sha256_file(worker_wheel),
         )
 
-        host_wheel_dir = bundle / "vendor_wheels" / host_tag
-        host_wheel_dir.mkdir(parents=True, exist_ok=True)
-        host_wheel = host_wheel_dir / "numpy-host-test.whl"
-        with zipfile.ZipFile(host_wheel, "w") as archive:
-            archive.writestr("numpy/__init__.py", "READY = True\n")
-        host_wheels = (
-            RuntimeWheel(host_wheel.name, sha256_file(host_wheel)),
-        )
-
         manager = ModelManager(data, bundle)
         patches = _PatchGroup(
-            patch.object(
-                ModelManager,
-                "host_vector_tag",
-                new_callable=PropertyMock,
-                return_value=host_tag,
-            ),
             patch(
                 "semantic.model_manager.platform.mac_ver",
                 return_value=("14.0", ("", "", ""), ""),
@@ -240,10 +255,6 @@ class ModelManagerTests(unittest.TestCase):
             patch(
                 "semantic.model_manager.WORKER_RUNTIME_WHEELS",
                 (manifest_wheel,),
-            ),
-            patch(
-                "semantic.model_manager.HOST_VECTOR_WHEELS",
-                {host_tag: host_wheels},
             ),
         )
         return manager, patches

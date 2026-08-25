@@ -26,6 +26,7 @@ sys.modules[spec.name] = controller
 spec.loader.exec_module(controller)
 
 models = sys.modules[f"{PACKAGE}.backend.models"]
+host_safety = sys.modules[f"{PACKAGE}.backend.host_safety"]
 contracts = sys.modules[f"{PACKAGE}.ui.contracts"]
 updater = importlib.import_module(f"{PACKAGE}.updater")
 
@@ -341,6 +342,7 @@ class _AutostartBackend:
 
 class ControllerTests(unittest.TestCase):
     def setUp(self) -> None:
+        host_safety._reset_host_backend_quarantine_for_tests()
         self.temporary = tempfile.TemporaryDirectory()
         self.bundle = Path(self.temporary.name)
         self.backend = _SynchronousBackend(
@@ -353,6 +355,7 @@ class ControllerTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.backend.deactivate_profile()
         self.temporary.cleanup()
+        host_safety._reset_host_backend_quarantine_for_tests()
 
     def test_profile_scoped_index_and_settings_round_trip(self) -> None:
         expected = controller.profile_key(
@@ -380,6 +383,10 @@ class ControllerTests(unittest.TestCase):
         settings.preview_enabled = False
         settings.preview_default = contracts.PreviewDefault.ANSWER
         settings.width = 1234
+        settings.default_deck = contracts.DefaultDeckRef(
+            40,
+            "Medicine::Cardiology",
+        )
         self.backend.save_settings(settings)
         saved = self.backend.mw.addonManager.config
         self.assertEqual(saved["shortcut"], "Meta+K")
@@ -389,6 +396,89 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(saved["preview_default"], "answer")
         self.assertEqual(saved["ui"]["preview_default"], "answer")
         self.assertEqual(saved["ui"]["width"], 1234)
+        self.assertEqual(
+            saved["default_decks_by_profile"][expected],
+            {
+                "deck_id": 40,
+                "last_known_name": "Medicine::Cardiology",
+            },
+        )
+        self.assertEqual(
+            self.backend.load_settings().default_deck,
+            contracts.DefaultDeckRef(40, "Medicine::Cardiology"),
+        )
+
+        settings.default_deck = None
+        self.backend.save_settings(settings)
+        self.assertNotIn(
+            "default_decks_by_profile",
+            self.backend.mw.addonManager.config,
+        )
+
+    def test_default_deck_settings_are_profile_scoped_and_malformed_safe(self) -> None:
+        active = self.backend.profile_id
+        self.assertIsNotNone(active)
+        self.backend.mw.addonManager.config = {
+            "shortcut": "Meta+K",
+            "default_decks_by_profile": {
+                str(active): {
+                    "deck_id": 91,
+                    "last_known_name": "Renamed later",
+                },
+                "another-profile": {
+                    "deck_id": 17,
+                    "last_known_name": "Other profile deck",
+                },
+            },
+        }
+
+        settings = self.backend.load_settings()
+        self.assertEqual(
+            settings.default_deck,
+            contracts.DefaultDeckRef(91, "Renamed later"),
+        )
+        settings.default_deck = contracts.DefaultDeckRef(92, "New default")
+        self.backend.save_settings(settings)
+        saved = self.backend.mw.addonManager.config
+        self.assertEqual(
+            saved["default_decks_by_profile"]["another-profile"],
+            {
+                "deck_id": 17,
+                "last_known_name": "Other profile deck",
+            },
+        )
+
+        saved["default_decks_by_profile"][str(active)] = {
+            "deck_id": -1,
+            "last_known_name": "Invalid",
+        }
+        self.backend.mw.addonManager.config = saved
+        self.assertIsNone(self.backend.load_settings().default_deck)
+
+    def test_delayed_old_dialog_save_keeps_its_original_profile_key(self) -> None:
+        old_profile = self.backend.profile_id
+        self.assertIsNotNone(old_profile)
+        old_settings = self.backend.load_settings()
+        old_settings.default_deck = contracts.DefaultDeckRef(41, "Old deck")
+
+        self.backend.deactivate_profile()
+        self.backend.mw.pm.name = "New Profile"
+        self.backend.mw.col.path = "/tmp/controller-tests/new-profile.anki2"
+        self.backend.activate_profile(auto_rebuild=False)
+        new_profile = self.backend.profile_id
+        self.assertIsNotNone(new_profile)
+        self.assertNotEqual(new_profile, old_profile)
+
+        self.backend.save_settings(old_settings)
+
+        defaults = self.backend.mw.addonManager.config[
+            "default_decks_by_profile"
+        ]
+        self.assertEqual(
+            defaults[str(old_profile)],
+            {"deck_id": 41, "last_known_name": "Old deck"},
+        )
+        self.assertNotIn(str(new_profile), defaults)
 
     def test_preview_default_config_is_case_insensitive_and_safely_falls_back(self) -> None:
         self.backend.mw.addonManager.config = {
@@ -474,6 +564,52 @@ class ControllerTests(unittest.TestCase):
         stale["failure"](RuntimeError("profile closed"))
         self.assertEqual(received, [])
         self.assertEqual(errors, [])
+
+    def test_public_operations_report_restart_after_host_quarantine(self) -> None:
+        host_safety._HOST_BACKEND_QUARANTINED.set()
+        expected = host_safety.HOST_BACKEND_RESTART_MESSAGE
+
+        deck_errors = []
+        self.backend.load_decks(
+            lambda _catalog: self.fail("quarantined deck load succeeded"),
+            deck_errors.append,
+        )
+        related_errors = []
+        self.backend.submit_related_cards(
+            contracts.RelatedCardsRequest(
+                request_id=1,
+                note_ids=(10,),
+                tags=("source::test",),
+                limit=5,
+            ),
+            lambda _response: self.fail("quarantined related lookup succeeded"),
+            related_errors.append,
+        )
+        activation_errors = []
+        self.backend.activate_profile_async(on_error=activation_errors.append)
+        rebuild_errors = []
+        install_errors = []
+        index_errors = []
+
+        self.assertIsNone(
+            self.backend.rebuild_index(
+                lambda _progress, _detail: None,
+                lambda _status: self.fail("quarantined rebuild succeeded"),
+                rebuild_errors.append,
+            )
+        )
+        self.assertIsNone(
+            self.backend.install_semantic(on_error=install_errors.append)
+        )
+        self.assertIsNone(
+            self.backend.index_semantic(on_error=index_errors.append)
+        )
+        self.assertEqual(deck_errors, [expected])
+        self.assertEqual(related_errors, [expected])
+        self.assertEqual(activation_errors, [expected])
+        self.assertEqual(rebuild_errors, [expected])
+        self.assertEqual(install_errors, [expected])
+        self.assertEqual(index_errors, [expected])
 
     def test_async_profile_activation_opens_indexes_off_caller_thread(self) -> None:
         self.backend.deactivate_profile()
@@ -576,11 +712,165 @@ class ControllerTests(unittest.TestCase):
         errors = []
         addon._refresh_dialog = lambda: refreshed.append(True)
         addon._show_error = errors.append
+        addon._pending_browser_search = "deck:Neurology"
 
         addon._search_profile_activation_failed("Search data could not be opened.")
 
         self.assertEqual(refreshed, [True])
         self.assertEqual(errors, ["Search data could not be opened."])
+        self.assertIsNone(addon._pending_browser_search)
+
+    def test_browser_handoff_reuses_dialog_and_normal_open_keeps_query(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        addon.backend.warm_lexical_on_demand = lambda: True
+        addon._register_managed_dialog = lambda _dialog: None
+        events: list[str] = []
+        replacements: list[str] = []
+        dialog = types.SimpleNamespace(
+            show=lambda: events.append("show"),
+            raise_=lambda: events.append("raise"),
+            activateWindow=lambda: events.append("activate"),
+            focus_query=lambda: events.append("focus"),
+        )
+        addon._dialog = dialog
+        addon._ui_controller = types.SimpleNamespace(
+            resume=lambda: events.append("resume"),
+            replace_and_submit=lambda query: (
+                replacements.append(query),
+                True,
+            )[1],
+        )
+
+        query = 'deck:"Step 2" is:due -is:suspended'
+        addon.show_search_for_query(query)
+        addon.show_search()
+
+        self.assertEqual(replacements, [query])
+        self.assertIsNone(addon._pending_browser_search)
+        self.assertEqual(events.count("resume"), 2)
+        self.assertEqual(events.count("focus"), 1)
+
+    def test_latest_browser_handoff_waits_for_profile_activation(self) -> None:
+        status = contracts.IndexStatus(contracts.IndexState.UNAVAILABLE)
+
+        class _DelayedBackend:
+            bundle_update_running = False
+
+            def __init__(self) -> None:
+                self.active = False
+                self.status = status
+                self.activation_callbacks = None
+
+            def get_status(self):
+                return self.status
+
+            def activate_profile_async(self, **callbacks) -> None:
+                self.activation_callbacks = callbacks
+                self.status = contracts.IndexStatus(contracts.IndexState.BUILDING)
+
+            @staticmethod
+            def warm_lexical_on_demand() -> bool:
+                return True
+
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        backend = _DelayedBackend()
+        addon.backend = backend
+        addon._register_managed_dialog = lambda _dialog: None
+        addon._run_on_main = lambda callback: callback()
+        addon._schedule_semantic_autostart = lambda: None
+        addon.schedule_reconcile = lambda **_kwargs: None
+        addon._refresh_dialog = lambda: None
+        addon._show_message = lambda _message: None
+        replacements: list[str] = []
+        addon._dialog = types.SimpleNamespace(
+            show=lambda: None,
+            raise_=lambda: None,
+            activateWindow=lambda: None,
+            focus_query=lambda: None,
+        )
+        addon._ui_controller = types.SimpleNamespace(
+            resume=lambda: True,
+            replace_and_submit=lambda query: (
+                replacements.append(query),
+                True,
+            )[1],
+        )
+
+        addon.show_search_for_query("first")
+        first_callbacks = backend.activation_callbacks
+        addon.show_search_for_query("second")
+        self.assertIs(backend.activation_callbacks, first_callbacks)
+
+        backend.active = True
+        backend.status = contracts.IndexStatus(contracts.IndexState.READY)
+        first_callbacks["on_ready"](backend.status)
+
+        self.assertEqual(replacements, ["second"])
+        self.assertIsNone(addon._pending_browser_search)
+
+    def test_failed_browser_handoff_activation_cannot_replay_later(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        addon._schedule_semantic_autostart = lambda: None
+        addon._refresh_dialog = lambda: None
+        addon._post_review_resume_timer = _FakeTimer()
+        scheduled: list[bool] = []
+        addon._run_on_main = lambda _callback: scheduled.append(True)
+        addon._pending_browser_search = "tag:stale"
+        self.backend.deactivate_profile()
+
+        addon._profile_activation_ready(
+            contracts.IndexStatus(contracts.IndexState.UNAVAILABLE)
+        )
+        addon._profile_activation_ready(
+            contracts.IndexStatus(contracts.IndexState.READY)
+        )
+
+        self.assertIsNone(addon._pending_browser_search)
+        self.assertEqual(scheduled, [])
+
+    def test_stale_dialog_cannot_escape_browser_handoff_callback(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        addon.backend.warm_lexical_on_demand = lambda: True
+        addon._register_managed_dialog = lambda _dialog: None
+        focus_attempts: list[bool] = []
+        addon._dialog = types.SimpleNamespace(
+            show=lambda: None,
+            raise_=lambda: None,
+            activateWindow=lambda: None,
+            focus_query=lambda: focus_attempts.append(True),
+        )
+
+        def deleted_dialog(_query: str) -> bool:
+            raise RuntimeError("wrapped C/C++ object has been deleted")
+
+        addon._ui_controller = types.SimpleNamespace(
+            resume=lambda: True,
+            replace_and_submit=deleted_dialog,
+        )
+
+        addon.show_search_for_query("is:due")
+
+        self.assertEqual(focus_attempts, [True])
+        self.assertIsNone(addon._pending_browser_search)
 
     def test_profile_deactivation_does_not_wait_for_inflight_reader_lock(self) -> None:
         self.backend.deactivate_profile()
@@ -3823,6 +4113,49 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(addon._preview_auto_suppressed)
         self.assertIsNone(addon._previewer)
 
+    def test_inline_preview_construction_contains_host_panic(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        result = contracts.SearchResult(
+            note_id=7,
+            card_ids=(71,),
+            title="Seven",
+        )
+        active_states = []
+        addon._dialog = types.SimpleNamespace(
+            set_preview_active=active_states.append,
+            preview_pane=types.SimpleNamespace(),
+            results=types.SimpleNamespace(hasFocus=lambda: False),
+            search=types.SimpleNamespace(hasFocus=lambda: False),
+        )
+        addon._ui_controller = types.SimpleNamespace(
+            settings=types.SimpleNamespace(
+                preview_enabled=True,
+                preview_default=contracts.PreviewDefault.QUESTION,
+            )
+        )
+        errors = []
+        addon._show_error = errors.append
+        PanicException = type(
+            "PanicException",
+            (BaseException,),
+            {"__module__": "pyo3_runtime"},
+        )
+
+        with patch.object(
+            controller,
+            "create_inline_result_inspector",
+            side_effect=PanicException(),
+        ):
+            addon._toggle_previewer(result)
+
+        self.assertTrue(host_safety.host_backend_quarantined())
+        self.assertEqual(errors, [host_safety.HOST_BACKEND_RESTART_MESSAGE])
+        self.assertEqual(active_states, [False])
+
     def test_preview_default_change_applies_only_to_an_open_enabled_pane(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),
@@ -4030,6 +4363,147 @@ class ControllerTests(unittest.TestCase):
             pending.pop()()
         self.assertEqual(events[-1], "mutation")
 
+    def test_native_query_browser_open_waits_for_editor_detach(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        events: list[str] = []
+        pending = []
+
+        class _Preview:
+            def prepare_for_external_change(self, callback) -> None:
+                events.append("save-detach")
+                pending.append(callback)
+
+        addon._previewer = _Preview()
+        opened: list[str] = []
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=lambda query: opened.append(query),
+        ):
+            addon.open_native_search(
+                'notetype:Cloze deck:"Med::Cardio" café'
+            )
+            self.assertEqual(events, ["save-detach"])
+            self.assertEqual(opened, [])
+            pending.pop()()
+        # The visible query survives verbatim; only the canonical
+        # ``notetype:`` to ``note:`` conversion runs before Browser opening.
+        self.assertEqual(opened, ['note:Cloze deck:"Med::Cardio" café'])
+
+    def test_native_query_browser_open_rechecks_gate_after_save(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        pending = []
+
+        class _Preview:
+            def prepare_for_external_change(self, callback) -> None:
+                pending.append(callback)
+
+        addon._previewer = _Preview()
+        errors: list[str] = []
+        addon._show_error = errors.append
+        opened: list[str] = []
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=opened.append,
+        ):
+            addon.open_native_search("heart failure")
+            self.assertEqual(len(pending), 1)
+            # Sync starts after the editor save was requested but before the
+            # deferred open runs: the gate must fail closed again.
+            addon._sync_in_progress = True
+            pending.pop()()
+        self.assertEqual(opened, [])
+        self.assertEqual(len(errors), 1)
+
+    def test_native_query_browser_open_fails_closed_when_blocked(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        errors: list[str] = []
+        addon._show_error = errors.append
+        opened: list[str] = []
+        addon._sync_in_progress = True
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=opened.append,
+        ):
+            addon.open_native_search("heart failure")
+        self.assertEqual(opened, [])
+        self.assertEqual(len(errors), 1)
+
+    def test_native_query_browser_open_forwards_blank_query(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        errors: list[str] = []
+        addon._show_error = errors.append
+        opened: list[str] = []
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=opened.append,
+        ):
+            addon.open_native_search("")
+            addon.open_native_search("   ")
+        self.assertEqual(opened, ["", ""])
+        self.assertEqual(errors, [])
+
+    def test_native_query_browser_open_ordinary_error_is_nonfatal(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        errors: list[str] = []
+        addon._show_error = errors.append
+
+        def boom(_query: str) -> None:
+            raise RuntimeError("browser unavailable")
+
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=boom,
+        ):
+            addon.open_native_search("heart failure")
+        self.assertEqual(len(errors), 1)
+        self.assertIn("browser unavailable", errors[0])
+
+    def test_native_query_browser_open_quarantines_host_failure(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        failures: list[Exception] = []
+        addon._on_host_backend_failure = failures.append
+
+        def unavailable(_query: str) -> None:
+            raise controller.HostBackendUnavailable("restart required")
+
+        with patch.object(
+            controller,
+            "open_native_query_in_browser",
+            side_effect=unavailable,
+        ):
+            addon.open_native_search("heart failure")
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], controller.HostBackendUnavailable)
+
     def test_temporary_collection_close_uses_managed_save_path(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),
@@ -4057,6 +4531,7 @@ class ControllerTests(unittest.TestCase):
         addon.backend.abort_semantic_runtime_now = lambda: aborts.append(True)
         addon.schedule_reconcile = lambda **kwargs: reconciles.append(kwargs)
         addon._close_dialog_with_callback = callbacks.append
+        addon._host_activity_resume_timer = _FakeTimer()
 
         addon._on_collection_will_temporarily_close(object())
 
@@ -4066,13 +4541,18 @@ class ControllerTests(unittest.TestCase):
         self.assertTrue(callable(callbacks[0]))
         self.assertEqual(pauses, [True])
         self.assertEqual(aborts, [True])
-        self.assertTrue(all(timer.stop_count == 1 for timer in timers))
+        self.assertTrue(all(timer.stop_count >= 1 for timer in timers))
 
         addon._on_collection_reopened(object())
 
         self.assertFalse(addon._collection_temporarily_closed)
+        self.assertTrue(addon._maintenance_blocked())
+        self.assertEqual(pauses, [True, True])
+        self.assertEqual(addon._host_activity_resume_timer.starts, [250])
+        addon._resume_after_host_collection_activity()
+
         self.assertFalse(addon._maintenance_blocked())
-        self.assertEqual(pauses, [True, False])
+        self.assertEqual(pauses, [True, True, False])
         self.assertEqual(reconciles, [{}])
         self.assertEqual(addon._post_review_resume_timer.starts, [250])
 
@@ -4083,8 +4563,10 @@ class ControllerTests(unittest.TestCase):
             addon_module="smart_search_medical",
         )
         addon._collection_temporarily_closed = True
+        addon._host_reconcile_pending = True
         addon._review_active = True
         addon._post_review_resume_timer = _FakeTimer()
+        addon._host_activity_resume_timer = _FakeTimer()
         pauses = []
         reconciles = []
         addon.backend.set_background_maintenance_paused = (
@@ -4097,8 +4579,203 @@ class ControllerTests(unittest.TestCase):
         self.assertFalse(addon._collection_temporarily_closed)
         self.assertTrue(addon._maintenance_blocked())
         self.assertEqual(pauses, [True])
+        self.assertEqual(reconciles, [])
+        self.assertEqual(addon._host_activity_resume_timer.starts, [250])
+        addon._resume_after_host_collection_activity()
+
+        self.assertTrue(addon._maintenance_blocked())
+        self.assertEqual(pauses, [True, True])
         self.assertEqual(reconciles, [{}])
         self.assertEqual(addon._post_review_resume_timer.starts, [])
+
+    def test_sync_gate_stays_closed_until_deferred_host_reset_finishes(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon._host_activity_resume_timer = _FakeTimer()
+        addon._post_review_resume_timer = _FakeTimer()
+        addon._reconcile_timer = _FakeTimer()
+        addon._semantic_autostart_timer = _FakeTimer()
+        addon._card_state_refresh_timer = _FakeTimer()
+        addon._vocabulary_refresh_timer = _FakeTimer()
+        addon._preview_open_timer = _FakeTimer()
+        reconciles = []
+        addon.schedule_reconcile = lambda **kwargs: reconciles.append(kwargs)
+        addon._refresh_visible_card_states = lambda: None
+        preview_events = []
+        addon._previewer = types.SimpleNamespace(
+            set_collection_access_paused=lambda paused: preview_events.append(
+                ("pause", bool(paused))
+            ),
+        )
+        maintenance_event = addon.backend._new_cancellation(kind="maintenance")
+        query_event = addon.backend._new_cancellation(kind="semantic_query")
+
+        addon._on_sync_will_start()
+
+        self.assertTrue(addon._sync_in_progress)
+        self.assertTrue(addon.backend.collection_access_blocked)
+        self.assertTrue(addon.backend.background_maintenance_paused)
+        self.assertTrue(maintenance_event.is_set())
+        self.assertFalse(query_event.is_set())
+        self.assertTrue(addon._host_reconcile_pending)
+        self.assertIn(("pause", True), preview_events)
+
+        addon._on_sync_finished()
+
+        self.assertFalse(addon._sync_in_progress)
+        self.assertTrue(addon._host_resume_pending)
+        self.assertTrue(addon.backend.collection_access_blocked)
+        self.assertTrue(addon.backend.background_maintenance_paused)
+        self.assertEqual(addon._host_activity_resume_timer.starts, [250])
+        self.assertEqual(reconciles, [])
+
+        addon._resume_after_host_collection_activity()
+
+        self.assertFalse(addon._host_resume_pending)
+        self.assertFalse(addon.backend.collection_access_blocked)
+        self.assertFalse(addon.backend.background_maintenance_paused)
+        self.assertEqual(reconciles, [{}])
+
+    def test_missing_sync_finish_keeps_collection_gate_fail_closed(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon._host_activity_resume_timer = _FakeTimer()
+        addon._on_sync_will_start()
+
+        # A core PanicException can bypass Anki's normal sync completion hook.
+        # Even a stray timer callback must not reopen add-on collection access.
+        addon._resume_after_host_collection_activity()
+
+        self.assertTrue(addon._sync_in_progress)
+        self.assertTrue(addon.backend.collection_access_blocked)
+        self.assertTrue(addon.backend.background_maintenance_paused)
+        self.assertEqual(addon._host_activity_resume_timer.starts, [])
+
+    def test_sync_and_media_gates_coalesce_one_reconciliation(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon._host_activity_resume_timer = _FakeTimer()
+        addon._post_review_resume_timer = _FakeTimer()
+        reconciles = []
+        addon.schedule_reconcile = lambda **kwargs: reconciles.append(kwargs)
+        addon._refresh_visible_card_states = lambda: None
+
+        addon._on_sync_will_start()
+        addon._on_media_sync_state_changed(True)
+        addon._on_sync_finished()
+
+        self.assertTrue(addon._media_sync_in_progress)
+        self.assertTrue(addon.backend.collection_access_blocked)
+        self.assertEqual(addon._host_activity_resume_timer.starts, [])
+
+        addon._on_media_sync_state_changed(False)
+        self.assertEqual(addon._host_activity_resume_timer.starts, [250])
+        addon._resume_after_host_collection_activity()
+
+        self.assertFalse(addon.backend.collection_access_blocked)
+        self.assertEqual(reconciles, [{}])
+
+    def test_media_only_sync_does_not_force_a_full_audit(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon._host_activity_resume_timer = _FakeTimer()
+        addon._post_review_resume_timer = _FakeTimer()
+        reconciles = []
+        addon.schedule_reconcile = lambda **kwargs: reconciles.append(kwargs)
+        addon._refresh_visible_card_states = lambda: None
+
+        addon._on_media_sync_state_changed(True)
+        self.assertTrue(addon.backend.collection_access_blocked)
+        addon._on_media_sync_state_changed(False)
+        self.assertTrue(addon._host_resume_pending)
+        addon._resume_after_host_collection_activity()
+
+        self.assertFalse(addon.backend.collection_access_blocked)
+        self.assertEqual(reconciles, [])
+
+    def test_media_sync_requeues_interrupted_collection_maintenance(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon._host_activity_resume_timer = _FakeTimer()
+        addon._post_review_resume_timer = _FakeTimer()
+        reconciles = []
+        addon.schedule_reconcile = lambda **kwargs: reconciles.append(kwargs)
+        addon._refresh_visible_card_states = lambda: None
+        self.assertTrue(addon.backend._begin_maintenance())
+        event = addon.backend._new_cancellation(kind="maintenance")
+
+        addon._on_media_sync_state_changed(True)
+
+        self.assertTrue(event.is_set())
+        self.assertTrue(addon._host_reconcile_pending)
+        addon.backend._end_maintenance()
+        addon._on_media_sync_state_changed(False)
+        addon._resume_after_host_collection_activity()
+
+        self.assertEqual(reconciles, [{}])
+
+    def test_stale_host_resume_cannot_reopen_gate_during_new_sync(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon._host_activity_resume_timer = _FakeTimer()
+        addon._on_sync_will_start()
+        addon._on_sync_finished()
+        prior_epoch = addon._host_resume_epoch
+
+        addon._on_sync_will_start()
+        self.assertGreater(addon._host_activity_epoch, prior_epoch)
+        addon._host_resume_epoch = prior_epoch
+        addon._resume_after_host_collection_activity()
+
+        self.assertTrue(addon._sync_in_progress)
+        self.assertTrue(addon.backend.collection_access_blocked)
+        self.assertTrue(addon.backend.background_maintenance_paused)
+
+    def test_direct_ui_host_panic_cancels_all_backend_work_once(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        semantic_query = addon.backend._new_cancellation(kind="semantic_query")
+        maintenance = addon.backend._new_cancellation(kind="maintenance")
+        errors = []
+        aborts = []
+        addon._show_error = errors.append
+        addon.backend.abort_semantic_runtime_now = (
+            lambda: aborts.append(True) or True
+        )
+        host_safety._HOST_BACKEND_QUARANTINED.set()
+        failure = host_safety.HostBackendUnavailable(
+            host_safety.HOST_BACKEND_RESTART_MESSAGE
+        )
+
+        addon._on_host_backend_failure(failure)
+        addon._on_host_backend_failure(failure)
+
+        self.assertTrue(semantic_query.is_set())
+        self.assertTrue(maintenance.is_set())
+        self.assertTrue(addon.backend.collection_access_blocked)
+        self.assertEqual(errors, [host_safety.HOST_BACKEND_RESTART_MESSAGE])
+        self.assertEqual(aborts, [True])
 
     def test_leaving_review_does_not_unpause_a_closed_collection(self) -> None:
         addon = controller.SmartSearchAddonController(
@@ -4164,6 +4841,38 @@ class ControllerTests(unittest.TestCase):
         addon._preview_preference_changed(False)
         self.assertGreaterEqual(timer.stop_count, 1)
         self.assertIsNone(addon._pending_preview_result)
+
+    def test_sync_gate_blocks_new_and_already_queued_auto_preview(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        result = contracts.SearchResult(note_id=7, card_ids=(71,))
+        addon._dialog = types.SimpleNamespace(
+            results=types.SimpleNamespace(
+                hasFocus=lambda: True,
+                current_result=lambda: result,
+            ),
+            set_preview_active=lambda _active: None,
+        )
+        addon._ui_controller = types.SimpleNamespace(
+            settings=types.SimpleNamespace(preview_enabled=True)
+        )
+        timer = _FakeTimer()
+        addon._preview_open_timer = timer
+
+        addon._initial_preview_requested(result)
+        self.assertEqual(timer.starts, [25])
+        addon._on_sync_will_start()
+
+        self.assertIsNone(addon._pending_preview_result)
+        self.assertGreaterEqual(timer.stop_count, 1)
+        with patch.object(addon, "_toggle_previewer") as toggle:
+            addon._open_pending_previewer()
+            addon._initial_preview_requested(result)
+        toggle.assert_not_called()
+        self.assertEqual(timer.starts, [25])
 
     def test_initial_preview_restores_results_when_launched_from_control(
         self,
@@ -4488,10 +5197,12 @@ class ControllerTests(unittest.TestCase):
         )
 
         addon._semantic_autostart_attempted_token = backend._context.token
+        addon._pending_browser_search = "is:due"
         addon._on_profile_will_close()
         self.assertEqual(semantic_timer.stop_count, 2)
         self.assertIsNone(addon._semantic_autostart_token)
         self.assertIsNone(addon._semantic_autostart_attempted_token)
+        self.assertIsNone(addon._pending_browser_search)
         self.assertTrue(backend.deactivated)
 
     def test_fresh_profile_setup_cancelled_by_review_is_restarted_afterward(self) -> None:
@@ -4527,6 +5238,23 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(rebuilds, [True])
         self.assertFalse(addon._initial_setup_deferred)
+
+    def test_late_cancelled_profile_activation_rearms_after_sync_resume(self) -> None:
+        addon = controller.SmartSearchAddonController(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        addon.backend = self.backend
+        addon._post_review_resume_timer = _FakeTimer()
+        addon._refresh_dialog = lambda: None
+        self.backend.deactivate_profile()
+        status = contracts.IndexStatus(contracts.IndexState.UNAVAILABLE)
+
+        addon._profile_activation_ready(status)
+
+        self.assertTrue(addon._initial_setup_deferred)
+        self.assertEqual(addon._post_review_resume_timer.starts, [250])
 
     def test_manual_semantic_install_schedules_automatic_index(self) -> None:
         status = contracts.IndexStatus(
@@ -5212,6 +5940,35 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(errors[0], "Select one note to create a copy.")
         self.assertIn("source note is no longer available", errors[1].lower())
 
+    def test_create_copy_contains_host_panic_while_opening_add_cards(self) -> None:
+        mw = _MainWindow()
+        addon = controller.SmartSearchAddonController(
+            mw,
+            bundle_root=self.bundle,
+            addon_module="smart_search_medical",
+        )
+        mw.col.notes[11] = types.SimpleNamespace(id=11)
+        mw.col.cards[101] = types.SimpleNamespace(
+            nid=11,
+            current_deck_id=lambda: 42,
+        )
+        PanicException = type(
+            "PanicException",
+            (BaseException,),
+            {"__module__": "pyo3_runtime"},
+        )
+        mw._open_new_or_legacy_dialog = lambda _name: (
+            _ for _ in ()
+        ).throw(PanicException())
+        errors = []
+        addon._show_error = errors.append
+        addon.backend.abort_semantic_runtime_now = lambda: True
+
+        addon._create_result_copy_after_save(11, (101,))
+
+        self.assertTrue(host_safety.host_backend_quarantined())
+        self.assertEqual(errors, [host_safety.HOST_BACKEND_RESTART_MESSAGE])
+
     def test_bury_success_updates_only_changed_cards_in_place(self) -> None:
         addon = controller.SmartSearchAddonController(
             _MainWindow(),
@@ -5810,6 +6567,138 @@ class ControllerTests(unittest.TestCase):
 
         self.assertEqual(callback_gate_attempts, [False])
         self.assertTrue(backend.begin_bundle_update())
+
+    def test_collection_query_contains_pyo3_panic_and_opens_sticky_circuit(self) -> None:
+        backend = controller.AnkiSearchBackend(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="677438639",
+        )
+        failures = []
+        notices = []
+        ran_after_failure = []
+        external_results = []
+        backend.set_host_backend_failure_callback(notices.append)
+
+        class QueryOp:
+            def __init__(self, *, parent, op, success):
+                del parent
+                self.op = op
+                self.success = success
+                self.failure_callback = None
+                self.collection_free = False
+
+            def failure(self, callback):
+                self.failure_callback = callback
+                return self
+
+            def without_collection(self):
+                self.collection_free = True
+                return self
+
+            def run_in_background(self):
+                try:
+                    result = self.op(None if self.collection_free else backend.mw.col)
+                except Exception as error:
+                    self.failure_callback(error)
+                else:
+                    self.success(result)
+
+        PanicException = type(
+            "PanicException",
+            (BaseException,),
+            {"__module__": "pyo3_runtime"},
+        )
+        aqt_module = types.ModuleType("aqt")
+        aqt_module.__path__ = []
+        operations_module = types.ModuleType("aqt.operations")
+        operations_module.QueryOp = QueryOp
+        with patch.dict(
+            sys.modules,
+            {"aqt": aqt_module, "aqt.operations": operations_module},
+        ):
+            backend._run_query_op(
+                uses_collection=True,
+                op=lambda _collection: (_ for _ in ()).throw(PanicException()),
+                success=lambda _result: self.fail("panic reported success"),
+                failure=failures.append,
+            )
+            backend._run_query_op(
+                uses_collection=True,
+                op=lambda _collection: ran_after_failure.append(True),
+                success=lambda _result: self.fail("quarantined op ran"),
+                failure=failures.append,
+            )
+            backend._run_query_op(
+                uses_collection=False,
+                op=lambda _collection: "external-ok",
+                success=external_results.append,
+                failure=lambda error: self.fail(str(error)),
+            )
+
+        self.assertTrue(host_safety.host_backend_quarantined())
+        self.assertEqual(len(failures), 2)
+        self.assertTrue(
+            all(
+                isinstance(error, host_safety.HostBackendUnavailable)
+                for error in failures
+            )
+        )
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(ran_after_failure, [])
+        self.assertEqual(external_results, ["external-ok"])
+        self.assertEqual(backend._background_op_count, 0)
+
+    def test_collection_query_rechecks_sync_gate_inside_queued_worker(self) -> None:
+        backend = controller.AnkiSearchBackend(
+            _MainWindow(),
+            bundle_root=self.bundle,
+            addon_module="677438639",
+        )
+        pending = []
+        failures = []
+
+        class QueryOp:
+            def __init__(self, *, parent, op, success):
+                del parent
+                self.op = op
+                self.success = success
+                self.failure_callback = None
+
+            def failure(self, callback):
+                self.failure_callback = callback
+                return self
+
+            def without_collection(self):
+                return self
+
+            def run_in_background(self):
+                pending.append(self)
+
+        aqt_module = types.ModuleType("aqt")
+        aqt_module.__path__ = []
+        operations_module = types.ModuleType("aqt.operations")
+        operations_module.QueryOp = QueryOp
+        with patch.dict(
+            sys.modules,
+            {"aqt": aqt_module, "aqt.operations": operations_module},
+        ):
+            backend._run_query_op(
+                uses_collection=True,
+                op=lambda _collection: "must-not-run",
+                success=lambda _result: self.fail("paused op reported success"),
+                failure=failures.append,
+            )
+            operation = pending.pop()
+            backend.set_collection_access_paused(True)
+            try:
+                operation.op(backend.mw.col)
+            except Exception as error:
+                operation.failure_callback(error)
+
+        self.assertEqual(len(failures), 1)
+        self.assertIsInstance(failures[0], controller._CollectionAccessPaused)
+        self.assertEqual(backend._background_op_count, 0)
 
     def test_bundle_update_quiesce_closes_profile_owned_files(self) -> None:
         backend = _SynchronousBackend(

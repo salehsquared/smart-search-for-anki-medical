@@ -1,5 +1,121 @@
 # Changelog
 
+## [1.0.35] — 2026-08-16
+
+### Added
+
+- Right-clicking the Smart Search query field now keeps Anki's standard text
+  menu and adds **Search in Anki Browser** as the final action.
+
+### Changed
+
+- The Browser handoff saves and detaches an active inline editor, rechecks
+  collection safety after the save, and opens the query through Anki's managed
+  Browser. Smart Search remains unchanged.
+
+## [1.0.34] — 2026-08-16
+
+### Changed
+
+- **Suspended only** now sits at the natural left edge of the filter row and
+  uses the same compact visual language as the active filter chips.
+- Its checkbox stays visible in both states, keeps a stable width when toggled,
+  and has clear hover, keyboard-focus, disabled, light, and dark appearances.
+
+## [1.0.33] — 2026-08-15
+
+### Added
+
+- The main search window now has a compact **Suspended only** checkbox below
+  the query field. It adds or removes Anki's visible `is:suspended` filter in
+  Smart, Exact, and Semantic modes.
+
+### Changed
+
+- Complex, negated, quoted, incomplete, or version-dependent suspension
+  expressions remain untouched and disable the quick control. Safe edits
+  preserve the rest of the query, cancel stale results, and submit once.
+
+## [1.0.32] — 2026-08-15
+
+### Changed
+
+- The deck picker now shows a compact **Clear default** button whenever a
+  default deck is saved, including when that deck is currently selected.
+
+## [1.0.31] — 2026-08-15
+
+### Changed
+
+- The deck picker now uses one compact **Set as default deck** checkbox instead
+  of a large default-deck settings panel. The saved-deck behavior and
+  profile-specific safety rules are unchanged.
+
+## [1.0.30] — 2026-08-15
+
+### Added
+
+- The main deck picker can save one regular deck as the profile-specific
+  default for new Smart Search windows. The preference follows deck renames by
+  stable Anki deck ID and is easy to clear back to All decks.
+
+### Changed
+
+- A saved default is applied once only to a fresh, blank Smart Search launch.
+  Browser search handoffs, typed queries, filtered decks, custom expressions,
+  multi-deck scopes, and one-off deck choices are never silently rewritten.
+
+## [1.0.29] — 2026-08-15
+
+### Changed
+
+- The Anki Browser handoff now uses an original emerald magnifier-plus mark.
+  It remains compact inside the search field, but is easier to identify than
+  the plain native magnifier in both light and dark themes.
+
+## [1.0.28] — 2026-08-15
+
+### Added
+
+- Anki's Browser search field now has a compact leading magnifier that opens
+  the visible Browser query directly in Smart Search.
+
+### Changed
+
+- Browser handoffs keep the user's current Smart, Exact, or Semantic mode and
+  submit the transferred query exactly once. The latest click is retained
+  while a cold profile index opens.
+- An empty Browser query now clears Smart Search and cancels an older request,
+  so a late result cannot replace the Help view.
+
+## [1.0.27] — 2026-08-10
+
+### Fixed
+
+- Smart Search now closes its collection-access gate before Anki queues a
+  collection or media sync. Queued add-on work rechecks the gate inside its
+  worker, and maintenance resumes only after sync, media sync, temporary
+  collection replacement, and Anki's deferred reset have all finished.
+- A PyO3-wrapped Rust backend panic from an add-on collection call is now
+  converted to one normal restart-required error. A process-lifetime circuit
+  breaker cancels add-on work and prevents every later Smart Search collection
+  read, preview, editor action, or mutation from touching a poisoned backend.
+- Interrupted Semantic vector-file growth now trims only the uncommitted tail
+  recorded beyond SQLite's committed capacity, so a killed helper can retry
+  without leaving Semantic Search in a repair loop.
+
+### Changed
+
+- Embedding, NumPy vector writes, and vector search now all run in the bounded,
+  disposable Semantic worker. Anki's process receives validated plain results
+  and no longer imports any native Semantic package.
+- The obsolete Python 3.9 host NumPy payload and derived host-vector runtimes
+  were removed. Existing derived copies are deleted only after the isolated
+  worker runtime verifies successfully.
+- A host-backend panic fails Smart Search closed for the rest of that Anki
+  process and stops the optional Semantic helper. Restarting Anki creates a
+  fresh host backend; Smart Search never retries against a poisoned one.
+
 ## [1.0.26] — 2026-08-10
 
 ### Fixed

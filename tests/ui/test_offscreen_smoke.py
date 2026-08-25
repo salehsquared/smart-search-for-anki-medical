@@ -16,6 +16,7 @@ try:
         Correction,
         DeckCatalog,
         DeckEntry,
+        DefaultDeckRef,
         FilterChip,
         HighlightSpan,
         IndexState,
@@ -61,6 +62,7 @@ class _HeldSearchBackend:
         *,
         submit_error: Exception | None = None,
         synchronous_error: str | None = None,
+        settings: UISettings | None = None,
     ) -> None:
         self.status = IndexStatus(
             IndexState.READY,
@@ -81,9 +83,10 @@ class _HeldSearchBackend:
         self.semantic_abort_count = 0
         self.status_reads = 0
         self.saved_settings = []
+        self.settings = settings or UISettings()
 
     def load_settings(self):
-        return UISettings()
+        return self.settings
 
     def save_settings(self, settings) -> None:
         self.saved_settings.append(settings)
@@ -141,6 +144,308 @@ class OffscreenSmokeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_suspended_only_control_is_compact_and_aligned_with_query(self) -> None:
+        dialog = SearchDialog()
+        dialog.resize(760, 520)
+        dialog.show()
+        self.app.processEvents()
+
+        control = dialog.suspended_only
+        control_left = control.mapTo(dialog, control.rect().topLeft()).x()
+        group_left = dialog.search_group.mapTo(
+            dialog, dialog.search_group.rect().topLeft()
+        ).x()
+        search_left = dialog.search.mapTo(dialog, dialog.search.rect().topLeft()).x()
+        self.assertEqual(control.text(), "Suspended only")
+        self.assertEqual(control.accessibleName(), "Show suspended cards only")
+        self.assertTrue(control.isVisibleTo(dialog))
+        # The pill starts the full-width filter row: flush with the compound
+        # deck/search group, never indented under the search field.
+        self.assertLessEqual(abs(control_left - group_left), 2)
+        self.assertLess(control_left, search_left)
+        self.assertLess(control.sizeHint().width(), 160)
+        self.assertEqual(control.sizeHint().height(), 36)
+        initial_top = control.mapTo(dialog, QPoint(0, 0)).y()
+        initial_size = control.size()
+
+        unchecked = control.grab().toImage()
+        cy = unchecked.height() // 2
+        # Rounded pill: the corner pixels show the row behind, the top edge
+        # carries a border, and the interior is filled.
+        self.assertNotEqual(
+            unchecked.pixelColor(0, 0),
+            unchecked.pixelColor(unchecked.width() // 2, 1),
+        )
+        # The left padding stays clear of both text and the check mark, so
+        # it samples the pill fill in every state.
+        off_fill = unchecked.pixelColor(5, cy)
+        indicator_colors = {
+            unchecked.pixelColor(x, y).rgba()
+            for x in range(12, 30)
+            for y in range(max(0, cy - 9), min(unchecked.height(), cy + 9))
+        }
+        self.assertGreater(len(indicator_colors), 2)
+
+        hint_off = control.sizeHint().width()
+        control.setChecked(True)
+        control.update()
+        self.app.processEvents()
+        checked = control.grab().toImage()
+        # The on state reads active without shifting the chips beside it.
+        self.assertNotEqual(off_fill, checked.pixelColor(5, cy))
+        self.assertEqual(control.sizeHint().width(), hint_off)
+        accent = control.palette().color(QPalette.ColorRole.Highlight)
+        mark_visible = any(
+            checked.pixelColor(x, y) == accent
+            for x in range(6, 26)
+            for y in range(max(0, cy - 8), min(checked.height(), cy + 8))
+        )
+        self.assertTrue(mark_visible)
+
+        control.setChecked(False)
+        control.setEnabled(False)
+        control.update()
+        self.app.processEvents()
+        disabled = control.grab().toImage()
+        self.assertNotEqual(off_fill, disabled.pixelColor(5, cy))
+        control.setEnabled(True)
+
+        control.clearFocus()
+        self.app.processEvents()
+        unfocused = control.grab().toImage()
+        control.setFocus()
+        self.app.processEvents()
+        focused = control.grab().toImage()
+        border_changed = any(
+            focused.pixelColor(x, 0) != unfocused.pixelColor(x, 0)
+            for x in range(focused.width())
+        )
+        self.assertTrue(border_changed)
+
+        # Space toggles the checkable pill exactly once per key press.
+        QTest.keyClick(control, Qt.Key.Key_Space)
+        self.app.processEvents()
+        self.assertTrue(control.isChecked())
+        self.assertEqual(dialog.query(), "is:suspended")
+        QTest.keyClick(control, Qt.Key.Key_Space)
+        self.app.processEvents()
+        self.assertFalse(control.isChecked())
+        self.assertEqual(dialog.query(), "")
+
+        # A chip must not resize or vertically move the quick-filter control.
+        dialog.set_query_text("tag:cardio")
+        dialog.show_response(
+            SearchResponse(
+                request_id=91,
+                query="tag:cardio",
+                results=(),
+                active_filters=(FilterChip("tag", "cardio"),),
+                total_results=0,
+            ),
+            (),
+        )
+        self.app.processEvents()
+        self.assertTrue(dialog.chip_bar.isVisibleTo(dialog))
+        self.assertEqual(control.mapTo(dialog, QPoint(0, 0)).y(), initial_top)
+        self.assertEqual(control.size(), initial_size)
+
+        dialog.resize(1040, 520)
+        self.app.processEvents()
+        wide_group_left = dialog.search_group.mapTo(dialog, QPoint(0, 0)).x()
+        wide_control_left = control.mapTo(dialog, QPoint(0, 0)).x()
+        self.assertLessEqual(abs(wide_control_left - wide_group_left), 2)
+        self.assertEqual(control.size(), initial_size)
+        dialog.deleteLater()
+
+    def test_suspended_only_click_submits_once_and_empty_clear_cancels(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            dialog.suspended_only.click()
+
+            self.assertTrue(dialog.suspended_only.isChecked())
+            self.assertEqual(dialog.query(), "is:suspended")
+            self.assertEqual(
+                [request.query for request in backend.requests],
+                ["is:suspended"],
+            )
+            stale_success = backend.callbacks[0][0]
+
+            dialog.suspended_only.click()
+
+            self.assertFalse(dialog.suspended_only.isChecked())
+            self.assertEqual(dialog.query(), "")
+            self.assertEqual(len(backend.requests), 1)
+            self.assertEqual(backend.cancel_count, 1)
+            self.assertEqual(dialog.results.results_model().count(), 0)
+            stale_success(
+                SearchResponse(
+                    request_id=backend.requests[0].request_id,
+                    query="is:suspended",
+                    results=(SearchResult(note_id=99, title="Stale"),),
+                    total_results=1,
+                )
+            )
+            self.app.processEvents()
+            self.assertEqual(dialog.results.results_model().count(), 0)
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_suspended_only_stops_armed_debounce_before_one_search(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            dialog.search.setText("bupropion")
+            dialog._on_text_edited("bupropion")
+            self.assertTrue(dialog._debounce.isActive())
+
+            dialog.suspended_only.click()
+            QTest.qWait(200)
+
+            self.assertFalse(dialog._debounce.isActive())
+            self.assertEqual(dialog.query(), "bupropion is:suspended")
+            self.assertEqual(len(backend.requests), 1)
+            self.assertEqual(
+                backend.requests[0].query,
+                "bupropion is:suspended",
+            )
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_suspended_only_never_truncates_a_query_at_field_limit(self) -> None:
+        for maximum, original in ((20, "x" * 20), (16, "😀😀")):
+            with self.subTest(maximum=maximum, original=original):
+                backend = _HeldSearchBackend()
+                dialog = SearchDialog()
+                controller = SearchController(backend, dialog)
+                try:
+                    dialog.search.setMaxLength(maximum)
+                    dialog.set_query_text(original)
+
+                    dialog.suspended_only.click()
+
+                    self.assertEqual(dialog.query(), original)
+                    self.assertFalse(dialog.suspended_only.isChecked())
+                    self.assertEqual(backend.requests, [])
+                    self.assertIn("too long", dialog.summary.text().casefold())
+                finally:
+                    controller.dispose()
+                    dialog.deleteLater()
+
+    def test_browser_handoff_syncs_suspension_control_without_rewriting(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            positive = "IS:suspended tag:marked"
+            self.assertTrue(controller.replace_and_submit(positive))
+            self.assertEqual(dialog.query(), positive)
+            self.assertTrue(dialog.suspended_only.isChecked())
+            self.assertTrue(dialog.suspended_only.isEnabled())
+
+            negative = "-is:suspended tag:marked"
+            self.assertTrue(controller.replace_and_submit(negative))
+            self.assertEqual(dialog.query(), negative)
+            self.assertFalse(dialog.suspended_only.isChecked())
+            self.assertFalse(dialog.suspended_only.isEnabled())
+            self.assertEqual(
+                [request.query for request in backend.requests],
+                [positive, negative],
+            )
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_custom_suspension_syntax_is_disabled_and_never_dispatches(self) -> None:
+        for query in (
+            "flag:",
+            "foo AND",
+            "foo\tis:suspended",
+            'foo"is:suspended"',
+            '"foo"AND',
+            'field:"x"AND',
+            "-is:suspended",
+        ):
+            with self.subTest(query=query):
+                dialog = SearchDialog()
+                requested: list[str] = []
+                dialog.searchRequested.connect(requested.append)
+                dialog.set_query_text(query)
+
+                self.assertFalse(dialog.suspended_only.isEnabled())
+                dialog.suspended_only.click()
+
+                self.assertEqual(dialog.query(), query)
+                self.assertEqual(requested, [])
+                dialog.deleteLater()
+
+    def test_suspension_intent_disarms_late_default_deck(self) -> None:
+        backend = _HeldSearchBackend(
+            settings=UISettings(default_deck=DefaultDeckRef(2, "Cardiology"))
+        )
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            self.assertTrue(controller.start_default_deck_session())
+            dialog.suspended_only.click()
+            backend.deck_callbacks[-1][0](
+                DeckCatalog((DeckEntry(2, "Cardiology"),), 2)
+            )
+            self.app.processEvents()
+
+            self.assertEqual(dialog.query(), "is:suspended")
+            self.assertEqual(
+                [request.query for request in backend.requests],
+                ["is:suspended"],
+            )
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_suspension_filter_uses_checkbox_instead_of_duplicate_chip(self) -> None:
+        dialog = SearchDialog()
+        dialog.set_query_text("is:suspended tag:cardio")
+        dialog.show_response(
+            SearchResponse(
+                request_id=1,
+                query=dialog.query(),
+                results=(),
+                active_filters=(
+                    FilterChip("is", "suspended"),
+                    FilterChip("tag", "cardio"),
+                ),
+            ),
+            (),
+        )
+
+        self.assertTrue(dialog.suspended_only.isChecked())
+        self.assertEqual(dialog.chip_bar._layout.count(), 2)
+        dialog.deleteLater()
+
+    def test_suspended_only_stays_available_in_each_mode_and_obeys_busy_state(self) -> None:
+        dialog = SearchDialog()
+        dialog.show_status(
+            IndexStatus(
+                IndexState.READY,
+                semantic=SemanticStatus(SemanticState.READY),
+            )
+        )
+        for mode in SearchMode:
+            with self.subTest(mode=mode):
+                dialog.set_mode(mode)
+                self.assertFalse(dialog.suspended_only.isHidden())
+                self.assertTrue(dialog.suspended_only.isEnabled())
+
+        dialog.set_batch_action_busy(True)
+        self.assertFalse(dialog.suspended_only.isEnabled())
+        dialog.set_batch_action_busy(False)
+        self.assertTrue(dialog.suspended_only.isEnabled())
+        dialog.deleteLater()
+
     def test_dialog_renders_results_and_semantic_setup_state(self) -> None:
         dialog = SearchDialog()
         dialog.show_status(
@@ -180,6 +485,88 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(opened[0][0].note_id, 42)
         dialog.deleteLater()
 
+    def test_browser_handoff_replaces_query_once_in_current_mode(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        query = 'deck:"Step 2" is:due -is:suspended'
+        try:
+            dialog.set_mode(SearchMode.EXACT)
+            self.assertTrue(controller.replace_and_submit(query))
+
+            self.assertEqual(dialog.query(), query)
+            self.assertEqual(len(backend.requests), 1)
+            self.assertEqual(backend.requests[0].query, dialog.query())
+            self.assertIs(backend.requests[0].mode, SearchMode.EXACT)
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_browser_handoff_empty_query_cancels_late_result(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            controller.replace_and_submit("bupropion")
+            request = backend.requests[0]
+            on_success, _on_error = backend.callbacks[0]
+
+            self.assertTrue(controller.replace_and_submit(""))
+            self.assertEqual(dialog.query(), "")
+            self.assertEqual(backend.cancel_count, 1)
+            self.assertEqual(dialog.results.results_model().count(), 0)
+
+            on_success(
+                SearchResponse(
+                    request_id=request.request_id,
+                    query=request.query,
+                    results=(SearchResult(note_id=42, title="Late result"),),
+                    total_results=1,
+                )
+            )
+            self.app.processEvents()
+
+            self.assertEqual(dialog.results.results_model().count(), 0)
+            self.assertEqual(dialog.query(), "")
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_browser_handoff_resets_literal_and_correction_state(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        correction = Correction("buproprion", "bupropion")
+        try:
+            controller._last_query = "bupropion"
+            controller._force_literal = True
+            controller._dismissed.add(correction)
+
+            self.assertTrue(controller.replace_and_submit("bupropion"))
+
+            self.assertFalse(controller._force_literal)
+            self.assertEqual(controller._dismissed, set())
+            self.assertFalse(backend.requests[-1].literal)
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
+    def test_browser_handoff_rejects_a_query_too_long_for_the_field(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        try:
+            query = "x" * (dialog.search.maxLength() + 1)
+
+            self.assertFalse(controller.replace_and_submit(query))
+
+            self.assertEqual(backend.requests, [])
+            self.assertNotEqual(dialog.query(), query)
+            self.assertIn("too long", dialog.message_label.text())
+        finally:
+            controller.dispose()
+            dialog.deleteLater()
+
     def test_deck_picker_applies_one_visible_query_and_search(self) -> None:
         backend = _HeldSearchBackend()
         dialog = SearchDialog()
@@ -215,6 +602,286 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.assertEqual(backend.requests[0].query, dialog.query())
         controller.deleteLater()
         dialog.deleteLater()
+
+    def test_fresh_blank_session_applies_one_resolved_default_deck(self) -> None:
+        backend = _HeldSearchBackend(
+            settings=UISettings(
+                default_deck=DefaultDeckRef(2, "Old deck name")
+            )
+        )
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+
+        self.assertTrue(controller.start_default_deck_session())
+        self.assertEqual(len(backend.deck_callbacks), 1)
+        backend.deck_callbacks[-1][0](
+            DeckCatalog(
+                decks=(DeckEntry(2, "Medicine::Cardiology"),),
+                current_deck_id=2,
+            )
+        )
+        self.app.processEvents()
+
+        self.assertEqual(dialog.query().strip(), 'deck:"Medicine::Cardiology"')
+        self.assertEqual(dialog.search.cursorPosition(), len(dialog.query()))
+        self.assertEqual(len(backend.requests), 1)
+        self.assertEqual(
+            backend.requests[0].query,
+            'deck:"Medicine::Cardiology"',
+        )
+        self.assertEqual(
+            controller.settings.default_deck,
+            DefaultDeckRef(2, "Medicine::Cardiology"),
+        )
+        self.assertEqual(len(backend.saved_settings), 1)
+        self.assertFalse(controller.start_default_deck_session())
+        self.assertEqual(len(backend.requests), 1)
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_late_default_catalog_never_overwrites_typing_or_browser_handoff(self) -> None:
+        settings = UISettings(default_deck=DefaultDeckRef(2, "Cardiology"))
+        catalog = DeckCatalog((DeckEntry(2, "Cardiology"),), 2)
+
+        typed_backend = _HeldSearchBackend(settings=settings)
+        typed_dialog = SearchDialog()
+        typed_controller = SearchController(typed_backend, typed_dialog)
+        typed_controller.start_default_deck_session()
+        typed_dialog.search.setText("bupropion")
+        typed_dialog.queryEdited.emit("bupropion")
+        typed_backend.deck_callbacks[-1][0](catalog)
+        self.app.processEvents()
+        self.assertEqual(typed_dialog.query(), "bupropion")
+        self.assertEqual(typed_backend.requests, [])
+        typed_controller.dispose()
+        typed_dialog.deleteLater()
+
+        browser_backend = _HeldSearchBackend(settings=settings)
+        browser_dialog = SearchDialog()
+        browser_controller = SearchController(browser_backend, browser_dialog)
+        browser_controller.start_default_deck_session()
+        self.assertTrue(browser_controller.replace_and_submit("tag:marked"))
+        browser_backend.deck_callbacks[-1][0](catalog)
+        self.app.processEvents()
+        self.assertEqual(browser_dialog.query(), "tag:marked")
+        self.assertEqual(
+            [request.query for request in browser_backend.requests],
+            ["tag:marked"],
+        )
+        browser_controller.dispose()
+        browser_dialog.deleteLater()
+
+        empty_backend = _HeldSearchBackend(settings=settings)
+        empty_dialog = SearchDialog()
+        empty_controller = SearchController(empty_backend, empty_dialog)
+        empty_controller.start_default_deck_session()
+        self.assertTrue(empty_controller.replace_and_submit(""))
+        empty_backend.deck_callbacks[-1][0](catalog)
+        self.app.processEvents()
+        self.assertEqual(empty_dialog.query(), "")
+        self.assertEqual(empty_backend.requests, [])
+        empty_controller.dispose()
+        empty_dialog.deleteLater()
+
+    def test_default_picker_intent_persists_without_applying_current_query(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("bupropion")
+        dialog.defaultDeckRequested.emit(DeckEntry(7, "Medicine"))
+
+        self.assertEqual(
+            controller.settings.default_deck,
+            DefaultDeckRef(7, "Medicine"),
+        )
+        self.assertEqual(len(backend.saved_settings), 1)
+        self.assertEqual(backend.requests, [])
+        self.assertEqual(dialog.query(), "bupropion")
+        self.assertEqual(
+            dialog.deck_picker.default_deck,
+            DefaultDeckRef(7, "Medicine"),
+        )
+
+        self.assertFalse(dialog.deck_picker.clear_default_button.isHidden())
+        self.assertEqual(
+            dialog.deck_picker.clear_default_button.text(),
+            "Clear default",
+        )
+        dialog.deck_picker.clear_default_button.click()
+        self.assertIsNone(controller.settings.default_deck)
+        self.assertEqual(len(backend.saved_settings), 2)
+        self.assertEqual(backend.requests, [])
+        self.assertEqual(dialog.query(), "bupropion")
+        self.assertTrue(dialog.deck_picker.clear_default_button.isHidden())
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_default_picker_save_failure_rolls_back_without_searching(self) -> None:
+        original = DefaultDeckRef(3, "Original")
+        backend = _HeldSearchBackend(
+            settings=UISettings(default_deck=original)
+        )
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.deck_picker.set_query('deck:"Original"')
+        dialog.deck_picker.set_catalog(
+            DeckCatalog(
+                (
+                    DeckEntry(3, "Original"),
+                    DeckEntry(4, "Replacement"),
+                ),
+                3,
+            )
+        )
+        dialog.deck_picker.show()
+        self.app.processEvents()
+
+        def fail_save(_settings) -> None:
+            raise OSError("disk full")
+
+        backend.save_settings = fail_save
+        self.assertTrue(dialog.deck_picker.default_checkbox.isChecked())
+        self.assertFalse(dialog.deck_picker.clear_default_button.isHidden())
+        dialog.deck_picker.clear_default_button.click()
+
+        self.assertEqual(controller.settings.default_deck, original)
+        self.assertEqual(dialog.deck_picker.default_deck, original)
+        self.assertTrue(dialog.deck_picker.default_checkbox.isChecked())
+        self.assertFalse(dialog.deck_picker.clear_default_button.isHidden())
+        self.assertIn("could not be saved", dialog.deck_picker.message_label.text())
+        self.assertEqual(backend.requests, [])
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_failed_new_default_restores_unchecked_checkbox(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.deck_picker.set_query('deck:"Replacement"')
+        dialog.deck_picker.set_catalog(
+            DeckCatalog((DeckEntry(4, "Replacement"),), 4)
+        )
+        dialog.deck_picker.show()
+        self.app.processEvents()
+        save_settings = backend.save_settings
+
+        def fail_save(_settings) -> None:
+            raise OSError("disk full")
+
+        backend.save_settings = fail_save
+
+        self.assertFalse(dialog.deck_picker.default_checkbox.isChecked())
+        dialog.deck_picker.default_checkbox.click()
+
+        self.assertIsNone(controller.settings.default_deck)
+        self.assertFalse(dialog.deck_picker.default_checkbox.isChecked())
+        self.assertIn("could not be saved", dialog.deck_picker.message_label.text())
+        self.assertEqual(backend.requests, [])
+
+        backend.save_settings = save_settings
+        dialog.deck_picker.default_checkbox.click()
+        self.assertEqual(
+            controller.settings.default_deck,
+            DefaultDeckRef(4, "Replacement"),
+        )
+        self.assertTrue(dialog.deck_picker.default_checkbox.isChecked())
+        self.assertTrue(dialog.deck_picker.message_label.isHidden())
+        self.assertEqual(backend.requests, [])
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_default_save_preserves_unrelated_catalog_refresh_warning(self) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.deck_picker.set_query('deck:"Medicine"')
+        dialog.deck_picker.set_catalog(
+            DeckCatalog((DeckEntry(7, "Medicine"),), 7)
+        )
+        dialog.deck_picker.set_refresh_error("offline")
+        dialog.deck_picker.show()
+        self.app.processEvents()
+
+        dialog.deck_picker.default_checkbox.click()
+
+        self.assertEqual(
+            controller.settings.default_deck,
+            DefaultDeckRef(7, "Medicine"),
+        )
+        self.assertTrue(dialog.deck_picker.default_checkbox.isChecked())
+        self.assertIn("could not be refreshed", dialog.deck_picker.message_label.text())
+        self.assertFalse(dialog.deck_picker.retry_button.isHidden())
+        self.assertEqual(backend.requests, [])
+        controller.dispose()
+        dialog.deleteLater()
+
+    def test_missing_or_filtered_saved_default_fails_closed_to_all_decks(self) -> None:
+        for entry in (None, DeckEntry(9, "Filtered", filtered=True)):
+            with self.subTest(entry=entry):
+                backend = _HeldSearchBackend(
+                    settings=UISettings(
+                        default_deck=DefaultDeckRef(9, "Saved deck")
+                    )
+                )
+                dialog = SearchDialog()
+                controller = SearchController(backend, dialog)
+                controller.start_default_deck_session()
+                backend.deck_callbacks[-1][0](
+                    DeckCatalog(() if entry is None else (entry,), None)
+                )
+                self.app.processEvents()
+
+                self.assertEqual(dialog.query(), "")
+                self.assertEqual(backend.requests, [])
+                self.assertIn(
+                    "unavailable",
+                    dialog.deck_picker.default_checkbox.toolTip().casefold(),
+                )
+                controller.dispose()
+                dialog.deleteLater()
+
+    def test_clearing_seeded_default_cancels_its_held_search(self) -> None:
+        catalog = DeckCatalog((DeckEntry(2, "Cardiology"),), 2)
+
+        for clear_with_escape in (False, True):
+            with self.subTest(clear_with_escape=clear_with_escape):
+                backend = _HeldSearchBackend(
+                    settings=UISettings(
+                        default_deck=DefaultDeckRef(2, "Cardiology")
+                    )
+                )
+                dialog = SearchDialog()
+                controller = SearchController(backend, dialog)
+                controller.start_default_deck_session()
+                backend.deck_callbacks[-1][0](catalog)
+                self.app.processEvents()
+                self.assertEqual(len(backend.requests), 1)
+                stale_success = backend.callbacks[-1][0]
+
+                if clear_with_escape:
+                    dialog.show()
+                    QTest.keyClick(dialog, Qt.Key.Key_Escape)
+                else:
+                    dialog.deck_picker.set_query(dialog.query())
+                    dialog.deck_picker.set_catalog(catalog)
+                    dialog.deck_picker._choose_all()
+                    dialog.deck_picker._apply()
+                self.app.processEvents()
+
+                self.assertEqual(dialog.query(), "")
+                self.assertEqual(backend.cancel_count, 1)
+                stale_success(
+                    SearchResponse(
+                        request_id=backend.requests[0].request_id,
+                        query='deck:"Cardiology"',
+                        results=(SearchResult(note_id=99, title="Stale"),),
+                        total_results=1,
+                    )
+                )
+                self.app.processEvents()
+                self.assertEqual(dialog.results.results_model().count(), 0)
+                controller.dispose()
+                dialog.deleteLater()
 
     def test_controller_forwards_bury_and_change_deck_intents(self) -> None:
         backend = _HeldSearchBackend()
@@ -1277,6 +1944,200 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller.deleteLater()
         dialog.deleteLater()
 
+    def test_query_field_menu_keeps_standard_actions_and_adds_one_command(
+        self,
+    ) -> None:
+        dialog = SearchDialog()
+        dialog.search.setText("heart failure")
+
+        menu = dialog.search.build_context_menu()
+        standard = dialog.search.createStandardContextMenu()
+        actions = menu.actions()
+        standard_actions = standard.actions()
+
+        # Every native edit action remains, followed by exactly one
+        # separator and one new command.
+        self.assertEqual(len(actions), len(standard_actions) + 2)
+        self.assertEqual(
+            [a.text() for a in actions[:-2]],
+            [a.text() for a in standard_actions],
+        )
+        self.assertTrue(actions[-2].isSeparator())
+        command = actions[-1]
+        self.assertEqual(command.text(), "Search in Anki Browser")
+        self.assertEqual(command.objectName(), "searchFieldNativeBrowserAction")
+        duplicates = [
+            a
+            for a in actions
+            if a.objectName() == "searchFieldNativeBrowserAction"
+        ]
+        self.assertEqual(len(duplicates), 1)
+        self.assertIn("native Browser", command.statusTip())
+        self.assertIn("native Browser", command.toolTip())
+        self.assertTrue(command.isEnabled())
+        persistent_actions = len(dialog.search.actions())
+        menu.deleteLater()
+        standard.deleteLater()
+        second = dialog.search.build_context_menu()
+        self.assertEqual(
+            len(
+                [
+                    action
+                    for action in second.actions()
+                    if action.objectName()
+                    == "searchFieldNativeBrowserAction"
+                ]
+            ),
+            1,
+        )
+        self.assertEqual(len(dialog.search.actions()), persistent_actions)
+        second.deleteLater()
+        dialog.deleteLater()
+
+    def test_query_field_menu_browser_command_supports_blank_query_and_state(
+        self,
+    ) -> None:
+        dialog = SearchDialog()
+        for blank in ("", "   ", " \t\n "):
+            dialog.search.setText(blank)
+            menu = dialog.search.build_context_menu()
+            command = menu.actions()[-1]
+            self.assertTrue(command.isEnabled())
+            menu.deleteLater()
+        dialog.search.setEnabled(False)
+        menu = dialog.search.build_context_menu()
+        self.assertFalse(menu.actions()[-1].isEnabled())
+        menu.deleteLater()
+        dialog.deleteLater()
+
+    def test_query_field_browser_command_forwards_exact_query_once(
+        self,
+    ) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        result = SearchResult(note_id=5, title="Café")
+        query = 'deck:"Med::Cardio"  notetype:Cloze café AND (tag:x OR "heart failure")'
+        dialog.set_mode(SearchMode.EXACT)
+        dialog.search.setText(query)
+        dialog.show_response(
+            SearchResponse(
+                request_id=1,
+                query=query,
+                results=(result,),
+                total_results=1,
+            ),
+            (),
+        )
+        dialog.results.results_model().set_checked(0, True)
+        opened: list[str] = []
+        controller.set_native_search_opener(opened.append)
+
+        dialog.search.setSelection(6, 13)
+        selection = (
+            dialog.search.selectionStart(),
+            dialog.search.selectedText(),
+            dialog.search.cursorPosition(),
+        )
+
+        class _ContextEvent:
+            accepted = False
+
+            @staticmethod
+            def globalPos():
+                return QPoint(10, 10)
+
+            def accept(self) -> None:
+                self.accepted = True
+
+        event = _ContextEvent()
+        dialog.search._execute_context_menu = (
+            lambda menu, _position: menu.actions()[-1]
+        )
+        dialog.search.contextMenuEvent(event)
+
+        self.assertEqual(opened, [query])
+        self.assertTrue(event.accepted)
+        # Query, mode, results, and checked selection are untouched.
+        self.assertEqual(dialog.query(), query)
+        self.assertEqual(
+            (
+                dialog.search.selectionStart(),
+                dialog.search.selectedText(),
+                dialog.search.cursorPosition(),
+            ),
+            selection,
+        )
+        self.assertIs(dialog.segmented.mode(), SearchMode.EXACT)
+        self.assertEqual(dialog.results.results_model().count(), 1)
+        self.assertEqual(
+            dialog.results.results_model().checked_results(),
+            (result,),
+        )
+        self.assertEqual(backend.requests, [])
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_query_field_browser_command_opener_is_optional_fail_soft(
+        self,
+    ) -> None:
+        backend = _HeldSearchBackend()
+        dialog = SearchDialog()
+        controller = SearchController(backend, dialog)
+        dialog.search.setText("heart failure")
+        controller.open_native_search("heart failure")
+        self.assertEqual(dialog.query(), "heart failure")
+        self.assertEqual(backend.requests, [])
+
+        opened: list[str] = []
+        controller.set_native_search_opener(opened.append)
+        controller.pause()
+        controller.open_native_search("paused")
+        self.assertEqual(opened, [])
+        controller.resume()
+        controller.open_native_search("")
+        self.assertEqual(opened, [""])
+
+        def fail_soft(_query: str) -> None:
+            raise RuntimeError("native Browser unavailable")
+
+        controller.set_native_search_opener(fail_soft)
+        controller.open_native_search("contained")
+        self.assertEqual(opened, [""])
+        controller.dispose()
+        controller.open_native_search("disposed")
+        self.assertEqual(opened, [""])
+        controller.deleteLater()
+        dialog.deleteLater()
+
+    def test_query_field_context_menu_runtime_failure_is_nonfatal(self) -> None:
+        dialog = SearchDialog()
+        dialog.search.setText("heart failure")
+        received: list[str] = []
+        dialog.search.nativeSearchRequested.connect(received.append)
+
+        class _ContextEvent:
+            accepted = False
+
+            @staticmethod
+            def globalPos():
+                return QPoint(10, 10)
+
+            def accept(self) -> None:
+                self.accepted = True
+
+        def fail(_menu, _position):
+            raise RuntimeError("deleted native menu")
+
+        event = _ContextEvent()
+        dialog.search._execute_context_menu = fail
+        dialog.search.contextMenuEvent(event)
+
+        self.assertTrue(event.accepted)
+        self.assertEqual(received, [])
+        self.assertEqual(dialog.query(), "heart failure")
+        dialog.deleteLater()
+
     def test_search_error_keeps_query_field_editable_and_focused(self) -> None:
         dialog = SearchDialog()
         dialog.show()
@@ -1962,7 +2823,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         fallback = dialog._about
         self.assertEqual(fallback.product_name, "Smart Search for Anki — Medical")
         self.assertEqual(fallback.creator, "Saleh Mostafa")
-        self.assertEqual(fallback.version, "1.0.26")
+        self.assertEqual(fallback.version, "1.0.35")
         self.assertTrue(Path(fallback.logo_path).is_file())
         panel = AboutPanel(fallback)
         self.assertFalse(panel.logo_label.pixmap().isNull())
@@ -2851,7 +3712,7 @@ class OffscreenSmokeTests(unittest.TestCase):
         controller = SearchController(backend, dialog)
         initial_previews: list[SearchResult | None] = []
         controller.initialPreviewRequested.connect(initial_previews.append)
-        dialog.search.setText("heart failure tag:cardio")
+        dialog.set_query_text("heart failure is:suspended tag:cardio")
         roots = (
             SearchResult(
                 note_id=1,
@@ -2905,9 +3766,11 @@ class OffscreenSmokeTests(unittest.TestCase):
         self.app.processEvents()
 
         self.assertTrue(dialog.related_active())
-        self.assertEqual(dialog.query(), "heart failure tag:cardio")
+        self.assertEqual(dialog.query(), "heart failure is:suspended tag:cardio")
         self.assertEqual(model.results(), (related,))
         self.assertFalse(dialog.chip_bar.isVisibleTo(dialog))
+        self.assertTrue(dialog.suspended_only.isVisibleTo(dialog))
+        self.assertTrue(dialog.suspended_only.isChecked())
         self.assertTrue(dialog.related_context_bar.isVisibleTo(dialog))
         self.assertEqual(initial_previews, [related])
 

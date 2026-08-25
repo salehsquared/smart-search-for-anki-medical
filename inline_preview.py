@@ -13,6 +13,21 @@ import re
 import time
 from typing import Any
 
+try:  # installed add-on package
+    from .backend.host_safety import (
+        HOST_BACKEND_RESTART_MESSAGE,
+        HostBackendUnavailable,
+        contain_host_backend_panic,
+        host_backend_quarantined,
+    )
+except ImportError:  # direct module loading in the plain-Python test suite
+    from backend.host_safety import (
+        HOST_BACKEND_RESTART_MESSAGE,
+        HostBackendUnavailable,
+        contain_host_backend_panic,
+        host_backend_quarantined,
+    )
+
 
 def _result_card_ids(result: object | None) -> tuple[int, ...]:
     output: list[int] = []
@@ -53,6 +68,7 @@ class InlineResultInspector:
         parent_window: Any,
         initial_result: object,
         on_error: Callable[[str], None],
+        on_host_failure: Callable[[Exception], None] | None = None,
         default_view: object = "question",
     ) -> None:
         from aqt import gui_hooks
@@ -76,6 +92,7 @@ class InlineResultInspector:
         self.pane = pane
         self.parent_window = parent_window
         self._on_error = on_error
+        self._on_host_failure = on_host_failure or (lambda _error: None)
         self._result: object | None = None
         self._card_ids: tuple[int, ...] = ()
         self._sibling_index = 0
@@ -86,6 +103,7 @@ class InlineResultInspector:
         self._last_render_at = 0.0
         self._disposed = False
         self._hidden = False
+        self._collection_access_paused = False
         self._editor: Any | None = None
         # Anki 24.11-26.05 exposes Editor.note, while 26.08 exposes only nid
         # and set_note(None) intentionally leaves that nid behind. Keep the
@@ -308,14 +326,72 @@ class InlineResultInspector:
             return 0
         return self._card_ids[self._sibling_index]
 
+    def _collection_is_paused(self) -> bool:
+        return bool(
+            getattr(self, "_collection_access_paused", False)
+            or host_backend_quarantined()
+        )
+
     def _current_card(self) -> Any | None:
         card_id = self._current_card_id()
-        if card_id <= 0 or getattr(self.mw, "col", None) is None:
+        if (
+            self._collection_is_paused()
+            or card_id <= 0
+            or getattr(self.mw, "col", None) is None
+        ):
             return None
         try:
-            return self.mw.col.get_card(card_id)
+            return contain_host_backend_panic(
+                lambda: self.mw.col.get_card(card_id)
+            )
+        except HostBackendUnavailable as error:
+            self._handle_host_backend_failure(error)
+            raise
         except Exception:
             return None
+
+    def set_collection_access_paused(self, paused: bool) -> None:
+        """Stop every preview callback that can touch Anki's collection."""
+
+        self._collection_access_paused = bool(paused) or host_backend_quarantined()
+        if self._collection_access_paused:
+            try:
+                self._render_timer.stop()
+            except RuntimeError:
+                pass
+            self._stop_audio()
+        for widget in (
+            self.previous_button,
+            self.next_button,
+            self.replay_button,
+            self.flip_button,
+            self._editor_container,
+        ):
+            try:
+                widget.setEnabled(not self._collection_access_paused)
+            except RuntimeError:
+                pass
+        if not self._collection_is_paused():
+            self._update_controls()
+            if self.pane.mode() == "edit":
+                self._sync_editor_to_target()
+            else:
+                self._schedule_render(force=True)
+
+    def _handle_host_backend_failure(self, error: HostBackendUnavailable) -> None:
+        self.set_collection_access_paused(True)
+        try:
+            self._on_host_failure(error)
+        except Exception:
+            pass
+        if self.web is not None:
+            try:
+                self.web.eval(
+                    f"_showQuestion({json.dumps(HOST_BACKEND_RESTART_MESSAGE)}, '', '');"
+                    "_drawFlag(0); _drawMark(false);"
+                )
+            except RuntimeError:
+                pass
 
     def _update_controls(self) -> None:
         count = len(self._card_ids)
@@ -338,6 +414,14 @@ class InlineResultInspector:
         self.flip_button.setToolTip(
             f"{action} ({shortcut})"
         )
+        if self._collection_is_paused():
+            for widget in (
+                self.previous_button,
+                self.next_button,
+                self.replay_button,
+                self.flip_button,
+            ):
+                widget.setEnabled(False)
 
     def previous_sibling(self) -> bool:
         return self._move_sibling(-1)
@@ -346,6 +430,8 @@ class InlineResultInspector:
         return self._move_sibling(1)
 
     def _move_sibling(self, offset: int) -> bool:
+        if getattr(self, "_collection_access_paused", False):
+            return False
         target = self._sibling_index + int(offset)
         if not 0 <= target < len(self._card_ids):
             return False
@@ -358,7 +444,12 @@ class InlineResultInspector:
     # -------------------------------------------------------------- rendering
 
     def _schedule_render(self, *, force: bool = False) -> None:
-        if self._disposed or self._hidden or self.pane.mode() != "card":
+        if (
+            self._disposed
+            or self._hidden
+            or self._collection_is_paused()
+            or self.pane.mode() != "card"
+        ):
             return
         if force:
             self._last_render_at = 0.0
@@ -369,6 +460,14 @@ class InlineResultInspector:
         self._schedule_render(force=True)
 
     def _render_now(self) -> None:
+        if self._collection_is_paused():
+            return
+        try:
+            contain_host_backend_panic(self._render_now_uncontained)
+        except HostBackendUnavailable as error:
+            self._handle_host_backend_failure(error)
+
+    def _render_now_uncontained(self) -> None:
         if self._disposed or self._hidden or self.pane.mode() != "card":
             return
         elapsed_ms = (time.monotonic() - self._last_render_at) * 1000
@@ -453,6 +552,8 @@ class InlineResultInspector:
     def show_side(self, side: str) -> bool:
         """Show one card side without repeat-key toggling or extra renders."""
 
+        if getattr(self, "_collection_access_paused", False):
+            return False
         target = str(side or "").casefold()
         if target not in {"question", "answer"}:
             return False
@@ -476,9 +577,17 @@ class InlineResultInspector:
     def replay_audio(self) -> None:
         from aqt.reviewer import replay_audio
 
-        card = self._current_card()
+        try:
+            card = self._current_card()
+        except HostBackendUnavailable:
+            return
         if card is not None:
-            replay_audio(card, self._state == "question")
+            try:
+                contain_host_backend_panic(
+                    lambda: replay_audio(card, self._state == "question")
+                )
+            except HostBackendUnavailable as error:
+                self._handle_host_backend_failure(error)
 
     def _stop_audio(self) -> None:
         try:
@@ -492,9 +601,17 @@ class InlineResultInspector:
         if command.startswith("play:"):
             from aqt.sound import play_clicked_audio
 
-            card = self._current_card()
+            try:
+                card = self._current_card()
+            except HostBackendUnavailable:
+                return None
             if card is not None:
-                play_clicked_audio(command, card)
+                try:
+                    contain_host_backend_panic(
+                        lambda: play_clicked_audio(command, card)
+                    )
+                except HostBackendUnavailable as error:
+                    self._handle_host_backend_failure(error)
         return None
 
     # ---------------------------------------------------------------- editor
@@ -535,19 +652,29 @@ class InlineResultInspector:
         if self._disposed:
             return
         mode = "edit" if str(mode).casefold() == "edit" else "card"
+        if self._collection_is_paused() and mode == "edit":
+            self._on_error("Wait for Anki to finish syncing before editing a card.")
+            return
         self.pane.set_mode(mode)
         self._set_surface_mode(mode)
         if mode == "edit":
             try:
-                self._ensure_editor()
-                # Editor.setupWeb() calls show(), so re-assert the selected
-                # surface after lazy editor construction.
-                self._set_surface_mode("edit")
-                self._sync_editor_to_target()
+                def enter_editor() -> None:
+                    self._ensure_editor()
+                    # Editor.setupWeb() calls show(), so re-assert the selected
+                    # surface after lazy editor construction.
+                    self._set_surface_mode("edit")
+                    self._sync_editor_to_target()
+
+                contain_host_backend_panic(enter_editor)
             except Exception as error:
+                host_failure = isinstance(error, HostBackendUnavailable)
+                if host_failure:
+                    self._handle_host_backend_failure(error)
                 self.pane.set_mode("card")
                 self._set_surface_mode("card")
-                self._on_error(f"Could not open the inline editor: {error}")
+                if not host_failure:
+                    self._on_error(f"Could not open the inline editor: {error}")
                 self._schedule_render(force=True)
                 # The button's clicked signal can finish toggling after this
                 # handler returns. Re-assert Card on the next event-loop turn
@@ -604,20 +731,37 @@ class InlineResultInspector:
             or self._editor_switching
             or self._disposed
             or self._hidden
+            or self._collection_is_paused()
             or self.pane.mode() != "edit"
         ):
             return
-        card = self._current_card()
+        try:
+            card = self._current_card()
+        except HostBackendUnavailable:
+            return
         target_note_id = 0
         if card is not None:
             try:
-                target_note_id = int(card.note().id)
+                target_note_id = int(
+                    contain_host_backend_panic(lambda: card.note().id)
+                )
+            except HostBackendUnavailable as error:
+                self._handle_host_backend_failure(error)
+                return
             except Exception:
                 card = None
         current_note_id = self._attached_editor_note_id
         if current_note_id and current_note_id != target_note_id:
             self._editor_switching = True
-            editor.call_after_note_saved(self._finish_editor_switch)
+            try:
+                contain_host_backend_panic(
+                    lambda: editor.call_after_note_saved(
+                        self._finish_editor_switch
+                    )
+                )
+            except HostBackendUnavailable as error:
+                self._editor_switching = False
+                self._handle_host_backend_failure(error)
             return
         self._apply_editor_target(card)
 
@@ -625,29 +769,48 @@ class InlineResultInspector:
         if self._disposed:
             return
         self._editor_switching = False
+        # The callback proves the former target was saved. Clear its owned
+        # identity even when a sync gate is active, so unpause can attach the
+        # latest result directly instead of scheduling a redundant save.
+        self._attached_editor_note_id = 0
+        if self._collection_is_paused():
+            return
         if self._default_detach_pending:
             self._default_detach_pending = False
             self._apply_default_view()
             return
         if self._hidden or self.pane.mode() != "edit":
             return
-        self._apply_editor_target(self._current_card())
+        try:
+            card = self._current_card()
+        except HostBackendUnavailable:
+            return
+        self._apply_editor_target(card)
 
     def _apply_editor_target(self, card: Any | None) -> None:
+        if self._collection_is_paused():
+            return
         editor = self._editor
         if editor is None:
             return
-        force = self._editor_target_force
-        self._editor_target_force = False
-        if card is None:
-            self._detach_editor()
-            return
-        note = card.note()
-        current_note_id = self._attached_editor_note_id
-        editor.card = card
-        if force or current_note_id != int(note.id):
-            editor.set_note(note)
-            self._attached_editor_note_id = int(note.id)
+
+        def apply() -> None:
+            force = self._editor_target_force
+            self._editor_target_force = False
+            if card is None:
+                self._detach_editor()
+                return
+            note = card.note()
+            current_note_id = self._attached_editor_note_id
+            editor.card = card
+            if force or current_note_id != int(note.id):
+                editor.set_note(note)
+                self._attached_editor_note_id = int(note.id)
+
+        try:
+            contain_host_backend_panic(apply)
+        except HostBackendUnavailable as error:
+            self._handle_host_backend_failure(error)
 
     def _detach_editor(self) -> None:
         """Detach our editor target across legacy and 26.08 Editor APIs."""
@@ -657,7 +820,12 @@ class InlineResultInspector:
         if editor is None:
             return
         editor.card = None
-        editor.set_note(None)
+        if host_backend_quarantined():
+            return
+        try:
+            contain_host_backend_panic(lambda: editor.set_note(None))
+        except HostBackendUnavailable as error:
+            self._handle_host_backend_failure(error)
 
     def _on_operation_did_execute(self, changes: Any, handler: object | None) -> None:
         if self._disposed:
@@ -701,8 +869,19 @@ class InlineResultInspector:
         if editor is None or self._attached_editor_note_id <= 0:
             callback()
             return
+        if host_backend_quarantined():
+            self._handle_host_backend_failure(
+                HostBackendUnavailable(HOST_BACKEND_RESTART_MESSAGE)
+            )
+            callback()
+            return
         try:
-            editor.call_after_note_saved(callback)
+            contain_host_backend_panic(
+                lambda: editor.call_after_note_saved(callback)
+            )
+        except HostBackendUnavailable as error:
+            self._handle_host_backend_failure(error)
+            callback()
         except RuntimeError:
             callback()
 
@@ -783,10 +962,13 @@ class InlineResultInspector:
                 pass
         self._pane_signal_bindings = ()
         if self._editor is not None:
-            try:
-                self._editor.cleanup()
-            except RuntimeError:
-                pass
+            if not host_backend_quarantined():
+                try:
+                    contain_host_backend_panic(self._editor.cleanup)
+                except HostBackendUnavailable as error:
+                    self._handle_host_backend_failure(error)
+                except RuntimeError:
+                    pass
             self._editor = None
             self._attached_editor_note_id = 0
         if self.web is not None:
@@ -827,6 +1009,7 @@ def create_inline_result_inspector(
     parent_window: Any,
     initial_result: object,
     on_error: Callable[[str], None],
+    on_host_failure: Callable[[Exception], None] | None = None,
     default_view: object = "question",
 ) -> InlineResultInspector:
     """Create the Anki-specific contents for an existing inline pane."""
@@ -837,5 +1020,6 @@ def create_inline_result_inspector(
         parent_window=parent_window,
         initial_result=initial_result,
         on_error=on_error,
+        on_host_failure=on_host_failure,
         default_view=default_view,
     )
