@@ -63,6 +63,25 @@ instructions, interaction data, or an RxTerms API mirror.
 
 The exact NLM-requested attribution appears in `THIRD_PARTY_NOTICES.md`.
 
+## French medical & pharmaceutical aliases (BDPM, ANSM, EDN, MeSH)
+
+### Sources & Scope
+
+- **BDPM / ANSM (Base de Données Publique des Médicaments)**: French proprietary drug brand names mapped to International Nonproprietary Names (DCI / generic names) for common hospital and ambulatory therapies in France.
+- **EDN / R2C / Collèges Médicaux Français**: Common French clinical acronyms and standard medical abbreviations used in French medical school curricula (ECN/EDN/R2C).
+- **MeSH bilingual terminology (Inserm)**: French clinical terminology, symptom descriptions, and semiology.
+
+### Bundled derived file
+
+- Path: `resources/medical_vocab/french_medical_aliases.json.gz`
+- Alias records: 571
+- Builder: `scripts/build_french_medical_aliases.py`
+
+### Important limitations
+
+- An alias match is a search expansion for finding relevant flashcards, not a statement that two medications or terms are clinically interchangeable.
+- The terminology snapshot is designed as a study aid for French medical education and must not be used for clinical decision making or prescribing.
+
 ## Optional semantic-search model
 
 Semantic Search uses a local 384-dimensional English text-embedding model. It

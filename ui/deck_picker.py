@@ -154,6 +154,18 @@ def _catalog_current_name(catalog: DeckCatalog | object | None) -> str:
     return ""
 
 
+try:
+    from .i18n import tr, is_french_locale
+except ImportError:
+    try:
+        from ui.i18n import tr, is_french_locale
+    except ImportError:
+        def tr(text: str, **kwargs: object) -> str:
+            return text
+        def is_french_locale() -> bool:
+            return False
+
+
 class DeckScopeButton(QToolButton, PaletteMixin):
     """Fixed-width summary button for the deck clause in a visible query."""
 
@@ -181,16 +193,17 @@ class DeckScopeButton(QToolButton, PaletteMixin):
         excluded = _excluded_from_analysis(self._analysis)
         custom = _is_custom(self._analysis)
         if custom:
-            label = "Custom decks"
+            label = tr("Custom decks")
             summary = "custom deck expression"
         elif len(names) > 1:
-            label = f"{len(names)} decks"
+            deck_word = "paquets" if is_french_locale() else "decks"
+            label = f"{len(names)} {deck_word}"
             summary = f"{len(names)} decks selected"
         elif names:
             label = names[0].rsplit("::", 1)[-1]
             summary = names[0]
         else:
-            label = "All decks"
+            label = tr("All decks")
             summary = "all decks"
         if excluded and not custom:
             count = len(excluded)
@@ -201,19 +214,21 @@ class DeckScopeButton(QToolButton, PaletteMixin):
             )
         # Keep the compound search row stable even for very long deck names.
         metrics = self.fontMetrics()
-        label = metrics.elidedText(label, Qt.TextElideMode.ElideRight, 105)
+        label = metrics.elidedText(label, Qt.TextElideMode.ElideRight, 150)
         self.setText(f"{label}  ▾")
         if not names:
-            tooltip = "Choose decks"
+            tooltip = tr("Filter by deck...")
         else:
-            tooltip = "Search " + ", ".join(names)
+            tooltip = ("Rechercher dans " if is_french_locale() else "Search ") + ", ".join(names)
             if excluded:
-                tooltip += "\nExcluding " + ", ".join(excluded)
+                tooltip += ("\nExcluant " if is_french_locale() else "\nExcluding ") + ", ".join(excluded)
         self.setToolTip(tooltip)
         self.setAccessibleName(f"Deck filter, {summary}")
         self.setAccessibleDescription(
-            "Open a searchable deck picker. Selecting a parent includes its "
-            "subdecks; unchecking an included subdeck excludes it."
+            tr(
+                "Open a searchable deck picker. Selecting a parent includes its "
+                "subdecks; unchecking an included subdeck excludes it."
+            )
         )
         self.setProperty("customScope", custom)
         self.refresh_palette()

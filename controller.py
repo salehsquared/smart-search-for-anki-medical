@@ -42,6 +42,7 @@ from .backend.host_safety import (
     host_backend_quarantined,
 )
 
+from .ui.i18n import tr, is_french_locale
 from .anki_actions import (
     ActionKind,
     CollectionAction,
@@ -136,7 +137,13 @@ _POST_REVIEW_MAINTENANCE_DELAY_MS = 5_000
 # closes, leaves Semantic mode, or the profile is retired.
 _SEMANTIC_IDLE_UNLOAD_MS = 90_000
 _SEMANTIC_DELTA_BATCH_SIZE = 250
-_RXTERMS_RESOURCE = Path("resources") / "medical_vocab" / "rxterms_202607.json.gz"
+_VOCAB_RESOURCES = (
+    ("rxterms", Path("resources") / "medical_vocab" / "rxterms_202607.json.gz"),
+    (
+        "bdpm_fr",
+        Path("resources") / "medical_vocab" / "french_medical_aliases.json.gz",
+    ),
+)
 _DIALOG_MANAGER_NAME = "SmartSearchMedical"
 _NOTETYPE_FILTER = re.compile(
     r"(?<![\w\"])(?P<neg>-?)notetype:(?P<value>\"(?:\\.|[^\"])*\"|\S+)",
@@ -261,6 +268,12 @@ def _handler_note_id(handler: object | None) -> int:
     if direct > 0:
         return direct
     return _object_id(getattr(handler, "note", None))
+
+
+def _notes_ready_detail(count: int) -> str:
+    if is_french_locale():
+        return f"{count:,} notes prêtes."
+    return f"{count:,} notes ready."
 
 
 class AnkiSearchBackend:
@@ -650,14 +663,15 @@ class AnkiSearchBackend:
 
         checkpoint()
         alias_error: str | None = None
-        alias_path = self.bundle_root / _RXTERMS_RESOURCE
-        if alias_path.is_file():
-            try:
-                index.load_alias_resource(alias_path)
-            except Exception:
-                # RxTerms improves search, but lexical/fuzzy search must not be
-                # disabled by a damaged optional resource.
-                alias_error = "Some medical aliases are temporarily unavailable."
+        for source_name, resource_rel in _VOCAB_RESOURCES:
+            alias_path = self.bundle_root / resource_rel
+            if alias_path.is_file():
+                try:
+                    index.load_alias_resource(alias_path, source=source_name)
+                except Exception:
+                    # Vocab improves search, but lexical/fuzzy search must not be
+                    # disabled by a damaged optional resource.
+                    alias_error = "Some medical aliases are temporarily unavailable."
         checkpoint()
 
         semantic_error: str | None = None
@@ -725,14 +739,14 @@ class AnkiSearchBackend:
         self._context = context
         note_count = context.note_count
         if note_count:
-            detail = f"{note_count:,} notes ready."
+            detail = _notes_ready_detail(note_count)
             if alias_error:
                 detail += f" {alias_error}"
             self._set_index_state(IndexState.READY, detail=detail)
         else:
             self._set_index_state(
                 IndexState.UNAVAILABLE,
-                detail="This profile needs initial search setup.",
+                detail=tr("This profile needs initial search setup."),
             )
             if auto_rebuild:
                 self.rebuild_index(_noop, _noop, _noop)
@@ -2118,7 +2132,7 @@ class AnkiSearchBackend:
             rerun = self._end_maintenance()
             self._set_index_state(
                 IndexState.READY,
-                detail=f"{count:,} notes ready.",
+                detail=_notes_ready_detail(count),
             )
             on_progress(1.0, "ready")
             on_success(self.get_status())
@@ -2783,7 +2797,7 @@ class AnkiSearchBackend:
             self._end_maintenance()
             self._set_index_state(
                 IndexState.READY,
-                detail=f"{context.note_count:,} notes ready.",
+                detail=_notes_ready_detail(context.note_count),
             )
             on_success(self.get_status())
             if changed_ids or deleted_ids:
@@ -2823,7 +2837,7 @@ class AnkiSearchBackend:
             rerun = self._end_maintenance()
             self._set_index_state(
                 IndexState.READY,
-                detail=f"{context.note_count:,} notes ready.",
+                detail=_notes_ready_detail(context.note_count),
             )
             on_success(self.get_status())
             if rerun:
@@ -2907,7 +2921,7 @@ class AnkiSearchBackend:
             rerun = self._end_maintenance()
             self._set_index_state(
                 IndexState.READY,
-                detail=f"{context.note_count:,} notes ready.",
+                detail=_notes_ready_detail(context.note_count),
             )
             on_success(self.get_status())
             if rerun:

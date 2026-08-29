@@ -43,6 +43,7 @@ PUBLIC_CODE_DIRECTORIES = {
 PUBLIC_RESOURCE_FILES = {
     "resources/medbrevia-logo.png",
     "resources/medical_vocab/rxterms_202607.json.gz",
+    "resources/medical_vocab/french_medical_aliases.json.gz",
 }
 PUBLIC_LICENSE_FILES = {
     "licenses/Apache-2.0.txt",

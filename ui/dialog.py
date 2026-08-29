@@ -43,6 +43,18 @@ from .suspension_query import (
 from .results import ResultsView
 from .theme import chrome_colors, semantic_icon_pixmap
 from .preview_pane import InlineResultPane
+try:
+    from .i18n import tr, is_french_locale, get_help_html
+except ImportError:
+    try:
+        from ui.i18n import tr, is_french_locale, get_help_html
+    except ImportError:
+        def tr(text: str, **kwargs: object) -> str:
+            return text
+        def is_french_locale() -> bool:
+            return False
+        def get_help_html(primary_key: str = "Ctrl") -> str:
+            return ""
 from .widgets import (  # Qt shim + custom widgets
     AboutPanel,
     ChipBar,
@@ -190,7 +202,7 @@ class _SettingsDialog(QDialog):
         super().__init__(parent)
         self._text_index_ready = text_index_ready
         self.setObjectName("searchSettingsDialog")
-        self.setWindowTitle("Search settings")
+        self.setWindowTitle(tr("Search settings"))
         self.setAccessibleName("Search settings")
         self.setMinimumSize(620, 540)
         self.resize(760, 620)
@@ -215,7 +227,7 @@ class _SettingsDialog(QDialog):
         form.setFormAlignment(
             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
         )
-        self.tabs.addTab(search_page, "Search")
+        self.tabs.addTab(search_page, tr("Search"))
 
         self.mode_combo = QComboBox(search_page)
         for m in (SearchMode.SMART, SearchMode.EXACT, SearchMode.SEMANTIC):
@@ -224,14 +236,14 @@ class _SettingsDialog(QDialog):
             [SearchMode.SMART, SearchMode.EXACT, SearchMode.SEMANTIC].index(mode)
         )
         self.mode_combo.setAccessibleName("Default search mode")
-        form.addRow("Default mode", self.mode_combo)
+        form.addRow(tr("Default mode"), self.mode_combo)
 
         self.limit_spin = QSpinBox(search_page)
         self.limit_spin.setRange(10, 200)
         self.limit_spin.setSingleStep(10)
         self.limit_spin.setValue(result_limit)
         self.limit_spin.setAccessibleName("Maximum results per search")
-        form.addRow("Result limit", self.limit_spin)
+        form.addRow(tr("Result limit"), self.limit_spin)
 
         control_width = max(
             190,
@@ -247,7 +259,7 @@ class _SettingsDialog(QDialog):
             )
 
         self.preview_check = QCheckBox(
-            "Show automatically while browsing results",
+            tr("Show automatically while browsing results"),
             search_page,
         )
         self.preview_check.setChecked(bool(preview_enabled))
@@ -255,7 +267,7 @@ class _SettingsDialog(QDialog):
         self.preview_check.setToolTip(
             "Open Anki's rendered card Preview when you enter or move through results"
         )
-        form.addRow("Card preview", self.preview_check)
+        form.addRow(tr("Card preview"), self.preview_check)
 
         try:
             preview_default = PreviewDefault(preview_default)
@@ -283,7 +295,7 @@ class _SettingsDialog(QDialog):
             QSizePolicy.Policy.Fixed,
             QSizePolicy.Policy.Preferred,
         )
-        form.addRow("Open previews as", self.preview_default_combo)
+        form.addRow(tr("Open previews as"), self.preview_default_combo)
 
         # The status copy and action share one expanding field column. Native
         # height-for-width sizing keeps wrapped copy readable without forcing
@@ -321,7 +333,7 @@ class _SettingsDialog(QDialog):
             Qt.AlignmentFlag.AlignLeft,
         )
         self._set_semantic_status(semantic)
-        form.addRow("Semantic search", self.semantic_field)
+        form.addRow(tr("Semantic search"), self.semantic_field)
         semantic_label = form.labelForField(self.semantic_field)
         if semantic_label is not None:
             semantic_label.setAlignment(
@@ -333,7 +345,7 @@ class _SettingsDialog(QDialog):
             self.tabs,
         )
         self.about_panel.updateRequested.connect(self._request_update)
-        self.tabs.addTab(self.about_panel, "About")
+        self.tabs.addTab(self.about_panel, tr("About"))
 
         self.button_box = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
@@ -700,7 +712,8 @@ class SearchDialog(QDialog):
         root.addWidget(self.index_notice)
 
         self.stack = QStackedWidget(self)
-        help_label = QLabel(HELP_HTML, self)
+        help_text = get_help_html(_PRIMARY_KEY) if is_french_locale() else HELP_HTML
+        help_label = QLabel(help_text, self)
         help_label.setWordWrap(True)
         help_label.setTextFormat(Qt.TextFormat.RichText)
         help_label.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -841,21 +854,21 @@ class SearchDialog(QDialog):
 
         self.select_button = QToolButton(self.batch_bar)
         self.select_button.setObjectName("batchSelect")
-        self.select_button.setText("Select")
+        self.select_button.setText(tr("Select"))
         self.select_button.setPopupMode(
             QToolButton.ToolButtonPopupMode.InstantPopup
         )
         self.select_button.setAccessibleName("Selection options")
         select_menu = QMenu(self.select_button)
-        self.select_all_action = select_menu.addAction("All shown")
+        self.select_all_action = select_menu.addAction(tr("All shown"))
         self.select_all_action.triggered.connect(
             lambda _checked=False: self.results.results_model().set_all_checked(True)
         )
-        self.select_none_action = select_menu.addAction("None")
+        self.select_none_action = select_menu.addAction(tr("None"))
         self.select_none_action.triggered.connect(
             lambda _checked=False: self.results.results_model().set_all_checked(False)
         )
-        self.select_invert_action = select_menu.addAction("Invert")
+        self.select_invert_action = select_menu.addAction(tr("Invert"))
         self.select_invert_action.triggered.connect(
             lambda _checked=False: self.results.results_model().invert_checked()
         )
@@ -864,7 +877,7 @@ class SearchDialog(QDialog):
 
         self.preview_button = QToolButton(self.batch_bar)
         self.preview_button.setObjectName("batchPreview")
-        self.preview_button.setText("Preview")
+        self.preview_button.setText(tr("Preview"))
         self.preview_button.setCheckable(True)
         self.preview_button.setToolTip(
             "Show the card preview beside the results"
@@ -877,7 +890,7 @@ class SearchDialog(QDialog):
 
         self.related_button = QToolButton(self.batch_bar)
         self.related_button.setObjectName("batchRelated")
-        self.related_button.setText("Related")
+        self.related_button.setText(tr("Related"))
         related_help = (
             "Find notes sharing an exact UWorld or AMBOSS source tag. "
             "Uses checked notes, or the highlighted note when none are checked."
@@ -890,7 +903,7 @@ class SearchDialog(QDialog):
 
         self.open_selected_button = QToolButton(self.batch_bar)
         self.open_selected_button.setObjectName("batchBrowser")
-        self.open_selected_button.setText("Browser")
+        self.open_selected_button.setText(tr("Browser"))
         self.open_selected_button.setToolTip(
             "Open exactly the checked cards in Anki's Browser"
         )
@@ -902,7 +915,7 @@ class SearchDialog(QDialog):
 
         self.undo_button = QToolButton(self.batch_bar)
         self.undo_button.setObjectName("batchUndo")
-        self.undo_button.setText("Undo")
+        self.undo_button.setText(tr("Undo"))
         self.undo_button.setAccessibleName("Undo last Smart Search change")
         self.undo_button.setVisible(False)
         self.undo_button.clicked.connect(self._request_undo)
@@ -912,7 +925,7 @@ class SearchDialog(QDialog):
 
         self.flag_button = QToolButton(self.batch_bar)
         self.flag_button.setObjectName("batchFlag")
-        self.flag_button.setText("Flag")
+        self.flag_button.setText(tr("Flag"))
         self.flag_button.setPopupMode(
             QToolButton.ToolButtonPopupMode.InstantPopup
         )
@@ -928,7 +941,7 @@ class SearchDialog(QDialog):
             (6, "Turquoise"),
             (7, "Purple"),
         ):
-            action = flag_menu.addAction(label)
+            action = flag_menu.addAction(tr(label))
             action.triggered.connect(
                 lambda _checked=False, value=flag: self._emit_flag(value)
             )
@@ -937,17 +950,17 @@ class SearchDialog(QDialog):
 
         self.suspend_button = QToolButton(self.batch_bar)
         self.suspend_button.setObjectName("batchSuspend")
-        self.suspend_button.setText("Suspend")
+        self.suspend_button.setText(tr("Suspend"))
         self.suspend_button.setPopupMode(
             QToolButton.ToolButtonPopupMode.InstantPopup
         )
         self.suspend_button.setAccessibleName("Suspend or unsuspend cards")
         suspend_menu = QMenu(self.suspend_button)
-        suspend_action = suspend_menu.addAction("Suspend")
+        suspend_action = suspend_menu.addAction(tr("Suspend"))
         suspend_action.triggered.connect(
             lambda _checked=False: self._emit_suspension(True)
         )
-        unsuspend_action = suspend_menu.addAction("Unsuspend")
+        unsuspend_action = suspend_menu.addAction(tr("Unsuspend"))
         unsuspend_action.triggered.connect(
             lambda _checked=False: self._emit_suspension(False)
         )
@@ -956,17 +969,17 @@ class SearchDialog(QDialog):
 
         self.tags_button = QToolButton(self.batch_bar)
         self.tags_button.setObjectName("batchTags")
-        self.tags_button.setText("Tags")
+        self.tags_button.setText(tr("Tags"))
         self.tags_button.setPopupMode(
             QToolButton.ToolButtonPopupMode.InstantPopup
         )
         self.tags_button.setAccessibleName("Add or remove note tags")
         tags_menu = QMenu(self.tags_button)
-        add_tag_action = tags_menu.addAction("Add…")
+        add_tag_action = tags_menu.addAction(tr("Add…"))
         add_tag_action.triggered.connect(
             lambda _checked=False: self._emit_tag_action(True)
         )
-        remove_tag_action = tags_menu.addAction("Remove…")
+        remove_tag_action = tags_menu.addAction(tr("Remove…"))
         remove_tag_action.triggered.connect(
             lambda _checked=False: self._emit_tag_action(False)
         )
@@ -1020,7 +1033,7 @@ class SearchDialog(QDialog):
 
         self.settings_button = QToolButton(self)
         self.settings_button.setObjectName("footerButton")
-        self.settings_button.setText("Settings")
+        self.settings_button.setText(tr("Settings"))
         self.settings_button.setAccessibleName("Search settings")
         self.settings_button.setAccessibleDescription("Open search preferences.")
         self.settings_button.clicked.connect(self._open_settings)
@@ -1028,7 +1041,7 @@ class SearchDialog(QDialog):
 
         self.rebuild_button = QToolButton(self)
         self.rebuild_button.setObjectName("footerButton")
-        self.rebuild_button.setText("Refresh")
+        self.rebuild_button.setText(tr("Refresh"))
         self.rebuild_button.setToolTip(
             "Refresh Smart and Exact search data. Semantic refreshes separately."
         )
@@ -1390,14 +1403,18 @@ class SearchDialog(QDialog):
             state = Qt.CheckState.PartiallyChecked
         self.master_check.setCheckState(state)
 
-        note_word = "note" if note_count == 1 else "notes"
-        card_word = "card" if card_count == 1 else "cards"
-        text = (
-            f"{note_count} {note_word} · {card_count} {card_word} selected"
-        )
+        if is_french_locale():
+            note_word = "note" if note_count == 1 else "notes"
+            card_word = "carte" if card_count == 1 else "cartes"
+            text = f"{note_count} {note_word} · {card_count} {card_word} sélectionnée{'s' if card_count > 1 else ''}"
+            self.select_all_action.setText(f"Toutes les {total_rows} affichées")
+        else:
+            note_word = "note" if note_count == 1 else "notes"
+            card_word = "card" if card_count == 1 else "cards"
+            text = f"{note_count} {note_word} · {card_count} {card_word} selected"
+            self.select_all_action.setText(f"All {total_rows} shown")
         self.selection_summary.setText(text)
         self.selection_summary.setAccessibleDescription(text)
-        self.select_all_action.setText(f"All {total_rows} shown")
 
         available = total_rows > 0 and not self._batch_busy
         has_selection = selected_rows > 0 and not self._batch_busy
@@ -1582,13 +1599,13 @@ class SearchDialog(QDialog):
         }
         frozen_results = tuple(results)
 
-        open_action = menu.addAction("Open in Browser")
+        open_action = menu.addAction(tr("Open in Browser"))
         open_action.setEnabled(bool(card_ids))
         open_action.triggered.connect(
             lambda _checked=False: self._open_selected_results()
         )
 
-        related_action = menu.addAction("Find Related Cards")
+        related_action = menu.addAction(tr("Find Related Cards"))
         related_action.setEnabled(bool(note_ids))
         related_action.setToolTip(
             "Find notes sharing an exact UWorld or AMBOSS source tag"
@@ -1600,7 +1617,7 @@ class SearchDialog(QDialog):
         )
         menu.addSeparator()
 
-        copy_action = menu.addAction("Create Copy…")
+        copy_action = menu.addAction(tr("Create Copy…"))
         copy_action.setEnabled(len(note_ids) == 1 and bool(card_ids))
         copy_help = (
             "Open a fresh note copy in Add Cards; Anki will generate its "
@@ -1614,7 +1631,7 @@ class SearchDialog(QDialog):
             )
         )
 
-        move_action = menu.addAction("Change Deck…")
+        move_action = menu.addAction(tr("Change Deck…"))
         move_action.setEnabled(bool(card_ids))
 
         def open_destination(_checked=False) -> None:
@@ -1627,14 +1644,14 @@ class SearchDialog(QDialog):
 
         offer_bury, offer_unbury = self._context_burial_actions(results)
         if offer_bury:
-            bury_action = menu.addAction("Bury")
+            bury_action = menu.addAction(tr("Bury"))
             bury_action.triggered.connect(
                 lambda _checked=False, targets=frozen_results: (
                     self._emit_burial(True, targets)
                 )
             )
         if offer_unbury:
-            unbury_action = menu.addAction("Unbury")
+            unbury_action = menu.addAction(tr("Unbury"))
             unbury_action.triggered.connect(
                 lambda _checked=False, targets=frozen_results: (
                     self._emit_burial(False, targets)
@@ -1643,7 +1660,7 @@ class SearchDialog(QDialog):
 
         menu.addSeparator()
 
-        flag_menu = menu.addMenu("Flag")
+        flag_menu = menu.addMenu(tr("Flag"))
         flag_menu.setEnabled(bool(card_ids))
         for flag, label in (
             (0, "Clear Flag"),
@@ -1655,7 +1672,7 @@ class SearchDialog(QDialog):
             (6, "Turquoise"),
             (7, "Purple"),
         ):
-            action = flag_menu.addAction(label)
+            action = flag_menu.addAction(tr(label))
             action.triggered.connect(
                 lambda _checked=False, value=flag: self._emit_flag(value)
             )
@@ -1664,23 +1681,23 @@ class SearchDialog(QDialog):
             results
         )
         if offer_suspend:
-            suspend_action = menu.addAction("Suspend")
+            suspend_action = menu.addAction(tr("Suspend"))
             suspend_action.triggered.connect(
                 lambda _checked=False: self._emit_suspension(True)
             )
         if offer_unsuspend:
-            unsuspend_action = menu.addAction("Unsuspend")
+            unsuspend_action = menu.addAction(tr("Unsuspend"))
             unsuspend_action.triggered.connect(
                 lambda _checked=False: self._emit_suspension(False)
             )
 
-        tags_menu = menu.addMenu("Tags")
+        tags_menu = menu.addMenu(tr("Tags"))
         tags_menu.setEnabled(bool(note_ids))
-        add_tag_action = tags_menu.addAction("Add Tag…")
+        add_tag_action = tags_menu.addAction(tr("Add Tag…"))
         add_tag_action.triggered.connect(
             lambda _checked=False: self._emit_tag_action(True)
         )
-        remove_tag_action = tags_menu.addAction("Remove Tag…")
+        remove_tag_action = tags_menu.addAction(tr("Remove Tag…"))
         remove_tag_action.triggered.connect(
             lambda _checked=False: self._emit_tag_action(False)
         )
@@ -1944,35 +1961,62 @@ class SearchDialog(QDialog):
         model.set_results(response.results)
         self._batch_results_available = bool(response.results)
 
-        if response.results:
-            self.stack.setCurrentIndex(_PAGE_RESULTS)
-            self.results.select_row(0)
-        else:
-            self._message_kind = "no_results"
-            self.message_label.setTextFormat(Qt.TextFormat.PlainText)
-            self.message_label.setText(
-                f"No results for “{response.query}”.\n"
-                "Try Smart mode, fewer filters, or a broader term."
-            )
-            self.retry_button.setVisible(False)
-            self.stack.setCurrentIndex(_PAGE_MESSAGE)
+        if is_french_locale():
+            if response.results:
+                self.stack.setCurrentIndex(_PAGE_RESULTS)
+                self.results.select_row(0)
+            else:
+                self._message_kind = "no_results"
+                self.message_label.setTextFormat(Qt.TextFormat.PlainText)
+                self.message_label.setText(
+                    f"Aucun résultat pour « {response.query} ».\n"
+                    "Essayez le mode Intelligent, moins de filtres, ou un terme plus général."
+                )
+                self.retry_button.setVisible(False)
+                self.stack.setCurrentIndex(_PAGE_MESSAGE)
 
-        if response.truncated:
-            shown = len(response.results)
-            text = (
-                f"Showing the most relevant {shown} "
-                f"result{'s' if shown != 1 else ''}"
-            )
+            if response.truncated:
+                shown = len(response.results)
+                text = f"Affichage des {shown} résultat{'s' if shown != 1 else ''} les plus pertinents"
+            else:
+                count = response.total_results
+                text = f"{count} résultat{'s' if count != 1 else ''}"
+            if response.elapsed_ms > 0:
+                text += f" · {response.elapsed_ms:.0f} ms"
+            if response.warnings:
+                count = len(response.warnings)
+                text += f" · {count} remarque{'s' if count != 1 else ''}"
         else:
-            text = (
-                f"{response.total_results} "
-                f"result{'s' if response.total_results != 1 else ''}"
-            )
-        if response.elapsed_ms > 0:
-            text += f" · {response.elapsed_ms:.0f} ms"
+            if response.results:
+                self.stack.setCurrentIndex(_PAGE_RESULTS)
+                self.results.select_row(0)
+            else:
+                self._message_kind = "no_results"
+                self.message_label.setTextFormat(Qt.TextFormat.PlainText)
+                self.message_label.setText(
+                    f"No results for “{response.query}”.\n"
+                    "Try Smart mode, fewer filters, or a broader term."
+                )
+                self.retry_button.setVisible(False)
+                self.stack.setCurrentIndex(_PAGE_MESSAGE)
+
+            if response.truncated:
+                shown = len(response.results)
+                text = (
+                    f"Showing the most relevant {shown} "
+                    f"result{'s' if shown != 1 else ''}"
+                )
+            else:
+                text = (
+                    f"{response.total_results} "
+                    f"result{'s' if response.total_results != 1 else ''}"
+                )
+            if response.elapsed_ms > 0:
+                text += f" · {response.elapsed_ms:.0f} ms"
+            if response.warnings:
+                count = len(response.warnings)
+                text += f" · {count} notice{'s' if count != 1 else ''}"
         if response.warnings:
-            count = len(response.warnings)
-            text += f" · {count} notice{'s' if count != 1 else ''}"
             self.summary.setToolTip("\n".join(response.warnings))
         else:
             self.summary.setToolTip("")
