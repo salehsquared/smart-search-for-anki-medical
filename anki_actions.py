@@ -575,6 +575,17 @@ def start_guarded_undo(
     return operation.run_in_background(initiator=initiator)
 
 
+try:
+    from .ui.i18n import tr, is_french_locale
+except ImportError:
+    try:
+        from ui.i18n import tr, is_french_locale
+    except ImportError:
+        def tr(text: str, **kwargs: object) -> str:
+            return text
+        def is_french_locale() -> bool:
+            return False
+
 _FLAG_NAMES = {
     1: "red",
     2: "orange",
@@ -584,9 +595,26 @@ _FLAG_NAMES = {
     6: "turquoise",
     7: "purple",
 }
+_FLAG_NAMES_FR = {
+    1: "rouge",
+    2: "orange",
+    3: "vert",
+    4: "bleu",
+    5: "rose",
+    6: "turquoise",
+    7: "violet",
+}
 
 
 def _count_label(count: int, singular: str) -> str:
+    if is_french_locale():
+        if singular == "card":
+            fr_word = "carte" if count == 1 else "cartes"
+        elif singular == "note":
+            fr_word = "note" if count == 1 else "notes"
+        else:
+            fr_word = singular
+        return f"{int(count):,} {fr_word}"
     suffix = "" if int(count) == 1 else "s"
     return f"{int(count):,} {singular}{suffix}"
 
@@ -596,6 +624,68 @@ def format_action_message(
     outcome: ActionOutcome,
 ) -> str:
     """Create concise feedback with stale/no-op accounting."""
+
+    if is_french_locale():
+        if outcome.changed:
+            if action.kind is ActionKind.FLAG:
+                if action.flag == 0:
+                    message = f"Drapeaux effacés sur {_count_label(outcome.changed, 'card')}"
+                else:
+                    color = _FLAG_NAMES_FR.get(int(action.flag), "sélectionné")
+                    message = (
+                        f"Drapeau {color} appliqué sur "
+                        f"{_count_label(outcome.changed, 'card')}"
+                    )
+                if outcome.note_count:
+                    message += f" ({_count_label(outcome.note_count, 'note')})"
+            elif action.kind is ActionKind.SUSPEND:
+                message = f"{_count_label(outcome.changed, 'card')} suspendue(s)"
+                if outcome.note_count:
+                    message += f" ({_count_label(outcome.note_count, 'note')})"
+            elif action.kind is ActionKind.UNSUSPEND:
+                message = f"{_count_label(outcome.changed, 'card')} réactivée(s)"
+                if outcome.note_count:
+                    message += f" ({_count_label(outcome.note_count, 'note')})"
+            elif action.kind is ActionKind.BURY:
+                message = f"{_count_label(outcome.changed, 'card')} enfouie(s)"
+                if outcome.note_count:
+                    message += f" ({_count_label(outcome.note_count, 'note')})"
+            elif action.kind is ActionKind.UNBURY:
+                message = f"{_count_label(outcome.changed, 'card')} désenfouie(s)"
+                if outcome.note_count:
+                    message += f" ({_count_label(outcome.note_count, 'note')})"
+            elif action.kind is ActionKind.CHANGE_DECK:
+                destination = action.deck_name or f"paquet {action.deck_id}"
+                message = f"{_count_label(outcome.changed, 'card')} déplacée(s)"
+                if outcome.note_count:
+                    message += f" ({_count_label(outcome.note_count, 'note')})"
+                message += f" vers « {destination} »"
+            elif action.kind is ActionKind.ADD_TAGS:
+                message = (
+                    f"Tag(s) « {action.tags} » ajouté(s) à "
+                    f"{_count_label(outcome.changed, 'note')}"
+                )
+            else:
+                message = (
+                    f"Tag(s) « {action.tags} » retiré(s) de "
+                    f"{_count_label(outcome.changed, 'note')}"
+                )
+            if getattr(outcome, "undo_token", None) is not None:
+                message += " — Annulation possible"
+        else:
+            target = (
+                "notes sélectionnées"
+                if action.kind in (ActionKind.ADD_TAGS, ActionKind.REMOVE_TAGS)
+                else "cartes sélectionnées"
+            )
+            message = f"Aucune modification requise sur les {target}"
+
+        details: list[str] = []
+        if outcome.stale:
+            details.append(f"{outcome.stale:,} n'existent plus")
+        if details:
+            message += f" ({'; '.join(details)})"
+        return message
 
     if outcome.changed:
         if action.kind is ActionKind.FLAG:

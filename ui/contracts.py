@@ -71,6 +71,16 @@ EXACT_SEARCH_DETAILS = (
 )
 
 
+try:
+    from .i18n import tr
+except ImportError:
+    try:
+        from ui.i18n import tr
+    except ImportError:
+        def tr(text: str, **kwargs: object) -> str:
+            return text
+
+
 class SearchMode(enum.Enum):
     """How the backend interprets the free-text part of the query."""
 
@@ -80,11 +90,12 @@ class SearchMode(enum.Enum):
 
     @property
     def label(self) -> str:
-        return {
+        base = {
             SearchMode.SMART: "Smart",
             SearchMode.EXACT: "Exact",
             SearchMode.SEMANTIC: "Semantic",
         }[self]
+        return tr(base)
 
 
 class PreviewDefault(enum.Enum):
@@ -96,11 +107,12 @@ class PreviewDefault(enum.Enum):
 
     @property
     def label(self) -> str:
-        return {
+        base = {
             PreviewDefault.QUESTION: "Question",
             PreviewDefault.ANSWER: "Answer",
             PreviewDefault.EDIT: "Edit",
         }[self]
+        return tr(base)
 
 
 class MatchKind(enum.Enum):
@@ -115,7 +127,7 @@ class MatchKind(enum.Enum):
 
     @property
     def badge(self) -> str:
-        return self.value
+        return tr(self.value)
 
 
 class IndexState(enum.Enum):
@@ -379,25 +391,25 @@ class SemanticStatus:
     @property
     def summary(self) -> str:
         if self.state is SemanticState.UNSUPPORTED:
-            return "Semantic search unavailable on this computer"
+            return tr("Semantic search unavailable on this computer")
         if self.state is SemanticState.NOT_INSTALLED:
-            return "Semantic search needs setup"
+            return tr("Semantic search needs setup")
         if self.state is SemanticState.MODEL_READY:
             return (
-                "Semantic search preparation starts automatically"
+                tr("Semantic search preparation starts automatically")
                 if self.auto_start
-                else "Semantic search needs preparation"
+                else tr("Semantic search needs preparation")
             )
         if self.state is SemanticState.INDEXING:
             if self.progress is None:
-                return "Preparing semantic search"
-            return f"Preparing semantic search {round(self.progress * 100)}%"
+                return tr("Preparing semantic search")
+            return f"{tr('Preparing semantic search')} {round(self.progress * 100)}%"
         if self.state is SemanticState.RESTART_REQUIRED:
-            return "Restart Anki to finish Semantic search"
+            return tr("Restart Anki to finish Semantic search")
         if self.state is SemanticState.READY:
             suffix = f" · {self.indexed_notes:,} notes" if self.indexed_notes else ""
-            return f"Semantic search ready{suffix}"
-        return "Semantic search needs attention"
+            return f"{tr('Semantic search ready')}{suffix}"
+        return tr("Semantic search needs attention")
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,13 +431,13 @@ class IndexStatus:
         if self.state is IndexState.READY:
             # ``model_name`` is retained as backend metadata for compatibility,
             # but implementation identifiers never belong in normal UI.
-            return "Smart & Exact ready"
+            return tr("Smart & Exact ready")
         if self.state is IndexState.BUILDING:
             pct = f" {round((self.progress or 0) * 100)}%" if self.progress is not None else ""
-            return f"Preparing Smart & Exact{pct}"
+            return f"{tr('Preparing Smart & Exact')}{pct}"
         if self.state is IndexState.UNAVAILABLE:
-            return "Smart & Exact need setup"
-        return "Smart & Exact need attention"
+            return tr("Smart & Exact need setup")
+        return tr("Smart & Exact need attention")
 
 
 @dataclass(slots=True)

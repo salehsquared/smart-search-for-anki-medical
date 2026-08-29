@@ -19,6 +19,16 @@ from .widgets import (
 )
 
 
+try:
+    from .i18n import tr
+except ImportError:
+    try:
+        from ui.i18n import tr
+    except ImportError:
+        def tr(text: str, **kwargs: object) -> str:
+            return text
+
+
 class InlineResultPane(QFrame):
     """Right-hand pane whose bodies are populated by the Anki host adapter.
 
@@ -47,7 +57,7 @@ class InlineResultPane(QFrame):
             QSizePolicy.Policy.Expanding,
         )
         self._expanded = False
-        self._target_title = "Preview"
+        self._target_title = tr("Preview")
         self._has_sibling_navigation = False
 
         root = QVBoxLayout(self)
@@ -58,7 +68,16 @@ class InlineResultPane(QFrame):
         self.header.setObjectName("inlinePreviewHeader")
         header_layout = QHBoxLayout(self.header)
         header_layout.setContentsMargins(6, 8, 6, 8)
-        header_layout.setSpacing(4)
+        header_layout.setSpacing(6)
+
+        self.target_label = QLabel(self.header)
+        self.target_label.setObjectName("inlinePreviewTarget")
+        self.target_label.setText(self._target_title)
+        self.target_label.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Preferred,
+        )
+        header_layout.addWidget(self.target_label)
 
         self.previous_button = QToolButton(self.header)
         self.previous_button.setObjectName("inlinePreviewNavigation")
@@ -90,7 +109,7 @@ class InlineResultPane(QFrame):
 
         self.replay_button = QToolButton(self.header)
         self.replay_button.setObjectName("inlinePreviewCardControl")
-        self.replay_button.setText("Replay")
+        self.replay_button.setText(tr("Replay"))
         self.replay_button.setAccessibleName("Replay card audio")
         self.replay_button.setEnabled(False)
         self.replay_button.clicked.connect(
@@ -100,7 +119,7 @@ class InlineResultPane(QFrame):
 
         self.flip_button = QToolButton(self.header)
         self.flip_button.setObjectName("inlinePreviewCardControl")
-        self.flip_button.setText("Answer")
+        self.flip_button.setText(tr("Answer"))
         self.flip_button.setAccessibleName("Show answer")
         self.flip_button.setEnabled(False)
         self.flip_button.clicked.connect(
@@ -111,7 +130,7 @@ class InlineResultPane(QFrame):
 
         self.card_button = QToolButton(self.header)
         self.card_button.setObjectName("inlinePreviewMode")
-        self.card_button.setText("Card")
+        self.card_button.setText(tr("Card"))
         self.card_button.setCheckable(True)
         self.card_button.setChecked(True)
         self.card_button.setAccessibleName("Show rendered card")
@@ -119,7 +138,7 @@ class InlineResultPane(QFrame):
 
         self.edit_button = QToolButton(self.header)
         self.edit_button.setObjectName("inlinePreviewMode")
-        self.edit_button.setText("Edit")
+        self.edit_button.setText(tr("Edit"))
         self.edit_button.setCheckable(True)
         self.edit_button.setAccessibleName("Edit note fields")
         header_layout.addWidget(self.edit_button)

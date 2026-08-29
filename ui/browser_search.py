@@ -7,6 +7,14 @@ from typing import Any
 import weakref
 
 from .widgets import QColor, QIcon, QLineEdit, QPainter, QPen, QPixmap, QRect, Qt
+try:
+    from .i18n import tr
+except ImportError:
+    try:
+        from ui.i18n import tr
+    except ImportError:
+        def tr(text: str, **kwargs: object) -> str:
+            return text
 
 
 ACTION_OBJECT_NAME = "smartSearchMedicalBrowserHandoff"
@@ -94,7 +102,6 @@ def install_browser_search_action(
             if existing.objectName() == ACTION_OBJECT_NAME:
                 action = existing
                 break
-
         if action is None:
             make_icon = icon_factory or _smart_search_icon
             action = line_edit.addAction(
@@ -102,9 +109,9 @@ def install_browser_search_action(
                 QLineEdit.ActionPosition.LeadingPosition,
             )
         action.setObjectName(ACTION_OBJECT_NAME)
-        action.setText(ACTION_TEXT)
-        action.setToolTip(ACTION_TOOLTIP)
-        action.setStatusTip(ACTION_TOOLTIP)
+        action.setText(tr(ACTION_TEXT))
+        action.setToolTip(tr(ACTION_TOOLTIP))
+        action.setStatusTip(tr(ACTION_TOOLTIP))
 
         browser_ref = weakref.ref(browser)
 
